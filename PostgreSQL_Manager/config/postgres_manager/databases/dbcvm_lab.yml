@@ -2,8 +2,14 @@
 # Copie este arquivo para:
 #   PostgreSQL_Manager/config/postgres_manager/databases/dbcvm_lab.yml
 #
-# Ajuste os IPs conforme suas VMs.
-# Use pgm_database_key: dbcvm_lab no survey/extra_vars.
+# Use no survey/extra_vars:
+#   pgm_database_key: dbcvm_lab
+#
+# Observação importante:
+# - db_user/db_password podem ser omitidos se você usa credential do AAP.
+# - os_user é o usuário Linux usado com become para algumas operações locais.
+# - db_user é o usuário PostgreSQL usado no psql/pg_dump/pg_restore.
+# - ansible_user normalmente vem da Machine Credential do AAP, não daqui.
 
 cm:
   postgres_manager:
@@ -12,123 +18,320 @@ cm:
         description: "Lab DBCVM PostgreSQL Manager"
         database_name: "dbcvm"
 
+        # Ambiente origem padrão quando pgm_source_env não for informado.
         default_source_env: "prd"
+
+        # Destinos padrão para sync quando pgm_target_envs não for informado.
         default_sync_targets:
           - "tu"
           - "th"
           - "fix"
+
+        # Destinos padrão para restore quando pgm_target_envs não for informado.
+        # Recomendo deixar vazio para obrigar escolha explícita no restore.
         default_restore_targets: []
 
+        # ---------------------------------------------------------------------
+        # BACKUP
+        # ---------------------------------------------------------------------
         backup:
+          # Diretório local no host de origem onde o dump é gerado antes de enviar ao CIFS.
           root_dir: "/backup/postgres_manager"
+
+          # Quantidade de jobs paralelos do pg_dump.
+          # Funciona melhor com format: directory.
           jobs: 4
+
+          # Formato do dump.
+          # Recomendado: directory
+          # Outros possíveis no PostgreSQL: custom, tar, plain
+          # Mas a automação foi validada principalmente com directory.
           format: "directory"
+
+          # Argumentos extras opcionais para pg_dump.
+          # Exemplo:
+          # extra_args: "--exclude-table-data=audit.logs"
           extra_args: ""
+
+          # Valida o dump depois do backup usando pg_restore -l.
           validate_dump: true
 
+        # ---------------------------------------------------------------------
+        # RESTORE
+        # ---------------------------------------------------------------------
         restore:
+          # Modo de restore.
+          # promote:
+          #   restaura em database_name + target_temp_suffix
+          #   depois troca:
+          #     dbcvm -> dbcvm_old
+          #     dbcvm_restoring -> dbcvm
+          #
+          # Em produção/lab atual, usar promote.
           mode: "promote"
+
+          # Sufixo da base temporária usada durante o restore.
           target_temp_suffix: "_restoring"
+
+          # Sufixo da base antiga após promote.
           old_suffix: "_old"
+
+          # Usa --no-owner no pg_restore.
+          # Recomendado quando os owners da origem não existem ou não devem ser preservados no destino.
           no_owner: true
+
+          # Usa --no-privileges no pg_restore.
+          # Recomendado quando os grants do destino serão capturados antes e reaplicados depois.
           no_privileges: true
+
+          # Quantidade de jobs paralelos do pg_restore.
           jobs: 4
+
+          # Argumentos extras opcionais para pg_restore.
+          # Exemplo:
+          # extra_args: "--disable-triggers"
           extra_args: ""
+
+          # Executa VACUUM ANALYZE depois do restore e antes do promote.
           vacuum_analyze: true
+
+          # Remove itens do TOC antes do pg_restore.
+          # Útil para não restaurar objetos ou dados que precisam ser recriados no destino.
+          #
+          # Exemplos comuns:
+          # - USER MAPPING:
+          #     evita restaurar user mapping da origem.
+          # - MATERIALIZED VIEW DATA:
+          #     evita restaurar dados antigos de MV; depois a automação executa REFRESH.
           exclude_toc_patterns:
             - "USER MAPPING"
             - "MATERIALIZED VIEW DATA public mv_search_companys"
             - "MATERIALIZED VIEW DATA public mv_company_balance_guide"
 
+        # ---------------------------------------------------------------------
+        # GRANTS
+        # ---------------------------------------------------------------------
         grants:
+          # Captura grants do banco destino antes do restore.
+          # Isso preserva permissões específicas do ambiente.
           capture_before_restore: true
+
+          # Reaplica os grants capturados na base restaurada antes do promote.
           apply_after_restore: true
+
+          # Se true, falha o restore se a reaplicação de grants falhar.
+          # Se false, registra aviso e segue.
+          #
+          # No seu lab usamos false porque alguns grants podem ser reaplicados parcialmente.
           fail_on_apply_error: false
 
+        # ---------------------------------------------------------------------
+        # MASKING / SCRAMBLE DE DADOS
+        # ---------------------------------------------------------------------
         masking:
+          # Habilita ou desabilita mascaramento para este banco.
           enabled: true
+
+          # Se true, qualquer erro no mascaramento falha o restore e impede promote.
+          # Recomendado true para evitar promover dados produtivos sem mascaramento.
           fail_on_error: true
+
+          # Ambientes onde o mascaramento pode rodar.
+          # Se a lista ficar vazia, roda em qualquer ambiente que não esteja protegido.
           run_on_envs:
-            - tu
-            - ti
-            - th
-            - fix
+            - "tu"
+            - "ti"
+            - "th"
+            - "fix"
+            - "hml"
+
+          # Ambientes onde o mascaramento nunca deve rodar.
           protected_envs:
-            - prd
+            - "prd"
+            - "prod"
+            - "producao"
+
+          # Lista de scripts de mascaramento.
+          # Cada item:
+          # - file: arquivo dentro de roles/postgres_manager/files/
+          # - function: função criada pelo script
+          # - execute_function: se true, executa SELECT function();
           scripts:
             - name: "dbcvm_lab_scramble"
               file: "masking/fc_dbcvm_lab_scramble_database.sql"
               function: "public.fc_dbcvm_lab_scramble_database"
               execute_function: true
 
+            # Exemplo futuro:
+            # - name: "valemobi_scramble"
+            #   file: "masking/fc_valemobi_scramble_database.sql"
+            #   function: "public.fc_valemobi_scramble_database"
+            #   execute_function: true
+
+            # Exemplo futuro:
+            # - name: "core_scramble"
+            #   file: "masking/fc_core_scramble_database.sql"
+            #   function: "public.fc_core_scramble_database"
+            #   execute_function: true
+
+        # ---------------------------------------------------------------------
+        # DBLINK / FOREIGN SERVER / USER MAPPING
+        # ---------------------------------------------------------------------
         dblink:
+          # Habilita configuração de foreign server/user mapping.
           enabled: true
+
+          # Nome do foreign server no PostgreSQL.
           server_name: "remote_valemobi"
+
+          # Os campos abaixo indicam quais variáveis/credentials do AAP serão usadas
+          # para montar o foreign server e/ou conexão dblink.
           dbname_var: "dblink_dbname"
           host_var: "dblink_host"
           port_var: "dblink_port"
           user_var: "dblink_user"
           password_var: "dblink_password"
-          # Use estes dois campos depois de aplicar a melhoria connect_before_refresh na task de refresh.
+
+          # Se true, antes do refresh das materialized views a automação abre
+          # uma conexão temporária usando dblink_connect_u().
+          #
+          # Necessário quando alguma MV usa:
+          #   dblink('myconn', 'select ...')
           connect_before_refresh: true
+
+          # Nome da conexão temporária usada no dblink.
           connection_name: "myconn"
 
+        # ---------------------------------------------------------------------
+        # MATERIALIZED VIEWS
+        # ---------------------------------------------------------------------
         materialized_views:
+          # Habilita refresh de materialized views depois do restore.
           refresh_enabled: true
+
+          # Se true, tenta atualizar todas as MVs encontradas em pg_matviews.
+          # Se false, atualiza somente a lista em items.
           refresh_all: false
+
+          # Lista explícita de MVs para refresh.
           items:
             - schema: "public"
               name: "mv_search_companys"
               concurrently: false
+
             - schema: "public"
               name: "mv_company_balance_guide"
               concurrently: false
 
+        # ---------------------------------------------------------------------
+        # USUÁRIOS / LOCK DURANTE PROMOTE
+        # ---------------------------------------------------------------------
         users:
+          # Usuários do banco que serão bloqueados antes do promote.
+          # Útil para evitar conexões da aplicação durante a troca das bases.
           lock_before_promote:
             - "svc_dbcvm"
+
+          # Usuários desbloqueados após promote.
           unlock_after_promote:
             - "svc_dbcvm"
 
+        # ---------------------------------------------------------------------
+        # VALIDAÇÕES
+        # ---------------------------------------------------------------------
         validations:
+          # Habilita queries de validação depois do restore/promote.
           enabled: true
+
+          # Arquivos SQL no projeto.
+          # Normalmente ficam em:
+          #   PostgreSQL_Manager/queries/
           queries:
             - "queries/total.sql"
             - "queries/total-by-table.sql"
 
+        # ---------------------------------------------------------------------
+        # HOSTS POR AMBIENTE
+        # ---------------------------------------------------------------------
         hosts_env_sync:
           prd:
             - name: "prd-dbcvm-01"
               ansible_host: "192.168.122.165"
+
+              # Porta SSH. Se não usar, o padrão será 22 ou o da Machine Credential/inventory.
+              ansible_port: 22
+
+              # Usuário SSH.
+              # Normalmente vem da Machine Credential do AAP.
+              # Só use aqui se a role estiver preparada para repassar ansible_user no add_host.
+              # ansible_user: "ansible"
+
+              # Nome da base neste host.
               database_name: "dbcvm"
+
+              # Porta do PostgreSQL.
               port: 5432
+
+              # Host usado pelo psql/pg_dump/pg_restore a partir do próprio servidor.
+              # Normalmente 127.0.0.1.
               db_host: "127.0.0.1"
+
+              # Usuário Linux usado com become para operações locais.
+              os_user: "postgres"
+
+              # Usuário PostgreSQL.
+              # Pode ser omitido para usar pgm_default_db_user/databases_user da credential.
+              db_user: "postgres"
+
+              # Senha PostgreSQL.
+              # Recomendo NÃO colocar senha aqui; usar credential do AAP.
+              # Se deixar vazio, usa pgm_db_password/databases_password.
+              db_password: ""
+
+              # Define se este host pode ser origem de backup/sync.
               source: true
+
+              # Habilita/desabilita este host no planejamento.
               enabled: true
 
           tu:
             - name: "tu-dbcvm-01"
               ansible_host: "192.168.122.34"
+              ansible_port: 22
+              # ansible_user: "ansible"
               database_name: "dbcvm"
               port: 5432
               db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              db_password: ""
               source: true
               enabled: true
 
           th:
             - name: "th-dbcvm-01"
               ansible_host: "192.168.122.70"
+              ansible_port: 22
+              # ansible_user: "ansible"
               database_name: "dbcvm"
               port: 5432
               db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              db_password: ""
               source: true
               enabled: true
 
           fix:
             - name: "fix-dbcvm-01"
               ansible_host: "192.168.122.33"
+              ansible_port: 22
+              # ansible_user: "ansible"
               database_name: "dbcvm"
               port: 5432
               db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              db_password: ""
               source: true
               enabled: true
