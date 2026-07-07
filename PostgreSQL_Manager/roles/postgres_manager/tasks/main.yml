@@ -1,0 +1,29 @@
+---
+- name: Definir fase efetiva da role
+  ansible.builtin.set_fact:
+    pgm_effective_phase: "{{ pgm_phase | default('controller') | string | lower }}"
+
+- name: Validar fase solicitada
+  ansible.builtin.assert:
+    that:
+      - pgm_effective_phase in ['controller', 'backup', 'restore', 'report']
+    fail_msg: >-
+      Fase inválida para postgres_manager: {{ pgm_effective_phase }}.
+      Valores aceitos: controller, backup, restore, report.
+    success_msg: "Fase postgres_manager: {{ pgm_effective_phase }}."
+
+- name: Executar controller
+  ansible.builtin.include_tasks: controller.yml
+  when: pgm_effective_phase == 'controller'
+
+- name: Executar backup
+  ansible.builtin.include_tasks: backup.yml
+  when: pgm_effective_phase == 'backup'
+
+- name: Executar restore
+  ansible.builtin.include_tasks: restore.yml
+  when: pgm_effective_phase == 'restore'
+
+- name: Executar report
+  ansible.builtin.include_tasks: report.yml
+  when: pgm_effective_phase == 'report'

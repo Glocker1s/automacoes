@@ -1,0 +1,945 @@
+---
+- name: Restore | Normalizar configuração carregada no host dinâmico
+  ansible.builtin.set_fact:
+    pgm_db_cfg: "{{ pgm_db_cfg | from_yaml if pgm_db_cfg is string else pgm_db_cfg }}"
+
+- name: Restore | Inicializar status do restore
+  ansible.builtin.set_fact:
+    pgm_host_failed: false
+    pgm_host_warning: false
+    pgm_host_error_msg: ""
+    pgm_host_failed_task: ""
+    pgm_host_status: "EM EXECUÇÃO"
+    pgm_host_action: "restore"
+    pgm_host_artifacts: []
+    pgm_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    pgm_restore_dir_root: "{{ pgm_restore_root_dir }}"
+    pgm_restore_jobs: "{{ (pgm_db_cfg.restore.jobs | default(pgm_default_jobs)) | int }}"
+    pgm_effective_restore_mode: "{{ pgm_db_cfg.restore.mode | default(pgm_restore_mode) }}"
+    pgm_target_temp_db: "{{ pgm_database_name ~ (pgm_db_cfg.restore.target_temp_suffix | default(pgm_restore_temp_suffix)) }}"
+    pgm_target_old_db: "{{ pgm_database_name ~ (pgm_db_cfg.restore.old_suffix | default(pgm_restore_old_suffix)) }}"
+    pgm_restore_log_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    pgm_host_log_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    pgm_grants_file: "{{ pgm_restore_root_dir }}/grants_before_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.sql"
+    pgm_restore_list_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.lst"
+
+- name: Restore | Bloco de restore controlado
+  block:
+    - name: Restore | Criar diretório de restore
+      ansible.builtin.file:
+        path: "{{ pgm_restore_dir_root }}"
+        state: directory
+        mode: "0775"
+      become: true
+      become_user: root
+
+    - name: Restore | Inicializar log do restore
+      ansible.builtin.copy:
+        dest: "{{ pgm_restore_log_file }}"
+        mode: "0640"
+        content: |
+          PostgreSQL Manager - Restore
+          Host: {{ inventory_hostname }}
+          Ambiente: {{ pgm_env }}
+          Banco destino: {{ pgm_database_name }}
+          Modo: {{ pgm_effective_restore_mode }}
+          Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
+          Início: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+
+      become: true
+      become_user: root
+
+    - name: Restore | Resolver dump para restore via CIFS
+      when: pgm_cifs_enabled | bool
+      block:
+        - name: Restore | Resolver endereço CIFS restore
+          ansible.builtin.set_fact:
+            _pgm_cifs_server: "{{ (pgm_cifs_address | default({})).get(pgm_cifs_label | default('') | lower, '') }}"
+
+        - name: Restore | Validar endereço CIFS restore
+          ansible.builtin.fail:
+            msg: "CIFS não mapeado: pgm_cifs_label={{ pgm_cifs_label }}"
+          when: _pgm_cifs_server | length == 0
+
+        - name: Restore | Criar diretório de montagem CIFS restore
+          ansible.builtin.file:
+            path: "{{ pgm_cifs_mount_dir }}"
+            state: directory
+            mode: "0755"
+          become: true
+
+        - name: Restore | Criar arquivo temporário de senha CIFS restore
+          ansible.builtin.copy:
+            dest: "{{ pgm_cifs_password_file }}"
+            content: "{{ ansible_password | default('') }}"
+            mode: "0600"
+          become: true
+          no_log: true
+
+        - name: Restore | Montar CIFS restore
+          ansible.builtin.shell: |
+            set -euo pipefail
+            if mountpoint -q "{{ pgm_cifs_mount_dir }}"; then
+              umount "{{ pgm_cifs_mount_dir }}" || true
+            fi
+            mount -t cifs "{{ _pgm_cifs_server }}" "{{ pgm_cifs_mount_dir }}" \
+              -o username="{{ ansible_user }}",password="$(cat {{ pgm_cifs_password_file }})",domain="{{ pgm_cifs_domain }}",rw,vers="{{ pgm_cifs_vers }}"
+          args:
+            executable: /bin/bash
+          become: true
+          no_log: true
+
+        - name: Restore | Resolver nome efetivo do dump
+          ansible.builtin.shell: |
+            set -euo pipefail
+            CIFS_DIR="{{ pgm_cifs_mount_dir }}{{ pgm_cifs_dump_path | regex_replace('/$', '') }}"
+            if [ "{{ pgm_restore_dump_name | default('latest') }}" = "latest" ]; then
+              MANIFEST="$CIFS_DIR/{{ pgm_latest_manifest_name }}"
+              if [ ! -s "$MANIFEST" ]; then
+                echo "Manifest latest não encontrado: $MANIFEST" >&2
+                exit 10
+              fi
+              cat "$MANIFEST" | head -n1
+            else
+              echo "{{ pgm_restore_dump_name }}"
+            fi
+          args:
+            executable: /bin/bash
+          register: _pgm_restore_dump_name_resolved
+          changed_when: false
+          become: true
+
+        - name: Restore | Definir paths do dump restore
+          ansible.builtin.set_fact:
+            pgm_effective_dump_name: "{{ _pgm_restore_dump_name_resolved.stdout | trim }}"
+            pgm_effective_dump_dir: "{{ pgm_restore_dir_root }}/{{ _pgm_restore_dump_name_resolved.stdout | trim }}"
+
+        - name: Restore | Copiar dump do CIFS para destino
+          ansible.builtin.shell: |
+            set -euo pipefail
+            CIFS_DIR="{{ pgm_cifs_mount_dir }}{{ pgm_cifs_dump_path | regex_replace('/$', '') }}"
+            SRC="$CIFS_DIR/{{ pgm_effective_dump_name }}"
+            DST="{{ pgm_effective_dump_dir }}"
+            if [ ! -d "$SRC" ]; then
+              echo "Dump não encontrado no CIFS: $SRC" >&2
+              exit 11
+            fi
+            rm -rf "$DST"
+            cp -a "$SRC" "{{ pgm_restore_dir_root }}/"
+            echo "Dump copiado de $SRC para $DST" >> "{{ pgm_restore_log_file }}"
+          args:
+            executable: /bin/bash
+          become: true
+
+      rescue:
+        - name: Restore | Registrar falha ao resolver/copiar dump CIFS
+          ansible.builtin.set_fact:
+            pgm_host_failed: true
+            pgm_host_failed_task: "Resolver/copiar dump do CIFS"
+            pgm_host_error_msg: >-
+              {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Falha ao resolver/copiar dump do CIFS.')) }}
+
+      always:
+        - name: Restore | Desmontar CIFS restore
+          ansible.builtin.shell: "umount {{ pgm_cifs_mount_dir }} || true"
+          become: true
+          changed_when: false
+          failed_when: false
+
+        - name: Restore | Remover senha temporária CIFS restore
+          ansible.builtin.file:
+            path: "{{ pgm_cifs_password_file }}"
+            state: absent
+          become: true
+          failed_when: false
+          no_log: true
+
+    - name: Restore | Resolver dump local quando CIFS desabilitado
+      ansible.builtin.set_fact:
+        pgm_effective_dump_name: "{{ pgm_restore_dump_name if pgm_restore_dump_name != 'latest' else pgm_dump_basename }}"
+        pgm_effective_dump_dir: "{{ pgm_restore_dir_root }}/{{ pgm_restore_dump_name if pgm_restore_dump_name != 'latest' else pgm_dump_basename }}"
+      when: not (pgm_cifs_enabled | bool)
+
+    - name: Restore | Validar diretório de dump final
+      ansible.builtin.stat:
+        path: "{{ pgm_effective_dump_dir }}/toc.dat"
+      register: _pgm_toc_stat
+      become: true
+      become_user: root
+      failed_when: false
+
+    - name: Restore | Registrar falha quando toc.dat não existir
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validar toc.dat"
+        pgm_host_error_msg: "toc.dat não encontrado em {{ pgm_effective_dump_dir }}. O dump não é válido ou não foi copiado."
+      when: not (_pgm_toc_stat.stat.exists | default(false))
+
+    - name: Restore | Capturar grants do destino antes do restore
+      ansible.builtin.template:
+        src: grant_capture.sql.j2
+        dest: "{{ pgm_restore_dir_root }}/grant_capture_{{ pgm_database_name }}.sql"
+        mode: "0640"
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.grants.capture_before_restore | default(true) | bool
+
+    - name: Restore | Executar captura de grants
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Capturando grants atuais do destino" >> "{{ pgm_restore_log_file }}"
+        psql -X -w \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d "{{ pgm_database_name }}" \
+          -f "{{ pgm_restore_dir_root }}/grant_capture_{{ pgm_database_name }}.sql" \
+          -o "{{ pgm_grants_file }}" >> "{{ pgm_restore_log_file }}" 2>&1
+        rc=$?
+        echo "[INFO] Captura de grants rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_capture_grants
+      failed_when: false
+      changed_when: false
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.grants.capture_before_restore | default(true) | bool
+
+    - name: Restore | Marcar aviso se captura de grants falhar
+      ansible.builtin.set_fact:
+        pgm_host_warning: true
+      when:
+        - _pgm_capture_grants is defined
+        - _pgm_capture_grants.rc is defined
+        - _pgm_capture_grants.rc | int != 0
+
+    - name: Restore | Definir banco efetivo de restore
+      ansible.builtin.set_fact:
+        pgm_restore_target_db: >-
+          {{ pgm_database_name if (pgm_effective_restore_mode == 'drop_in_place') else pgm_target_temp_db }}
+      when: not (pgm_host_failed | bool)
+
+    - name: Restore | Preparar base destino para restore
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Preparando base {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+        psql -X -w -h "{{ pgm_db_host | default(pgm_default_db_host) }}" -p "{{ pgm_db_port | default(pgm_default_port) }}" -U "{{ pgm_db_user | default(pgm_default_db_user) }}" -d postgres <<SQL >> "{{ pgm_restore_log_file }}" 2>&1
+        SELECT pg_terminate_backend(pid)
+          FROM pg_stat_activity
+         WHERE datname IN ('{{ pgm_restore_target_db }}'{% if pgm_effective_restore_mode == 'drop_in_place' %}, '{{ pgm_database_name }}'{% endif %});
+        DROP DATABASE IF EXISTS "{{ pgm_restore_target_db }}";
+        {% if pgm_effective_restore_mode == 'drop_in_place' %}
+        DROP DATABASE IF EXISTS "{{ pgm_database_name }}";
+        {% endif %}
+        CREATE DATABASE "{{ pgm_restore_target_db }}";
+        SQL
+        rc=$?
+        echo "[INFO] Preparar base rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_prepare_db
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when: not (pgm_host_failed | bool)
+
+    - name: Restore | Registrar falha ao preparar base
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Preparar base destino"
+        pgm_host_error_msg: "Falha ao preparar base {{ pgm_restore_target_db }}. rc={{ _pgm_prepare_db.rc }}."
+      when:
+        - _pgm_prepare_db is defined
+        - _pgm_prepare_db.rc is defined
+        - _pgm_prepare_db.rc | int != 0
+
+    - name: Restore | Preparar lista filtrada do pg_restore
+      ansible.builtin.shell: |
+        set -o pipefail
+        RAW="{{ pgm_restore_list_file }}.raw"
+        FILTERED="{{ pgm_restore_list_file }}"
+        pg_restore -l "{{ pgm_effective_dump_dir }}" > "$RAW" 2>> "{{ pgm_restore_log_file }}"
+        cp "$RAW" "$FILTERED"
+        while IFS= read -r pattern; do
+          [ -z "$pattern" ] && continue
+          grep -F -v "$pattern" "$FILTERED" > "$FILTERED.tmp" || true
+          mv "$FILTERED.tmp" "$FILTERED"
+        done <<'PATTERNS'
+        {% for pattern in pgm_db_cfg.restore.exclude_toc_patterns | default([]) %}
+        {{ pattern }}
+        {% endfor %}
+        PATTERNS
+        echo "[INFO] Lista de restore gerada em $FILTERED" >> "{{ pgm_restore_log_file }}"
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+      register: _pgm_prepare_list
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when: not (pgm_host_failed | bool)
+
+    - name: Restore | Registrar falha ao preparar lista
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Preparar lista pg_restore"
+        pgm_host_error_msg: "Falha ao preparar lista filtrada do pg_restore. rc={{ _pgm_prepare_list.rc }}."
+      when:
+        - _pgm_prepare_list is defined
+        - _pgm_prepare_list.rc is defined
+        - _pgm_prepare_list.rc | int != 0
+
+    - name: Restore | Executar pg_restore
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Iniciando pg_restore em {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+        pg_restore \
+          -w \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d "{{ pgm_restore_target_db }}" \
+          -v \
+          -j "{{ pgm_restore_jobs }}" \
+          {% if pgm_db_cfg.restore.no_privileges | default(true) | bool %}-x{% endif %} \
+          {% if pgm_db_cfg.restore.no_owner | default(true) | bool %}-O{% endif %} \
+          -L "{{ pgm_restore_list_file }}" \
+          {{ pgm_db_cfg.restore.extra_args | default('') }} \
+          "{{ pgm_effective_dump_dir }}" >> "{{ pgm_restore_log_file }}" 2>&1
+        rc=$?
+        echo "[INFO] pg_restore rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_restore_exec
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when: not (pgm_host_failed | bool)
+
+    - name: Restore | Registrar falha do pg_restore
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Executar pg_restore"
+        pgm_host_error_msg: "pg_restore retornou rc={{ _pgm_restore_exec.rc }}. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_restore_exec is defined
+        - _pgm_restore_exec.rc is defined
+        - _pgm_restore_exec.rc | int != 0
+
+    - name: Restore | Reaplicar grants capturados do destino
+      ansible.builtin.shell: |
+        set -o pipefail
+        if [ -s "{{ pgm_grants_file }}" ]; then
+          echo "[INFO] Reaplicando grants de {{ pgm_grants_file }}" >> "{{ pgm_restore_log_file }}"
+          GRANTS_EFFECTIVE="{{ pgm_grants_file }}.effective"
+          sed 's/__PGM_DATABASE__/{{ pgm_restore_target_db }}/g' "{{ pgm_grants_file }}" > "$GRANTS_EFFECTIVE"
+          psql -X -w \
+            -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+            -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+            -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+            -d "{{ pgm_restore_target_db }}" \
+            -v ON_ERROR_STOP={{ '1' if pgm_db_cfg.grants.fail_on_apply_error | default(false) | bool else '0' }} \
+            -f "$GRANTS_EFFECTIVE" >> "{{ pgm_restore_log_file }}" 2>&1
+          rc=$?
+        else
+          echo "[WARN] Arquivo de grants vazio ou inexistente: {{ pgm_grants_file }}" >> "{{ pgm_restore_log_file }}"
+          rc=0
+        fi
+        echo "[INFO] Reaplicar grants rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_apply_grants
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.grants.apply_after_restore | default(true) | bool
+
+    - name: Restore | Registrar erro/aviso de grants
+      ansible.builtin.set_fact:
+        pgm_host_failed: "{{ pgm_host_failed or (pgm_db_cfg.grants.fail_on_apply_error | default(false) | bool) }}"
+        pgm_host_warning: "{{ pgm_host_warning or not (pgm_db_cfg.grants.fail_on_apply_error | default(false) | bool) }}"
+        pgm_host_failed_task: "{{ 'Reaplicar grants' if (pgm_db_cfg.grants.fail_on_apply_error | default(false) | bool) else pgm_host_failed_task }}"
+        pgm_host_error_msg: "{{ 'Falha ao reaplicar grants. rc=' ~ _pgm_apply_grants.rc if (pgm_db_cfg.grants.fail_on_apply_error | default(false) | bool) else pgm_host_error_msg }}"
+      when:
+        - _pgm_apply_grants is defined
+        - _pgm_apply_grants.rc is defined
+        - _pgm_apply_grants.rc | int != 0
+
+    - name: Masking | Resolver configuração
+      ansible.builtin.set_fact:
+        pgm_masking_enabled: "{{ pgm_db_cfg.masking.enabled | default(pgm_masking_enabled_default) | bool }}"
+        pgm_masking_fail_on_error: "{{ pgm_db_cfg.masking.fail_on_error | default(pgm_masking_fail_on_error_default) | bool }}"
+        pgm_masking_run_on_envs: "{{ pgm_db_cfg.masking.run_on_envs | default([]) | map('string') | map('lower') | list }}"
+        pgm_masking_protected_envs: "{{ pgm_db_cfg.masking.protected_envs | default(pgm_masking_protected_envs_default) | map('string') | map('lower') | list }}"
+        pgm_masking_scripts: "{{ pgm_db_cfg.masking.scripts | default([]) }}"
+      when:
+        - not (pgm_host_failed | bool)
+
+    - name: Masking | Bloquear execução em ambiente protegido
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Mascaramento em ambiente protegido"
+        pgm_host_error_msg: "Mascaramento habilitado para ambiente protegido: {{ pgm_env }}. Execução bloqueada por segurança."
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_masking_enabled | default(false) | bool
+        - pgm_env | lower in pgm_masking_protected_envs | default([])
+
+    - name: Masking | Criar diretório remoto dos scripts
+      ansible.builtin.file:
+        path: "{{ pgm_masking_remote_dir }}"
+        state: directory
+        mode: "0750"
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_masking_enabled | default(false) | bool
+        - pgm_masking_scripts | default([]) | length > 0
+        - pgm_masking_run_on_envs | default([]) | length == 0 or pgm_env | lower in pgm_masking_run_on_envs
+
+    - name: Masking | Copiar scripts para o destino
+      ansible.builtin.copy:
+        src: "{{ item.file }}"
+        dest: "{{ pgm_masking_remote_dir }}/{{ item.file | basename }}"
+        mode: "0640"
+      loop: "{{ pgm_masking_scripts | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default(item.file) }}"
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_masking_enabled | default(false) | bool
+        - pgm_masking_scripts | default([]) | length > 0
+        - pgm_masking_run_on_envs | default([]) | length == 0 or pgm_env | lower in pgm_masking_run_on_envs
+
+    - name: Masking | Executar scripts de mascaramento
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SCRIPT_FILE="{{ pgm_masking_remote_dir }}/{{ item.file | basename }}"
+        SCRIPT_NAME="{{ item.name | default(item.file | basename) }}"
+        FUNCTION_NAME="{{ item.function | default('') }}"
+        EXECUTE_FUNCTION="{{ item.execute_function | default(true) | bool }}"
+
+        echo "" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Mascaramento de dados" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Script: ${SCRIPT_NAME}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Arquivo: ${SCRIPT_FILE}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Banco alvo: {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+
+        if [ ! -s "${SCRIPT_FILE}" ]; then
+          echo "[ERROR] Script de mascaramento não encontrado ou vazio: ${SCRIPT_FILE}" >> "{{ pgm_restore_log_file }}"
+          exit 20
+        fi
+
+        echo "[INFO] Criando/atualizando função de mascaramento" >> "{{ pgm_restore_log_file }}"
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d "{{ pgm_restore_target_db }}" \
+          -f "${SCRIPT_FILE}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+        rc=$?
+        echo "[INFO] Aplicar script rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        if [ "${rc}" -ne 0 ]; then
+          exit "${rc}"
+        fi
+
+        if [ "${EXECUTE_FUNCTION}" = "True" ] || [ "${EXECUTE_FUNCTION}" = "true" ]; then
+          if [ -z "${FUNCTION_NAME}" ]; then
+            echo "[ERROR] execute_function=true, mas function não foi informada no profile." >> "{{ pgm_restore_log_file }}"
+            exit 21
+          fi
+
+          echo "[INFO] Executando função de mascaramento: ${FUNCTION_NAME}()" >> "{{ pgm_restore_log_file }}"
+          psql -X -w -v ON_ERROR_STOP=1 \
+            -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+            -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+            -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+            -d "{{ pgm_restore_target_db }}" \
+            -c "SELECT ${FUNCTION_NAME}();" >> "{{ pgm_restore_log_file }}" 2>&1
+
+          rc=$?
+          echo "[INFO] Executar função rc=${rc}" >> "{{ pgm_restore_log_file }}"
+          exit "${rc}"
+        fi
+
+        exit 0
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      loop: "{{ pgm_masking_scripts | default([]) }}"
+      loop_control:
+        label: "{{ item.name | default(item.file) }}"
+      register: _pgm_masking_exec
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_masking_enabled | default(false) | bool
+        - pgm_masking_scripts | default([]) | length > 0
+        - pgm_masking_run_on_envs | default([]) | length == 0 or pgm_env | lower in pgm_masking_run_on_envs
+
+    - name: Masking | Registrar falha/aviso de mascaramento
+      ansible.builtin.set_fact:
+        pgm_host_failed: "{{ pgm_host_failed or pgm_masking_fail_on_error }}"
+        pgm_host_warning: "{{ pgm_host_warning or not pgm_masking_fail_on_error }}"
+        pgm_host_failed_task: "{{ 'Mascaramento de dados' if pgm_masking_fail_on_error else pgm_host_failed_task }}"
+        pgm_host_error_msg: "{{ 'Falha ao executar mascaramento de dados. Verifique ' ~ pgm_restore_log_file if pgm_masking_fail_on_error else pgm_host_error_msg }}"
+      when:
+        - _pgm_masking_exec is defined
+        - _pgm_masking_exec.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+
+    - name: Restore | Configurar dblink/foreign server quando habilitado
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Configurando dblink/foreign server" >> "{{ pgm_restore_log_file }}"
+        psql -X -w -h "{{ pgm_db_host | default(pgm_default_db_host) }}" -p "{{ pgm_db_port | default(pgm_default_port) }}" -U "{{ pgm_db_user | default(pgm_default_db_user) }}" -d "{{ pgm_restore_target_db }}" <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
+        ALTER SERVER {{ pgm_db_cfg.dblink.server_name }} OPTIONS (
+          SET dbname '{{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.dbname_var | default('dblink_dbname'), default='') }}',
+          SET host '{{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.host_var | default('dblink_host'), default='') }}',
+          SET port '{{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.port_var | default('dblink_port'), default='') }}'
+        );
+        DROP USER MAPPING IF EXISTS FOR "postgres" SERVER {{ pgm_db_cfg.dblink.server_name }};
+        CREATE USER MAPPING FOR "postgres" SERVER {{ pgm_db_cfg.dblink.server_name }} OPTIONS (
+          user '{{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.user_var | default('dblink_user'), default='') }}',
+          password '{{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.password_var | default('dblink_password'), default='') }}'
+        );
+        SQL
+        rc=$?
+        echo "[INFO] Configurar dblink rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_dblink
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.dblink.enabled | default(false) | bool
+
+    - name: Restore | Registrar falha no dblink
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Configurar dblink"
+        pgm_host_error_msg: "Falha ao configurar dblink/foreign server. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_dblink is defined
+        - _pgm_dblink.rc is defined
+        - _pgm_dblink.rc | int != 0
+
+    - name: Restore | Refresh das materialized views
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        echo "" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Refresh materialized views" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Database alvo: {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] connect_before_refresh={{ pgm_db_cfg.dblink.connect_before_refresh | default(false) | bool }}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] connection_name={{ pgm_db_cfg.dblink.connection_name | default('myconn') }}" >> "{{ pgm_restore_log_file }}"
+
+        SQL_FILE="{{ pgm_restore_dir_root }}/refresh_mviews_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ pgm_job_id }}.sql"
+
+        cat > "${SQL_FILE}" <<'SQL'
+        \set ON_ERROR_STOP on
+
+        {% if pgm_db_cfg.dblink.connect_before_refresh | default(false) | bool %}
+        DO $$
+        BEGIN
+          IF '{{ pgm_db_cfg.dblink.connection_name | default("myconn") }}' = ANY(dblink_get_connections()) THEN
+            PERFORM dblink_disconnect('{{ pgm_db_cfg.dblink.connection_name | default("myconn") }}');
+          END IF;
+        END $$;
+
+        SELECT dblink_connect_u(
+          '{{ pgm_db_cfg.dblink.connection_name | default("myconn") }}',
+          'dbname={{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.dbname_var | default('dblink_dbname'), default='') }} port={{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.port_var | default('dblink_port'), default='5432') }} host={{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.host_var | default('dblink_host'), default='') }} user={{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.user_var | default('dblink_user'), default='') }} password={{ lookup('ansible.builtin.vars', pgm_db_cfg.dblink.password_var | default('dblink_password'), default='') }}'
+        );
+        {% endif %}
+
+        {% if pgm_db_cfg.materialized_views.refresh_all | default(false) | bool %}
+        DO $$
+        DECLARE r record;
+        BEGIN
+          FOR r IN
+            SELECT schemaname, matviewname
+            FROM pg_matviews
+            WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+          LOOP
+            RAISE NOTICE 'Refreshing %.%', r.schemaname, r.matviewname;
+            EXECUTE format('REFRESH MATERIALIZED VIEW %I.%I', r.schemaname, r.matviewname);
+          END LOOP;
+        END $$;
+        {% else %}
+        {% for mv in pgm_db_cfg.materialized_views['items'] | default([]) %}
+        \echo Refreshing {{ mv.schema | default('public') }}.{{ mv.name }}
+        REFRESH MATERIALIZED VIEW {{ 'CONCURRENTLY' if mv.concurrently | default(false) | bool else '' }} "{{ mv.schema | default('public') }}"."{{ mv.name }}";
+        {% endfor %}
+        {% endif %}
+
+        {% if pgm_db_cfg.dblink.connect_before_refresh | default(false) | bool %}
+        SELECT dblink_disconnect('{{ pgm_db_cfg.dblink.connection_name | default("myconn") }}');
+        {% endif %}
+        SQL
+
+        echo "[INFO] SQL de refresh gerado em ${SQL_FILE}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Iniciando execução do refresh" >> "{{ pgm_restore_log_file }}"
+
+        psql -X -w \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d "{{ pgm_restore_target_db }}" \
+          -f "${SQL_FILE}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+        rc=$?
+        echo "[INFO] Refresh materialized views rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_mviews
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      no_log: true
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.materialized_views.refresh_enabled | default(false) | bool
+
+    - name: Restore | Registrar falha no refresh de materialized views
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Refresh materialized views"
+        pgm_host_error_msg: "Falha ao atualizar materialized views. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_mviews is defined
+        - _pgm_mviews.rc is defined
+        - _pgm_mviews.rc | int != 0
+
+    - name: Restore | Executar VACUUM ANALYZE
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Executando VACUUM VERBOSE ANALYZE" >> "{{ pgm_restore_log_file }}"
+        psql -X -w -h "{{ pgm_db_host | default(pgm_default_db_host) }}" -p "{{ pgm_db_port | default(pgm_default_port) }}" -U "{{ pgm_db_user | default(pgm_default_db_user) }}" -d "{{ pgm_restore_target_db }}" -c 'VACUUM VERBOSE ANALYZE;' >> "{{ pgm_restore_log_file }}" 2>&1
+        rc=$?
+        echo "[INFO] VACUUM rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_vacuum
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.restore.vacuum_analyze | default(true) | bool
+
+    - name: Restore | Registrar aviso no VACUUM
+      ansible.builtin.set_fact:
+        pgm_host_warning: true
+      when:
+        - _pgm_vacuum is defined
+        - _pgm_vacuum.rc is defined
+        - _pgm_vacuum.rc | int != 0
+
+    - name: Restore | Inicializar controle de lock de usuários
+      ansible.builtin.set_fact:
+        pgm_users_locked: false
+
+    - name: Restore | Bloquear usuários antes da promoção
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Bloqueando usuários antes da promoção" >> "{{ pgm_restore_log_file }}"
+
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d postgres <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
+        {% for u in pgm_db_cfg.users.lock_before_promote | default([]) %}
+        ALTER USER "{{ u }}" NOLOGIN;
+        {% endfor %}
+        SQL
+
+        rc=$?
+        echo "[INFO] Bloquear usuários rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_lock_users
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'promote'
+        - pgm_db_cfg.users.lock_before_promote | default([]) | length > 0
+
+    - name: Restore | Marcar usuários bloqueados
+      ansible.builtin.set_fact:
+        pgm_users_locked: true
+      when:
+        - _pgm_lock_users is defined
+        - _pgm_lock_users.rc is defined
+        - _pgm_lock_users.rc | int == 0
+
+    - name: Restore | Registrar falha ao bloquear usuários
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Bloquear usuários antes da promoção"
+        pgm_host_error_msg: "Falha ao bloquear usuários antes da promoção. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_lock_users is defined
+        - _pgm_lock_users.rc is defined
+        - _pgm_lock_users.rc | int != 0
+
+    - name: Restore | Promover base restaurada
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Promovendo {{ pgm_restore_target_db }} para {{ pgm_database_name }}" >> "{{ pgm_restore_log_file }}"
+        PSQL="psql -X -w -h {{ pgm_db_host | default(pgm_default_db_host) }} -p {{ pgm_db_port | default(pgm_default_port) }} -U {{ pgm_db_user | default(pgm_default_db_user) }} -d postgres"
+        $PSQL -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ('{{ pgm_database_name }}','{{ pgm_target_old_db }}','{{ pgm_restore_target_db }}');" >> "{{ pgm_restore_log_file }}" 2>&1
+        $PSQL -c "DROP DATABASE IF EXISTS \"{{ pgm_target_old_db }}\";" >> "{{ pgm_restore_log_file }}" 2>&1
+        if $PSQL -At -c "SELECT 1 FROM pg_database WHERE datname='{{ pgm_database_name }}';" | grep -q 1; then
+          $PSQL -c "ALTER DATABASE \"{{ pgm_database_name }}\" RENAME TO \"{{ pgm_target_old_db }}\";" >> "{{ pgm_restore_log_file }}" 2>&1
+        fi
+        $PSQL -c "ALTER DATABASE \"{{ pgm_restore_target_db }}\" RENAME TO \"{{ pgm_database_name }}\";" >> "{{ pgm_restore_log_file }}" 2>&1
+        rc=$?
+        echo "[INFO] Promover base rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_promote
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'promote'
+
+    - name: Restore | Registrar falha na promoção
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Promover base restaurada"
+        pgm_host_error_msg: "Falha ao promover {{ pgm_restore_target_db }} para {{ pgm_database_name }}."
+      when:
+        - _pgm_promote is defined
+        - _pgm_promote.rc is defined
+        - _pgm_promote.rc | int != 0
+
+    - name: Restore | Desbloquear usuários depois da promoção
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Desbloqueando usuários depois da promoção" >> "{{ pgm_restore_log_file }}"
+
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d postgres <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
+        {% for u in pgm_db_cfg.users.unlock_after_promote | default([]) %}
+        ALTER USER "{{ u }}" LOGIN;
+        {% endfor %}
+        SQL
+
+        rc=$?
+        echo "[INFO] Desbloquear usuários rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_unlock_users
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - pgm_users_locked | default(false) | bool
+        - pgm_effective_restore_mode == 'promote'
+        - pgm_db_cfg.users.unlock_after_promote | default([]) | length > 0
+
+    - name: Restore | Registrar falha ao desbloquear usuários
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Desbloquear usuários depois da promoção"
+        pgm_host_error_msg: "Falha ao desbloquear usuários depois da promoção. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_unlock_users is defined
+        - _pgm_unlock_users.rc is defined
+        - _pgm_unlock_users.rc | int != 0
+
+    - name: Restore | Executar validações SQL
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Executando validação {{ item }}" >> "{{ pgm_restore_log_file }}"
+        cat <<'SQL' | psql -X -w -h "{{ pgm_db_host | default(pgm_default_db_host) }}" -p "{{ pgm_db_port | default(pgm_default_port) }}" -U "{{ pgm_db_user | default(pgm_default_db_user) }}" -d "{{ pgm_database_name }}" >> "{{ pgm_restore_log_file }}" 2>&1
+        {{ lookup('ansible.builtin.file', item) }}
+        SQL
+        rc=$?
+        echo "[INFO] Validação {{ item }} rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      loop: "{{ pgm_db_cfg.validations.queries | default([]) }}"
+      register: _pgm_validations
+      failed_when: false
+      changed_when: false
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.validations.enabled | default(false) | bool
+
+    - name: Restore | Registrar falha de validação
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validações SQL"
+        pgm_host_error_msg: "Uma ou mais validações SQL falharam. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_validations is defined
+        - _pgm_validations.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+
+  rescue:
+    - name: Restore | Marcar falha inesperada do restore
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+        pgm_host_error_msg: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result.stdout
+            | default('Falha não detalhada durante o restore.')))
+          }}
+
+  always:
+    - name: Restore | Registrar falha capturada no log
+      ansible.builtin.shell: |
+        cat <<'EOF' >> "{{ pgm_restore_log_file }}"
+
+        {% if pgm_host_failed | default(false) | bool %}
+        FALHA CAPTURADA
+        Task: {{ pgm_host_failed_task | default('desconhecida') }}
+        Mensagem: {{ pgm_host_error_msg | default('') }}
+        {% endif %}
+        Fim: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+        Status: {{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}
+        EOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: root
+      failed_when: false
+      changed_when: false
+
+    - name: Restore | Limpar lista temporária do restore
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ pgm_restore_list_file }}"
+        - "{{ pgm_restore_list_file }}.raw"
+      become: true
+      become_user: root
+      failed_when: false
+
+    - name: Restore | Remover dump remoto pós-restore quando configurado
+      ansible.builtin.file:
+        path: "{{ pgm_effective_dump_dir | default('') }}"
+        state: absent
+      become: true
+      become_user: root
+      failed_when: false
+      when:
+        - pgm_cleanup_remote_dump_after_restore | bool
+        - pgm_effective_dump_dir is defined
+        - pgm_effective_dump_dir | length > 0
+
+    - name: Restore | Publicar status final do restore no host
+      ansible.builtin.set_fact:
+        pgm_host_status: "{{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}"
+        pgm_host_artifacts:
+          - "{{ pgm_restore_log_file }}"
+          - "{{ pgm_grants_file }}"
+        pgm_host_summary:
+          env: "{{ pgm_env }}"
+          host: "{{ inventory_hostname }}"
+          database: "{{ pgm_database_name }}"
+          action: "restore"
+          dump: "{{ pgm_effective_dump_name | default(pgm_restore_dump_name) }}"
+          dump_dir: "{{ pgm_effective_dump_dir | default('') }}"
+          log_file: "{{ pgm_restore_log_file }}"
+          grants_file: "{{ pgm_grants_file }}"
+
+    - name: Masking | Remover scripts temporários do host destino
+      ansible.builtin.file:
+        path: "{{ pgm_masking_remote_dir }}"
+        state: absent
+      become: true
+      become_user: root
+      failed_when: false
+      when:
+        - pgm_masking_cleanup_remote_files | default(true) | bool
+        - pgm_masking_remote_dir is defined
+        - pgm_masking_remote_dir | string | length > 0

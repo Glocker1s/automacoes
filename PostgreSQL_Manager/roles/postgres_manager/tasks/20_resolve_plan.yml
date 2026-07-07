@@ -1,0 +1,177 @@
+---
+- name: Resolver source_env e target_envs efetivos
+  ansible.builtin.set_fact:
+    pgm_source_env_effective: >-
+      {{
+        pgm_source_env_normalized
+        if (pgm_source_env_normalized | length > 0)
+        else (pgm_db_cfg.default_source_env | default('prd') | string | lower)
+      }}
+    pgm_target_envs_effective: >-
+      {{
+        pgm_selected_target_envs
+        if (pgm_selected_target_envs | length > 0)
+        else (
+          pgm_db_cfg.default_restore_targets | default([]) | map('string') | map('lower') | list
+          if (pgm_action_normalized == 'restore' and (pgm_db_cfg.default_restore_targets | default([]) | length > 0))
+          else (
+            pgm_db_cfg.default_sync_targets | default([]) | map('string') | map('lower') | list
+            if pgm_action_normalized in ['restore', 'sync']
+            else []
+          )
+        )
+      }}
+
+- name: Normalizar todos os hosts do arquivo do banco
+  ansible.builtin.set_fact:
+    _pgm_all_hosts_json: >-
+      {%- set out = [] -%}
+      {%- for env_name, raw_hosts in (pgm_db_cfg.hosts_env_sync | default({})).items() -%}
+        {%- set env_l = env_name | string | lower | trim -%}
+        {%- if raw_hosts is string -%}
+          {%- set item = {'name': env_l ~ '-' ~ pgm_database_key_normalized ~ '-01', 'ansible_host': raw_hosts, 'env': env_l} -%}
+          {%- set _ = out.append(item) -%}
+        {%- elif raw_hosts is mapping -%}
+          {%- for h_name, h_val in raw_hosts.items() -%}
+            {%- if h_val is mapping -%}
+              {%- set item = h_val | combine({'name': h_name, 'env': env_l}, recursive=True) -%}
+              {%- if item.ansible_host is not defined -%}
+                {%- set item = item | combine({'ansible_host': h_name}, recursive=True) -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set item = {'name': h_name, 'ansible_host': h_val, 'env': env_l} -%}
+            {%- endif -%}
+            {%- set _ = out.append(item) -%}
+          {%- endfor -%}
+        {%- elif raw_hosts is sequence -%}
+          {%- for h in raw_hosts -%}
+            {%- if h is string -%}
+              {%- set item = {'name': h, 'ansible_host': h, 'env': env_l} -%}
+            {%- elif h is mapping -%}
+              {%- set item = h | combine({'env': env_l}, recursive=True) -%}
+              {%- if item.name is not defined and item.ansible_host is defined -%}
+                {%- set item = item | combine({'name': item.ansible_host}, recursive=True) -%}
+              {%- endif -%}
+              {%- if item.ansible_host is not defined and item.name is defined -%}
+                {%- set item = item | combine({'ansible_host': item.name}, recursive=True) -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set item = {} -%}
+            {%- endif -%}
+            {%- if item | length > 0 -%}
+              {%- set _ = out.append(item) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar todos os hosts normalizados
+  ansible.builtin.set_fact:
+    pgm_all_configured_hosts: "{{ _pgm_all_hosts_json | from_json }}"
+
+- name: Resolver candidatos de origem
+  ansible.builtin.set_fact:
+    _pgm_source_candidates_json: >-
+      {%- set out = [] -%}
+      {%- for h in pgm_all_configured_hosts -%}
+        {%- set env_l = h.env | string | lower -%}
+        {%- set name_l = h.name | default('') | string | lower -%}
+        {%- set ip_l = h.ansible_host | default('') | string | lower -%}
+        {%- set enabled = h.enabled | default(true) | bool -%}
+        {%- set source_ok = h.source | default(env_l == pgm_source_env_effective) | bool -%}
+        {%- set host_filter_ok = (pgm_source_host_normalized | length == 0) or (pgm_source_host_normalized in [name_l, ip_l]) -%}
+        {%- if enabled and source_ok and env_l == pgm_source_env_effective and host_filter_ok -%}
+          {%- set dbname = h.database_name | default(pgm_database_name_effective) -%}
+          {%- set item = h | combine({
+                'database_name': dbname,
+                'port': h.port | default(pgm_default_port),
+                'db_host': h.db_host | default(pgm_default_db_host),
+                'db_user': h.db_user | default(pgm_default_db_user),
+                'os_user': h.os_user | default(pgm_default_os_user),
+                'role': 'source'
+              }, recursive=True) -%}
+          {%- set _ = out.append(item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Resolver candidatos de destino
+  ansible.builtin.set_fact:
+    _pgm_target_candidates_json: >-
+      {%- set out = [] -%}
+      {%- for h in pgm_all_configured_hosts -%}
+        {%- set env_l = h.env | string | lower -%}
+        {%- set name_l = h.name | default('') | string | lower -%}
+        {%- set ip_l = h.ansible_host | default('') | string | lower -%}
+        {%- set enabled = h.enabled | default(true) | bool -%}
+        {%- set env_ok = env_l in (pgm_target_envs_effective | default([])) -%}
+        {%- set host_filter_ok = (pgm_selected_target_hosts | length == 0) or (name_l in pgm_selected_target_hosts) or (ip_l in pgm_selected_target_hosts) -%}
+        {%- if enabled and env_ok and host_filter_ok -%}
+          {%- set dbname = h.database_name | default(pgm_database_name_effective) -%}
+          {%- set item = h | combine({
+                'database_name': dbname,
+                'port': h.port | default(pgm_default_port),
+                'db_host': h.db_host | default(pgm_default_db_host),
+                'db_user': h.db_user | default(pgm_default_db_user),
+                'os_user': h.os_user | default(pgm_default_os_user),
+                'role': 'target'
+              }, recursive=True) -%}
+          {%- set _ = out.append(item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar candidatos resolvidos
+  ansible.builtin.set_fact:
+    pgm_source_candidates: "{{ _pgm_source_candidates_json | from_json }}"
+    pgm_target_candidates: "{{ _pgm_target_candidates_json | from_json }}"
+
+- name: Validar origem quando ação exige backup
+  ansible.builtin.assert:
+    that:
+      - pgm_source_candidates | length > 0
+      - pgm_source_candidates | length == 1
+    fail_msg: >-
+      A ação {{ pgm_action_normalized }} exige exatamente uma origem.
+      Origem resolvida para env '{{ pgm_source_env_effective }}': {{ pgm_source_candidates | length }}.
+      Se houver mais de uma origem, informe pgm_source_host ou marque apenas uma como source=true.
+  when: pgm_action_normalized in ['backup', 'sync']
+
+- name: Validar destinos quando ação exige restore
+  ansible.builtin.assert:
+    that:
+      - pgm_target_envs_effective | length > 0
+      - pgm_target_candidates | length > 0
+    fail_msg: >-
+      A ação {{ pgm_action_normalized }} exige pelo menos um destino.
+      target_envs={{ pgm_target_envs_effective }}, target_hosts={{ pgm_selected_target_hosts }}.
+  when: pgm_action_normalized in ['restore', 'sync']
+
+- name: Proteger restore puro multi-target
+  ansible.builtin.assert:
+    that:
+      - (pgm_target_candidates | length <= 1) or (pgm_confirm_multi_target_restore | default('nao') | string | lower in ['sim', 's', 'yes', 'true', '1'])
+    fail_msg: >-
+      Restore puro resolveu {{ pgm_target_candidates | length }} destinos.
+      Informe pgm_target_hosts para um host específico ou pgm_confirm_multi_target_restore=sim.
+  when: pgm_action_normalized == 'restore'
+
+- name: Definir dump compartilhado do job
+  ansible.builtin.set_fact:
+    pgm_dump_basename: >-
+      {{
+        pgm_database_name_effective ~ '_' ~ pgm_source_env_effective ~ '_' ~ pgm_run_timestamp ~ '_job_' ~ pgm_job_id ~ '.dump.dir'
+      }}
+    pgm_latest_manifest_name: "latest_{{ pgm_database_name_effective }}_{{ pgm_source_env_effective }}.txt"
+
+- name: Exibir plano resolvido
+  ansible.builtin.debug:
+    msg:
+      action: "{{ pgm_action_normalized }}"
+      database: "{{ pgm_database_name_effective }}"
+      source_env: "{{ pgm_source_env_effective }}"
+      target_envs: "{{ pgm_target_envs_effective }}"
+      source: "{{ pgm_source_candidates }}"
+      targets: "{{ pgm_target_candidates }}"
+      dump_basename: "{{ pgm_dump_basename }}"

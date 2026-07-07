@@ -1,0 +1,150 @@
+---
+# ============================================================================
+# PostgreSQL Manager
+# ============================================================================
+# Ações aceitas: backup | restore | sync
+# backup  = executa pg_dump no ambiente de origem
+# restore = restaura um dump no(s) destino(s)
+# sync    = executa backup na origem e restore no(s) destino(s)
+
+pgm_action: "backup"
+pgm_database_key: ""
+
+# Seleção de origem/destino.
+# Quando vazio, a role usa default_source_env/default_sync_targets do arquivo do banco.
+pgm_source_env: ""
+pgm_source_host: "" # aceita name ou ansible_host
+pgm_target_envs: "" # lista: tu,ti,th,fix
+pgm_target_hosts: "" # lista: th-db-01,192.168.0.10
+pgm_restore_dump_name: "latest" # latest ou nome do diretório .dump.dir
+
+# Confirmações de segurança.
+pgm_confirm_restore: "nao" # restore/sync exigem sim
+pgm_confirm_multi_target_restore: "nao" # restore puro com mais de 1 target exige sim
+pgm_fail_job_on_error: true
+
+# Configuração.
+pgm_config_root: "{{ playbook_dir }}/config/postgres_manager"
+pgm_databases_dir: "{{ pgm_config_root }}/databases"
+
+# PostgreSQL defaults.
+pgm_pg_bin_path: "/usr/bin"
+pgm_default_port: 5432
+pgm_default_db_host: "127.0.0.1"
+pgm_default_os_user: "postgres"
+pgm_default_db_user: "{{ databases_username }}"
+pgm_default_jobs: 8
+pgm_db_password: "{{ databases_password }}"
+
+# Diretórios.
+pgm_backup_root_dir: "/backup/postgres_manager"
+pgm_restore_root_dir: "/backup/postgres_manager_restore"
+pgm_controller_tmp_dir: "/tmp/postgres-manager-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# Inventário dinâmico.
+pgm_ssh_port: 22
+pgm_wait_timeout: 5
+pgm_probe_ssh_enabled: true
+pgm_probe_postgres_enabled: false
+pgm_fail_on_unreachable: true
+
+# Restore defaults.
+pgm_restore_mode: "promote" # promote | drop_in_place
+pgm_restore_temp_suffix: "_restoring"
+pgm_restore_old_suffix: "_old"
+pgm_restore_no_owner: true
+pgm_restore_no_privileges: true
+pgm_preserve_target_grants: true
+pgm_apply_target_grants: true
+pgm_fail_on_grant_apply_error: false
+pgm_vacuum_analyze_after_restore: true
+pgm_cleanup_remote_dump_after_restore: false
+pgm_keep_remote_logs: false
+
+# Mascaramento de dados pós-restore.
+# Por padrão vem desligado e só roda quando habilitado no arquivo do banco.
+pgm_masking_enabled_default: false
+pgm_masking_fail_on_error_default: true
+pgm_masking_protected_envs_default:
+  - prd
+pgm_masking_remote_dir: "{{ pgm_restore_root_dir }}/masking_{{ tower_job_id | default(awx_job_id | default('local')) }}"
+pgm_masking_cleanup_remote_files: true
+
+# CIFS usado para transferência de dumps e anexos do relatório.
+# Fica no defaults porque é comportamento operacional da role, não regra de banco.
+pgm_cifs_enabled: true
+pgm_cifs_label: "producao"
+pgm_cifs_path: "/Ansible/postgres_manager"
+pgm_cifs_dump_path: "{{ pgm_cifs_path }}"
+pgm_cifs_attachment_path: "/Ansible/mail_attachments"
+pgm_cifs_mount_dir: "/tmp/postgres-manager-cifs"
+pgm_cifs_password_file: "/tmp/.postgres-manager-cifs-pass-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+pgm_cifs_workgroup: "WORKGROUP"
+pgm_cifs_domain: "{{ pgm_cifs_workgroup }}"
+pgm_cifs_vers: "3.0"
+pgm_cifs_address:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.149/certs"
+pgm_fail_on_cifs_error: false
+
+# Variáveis compatíveis com fluxo de e-mail já usado em outras automações.
+send_mail_cifs: "{{ pgm_cifs_label }}"
+send_mail_cifs_path: "{{ pgm_cifs_attachment_path }}"
+send_mail_cifs_address: "{{ pgm_cifs_address }}"
+cifs_workgroup: "{{ pgm_cifs_workgroup }}"
+
+# Relatório.
+pgm_report_timezone: "America/Sao_Paulo"
+pgm_report_title: "PostgreSQL Manager"
+pgm_report_subject_prefix: "Ansible-Report"
+ansible_url: "https://ansible.hml.mca.corp"
+
+# Defaults internos aplicados sobre cada arquivo de banco.
+pgm_database_defaults:
+  description: ""
+  database_name: ""
+  default_source_env: "prd"
+  default_sync_targets: []
+  default_restore_targets: []
+
+  backup:
+    root_dir: "{{ pgm_backup_root_dir }}"
+    jobs: "{{ pgm_default_jobs }}"
+    format: "directory"
+    extra_args: ""
+    validate_dump: true
+
+  restore:
+    mode: "{{ pgm_restore_mode }}"
+    target_temp_suffix: "{{ pgm_restore_temp_suffix }}"
+    old_suffix: "{{ pgm_restore_old_suffix }}"
+    no_owner: "{{ pgm_restore_no_owner }}"
+    no_privileges: "{{ pgm_restore_no_privileges }}"
+    jobs: "{{ pgm_default_jobs }}"
+    extra_args: ""
+    exclude_toc_patterns:
+      - "USER MAPPING"
+    vacuum_analyze: "{{ pgm_vacuum_analyze_after_restore }}"
+
+  grants:
+    capture_before_restore: "{{ pgm_preserve_target_grants }}"
+    apply_after_restore: "{{ pgm_apply_target_grants }}"
+    fail_on_apply_error: "{{ pgm_fail_on_grant_apply_error }}"
+
+  dblink:
+    enabled: false
+
+  materialized_views:
+    refresh_enabled: false
+    refresh_all: false
+    items: []
+
+  users:
+    lock_before_promote: []
+    unlock_after_promote: []
+
+  validations:
+    enabled: false
+    queries: []
+
+  hosts_env_sync: {}

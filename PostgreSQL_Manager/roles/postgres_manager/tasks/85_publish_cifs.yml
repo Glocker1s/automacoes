@@ -1,0 +1,115 @@
+---
+- name: CIFS | Inicializar publicação de anexos
+  ansible.builtin.set_fact:
+    pgm_cifs_report_upload_failed: false
+    pgm_cifs_report_upload_error: ""
+    send_mail_cifs_remote_files: []
+    send_mail_attachments: []
+
+- name: CIFS | Publicar anexos no CIFS via smbclient
+  when:
+    - pgm_cifs_enabled | bool
+    - pgm_collected_local_files | default([]) | length > 0
+  block:
+    - name: CIFS | Resolver CIFS para relatório
+      ansible.builtin.set_fact:
+        _pgm_report_cifs_server: "{{ (pgm_cifs_address | default({})).get(pgm_cifs_label | default('') | lower, '') }}"
+        _pgm_report_cifs_dir: "{{ pgm_cifs_attachment_path | default('/Ansible/mail_attachments') }}"
+        _pgm_report_cifs_pass_file: "{{ pgm_controller_tmp_dir }}/.cifs-pass"
+      no_log: true
+
+    - name: CIFS | Criar diretório temporário no host delegado
+      ansible.builtin.file:
+        path: "{{ pgm_controller_tmp_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: "192.168.122.34"
+      become: false
+      when:
+        - pgm_collected_local_files | default([]) | length > 0
+
+    - name: CIFS | Copiar logs para host delegado
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ pgm_controller_tmp_dir }}/{{ item | basename }}"
+        mode: "0644"
+      loop: "{{ pgm_collected_local_files | default([]) }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      delegate_to: "192.168.122.34"
+      become: false
+      when:
+        - pgm_collected_local_files | default([]) | length > 0
+
+    - name: CIFS | Validar CIFS para relatório
+      ansible.builtin.fail:
+        msg: "CIFS não mapeado para relatório: pgm_cifs_label={{ pgm_cifs_label }}"
+      when: _pgm_report_cifs_server | length == 0
+
+    - name: CIFS | Criar arquivo temporário de senha CIFS no controller
+      ansible.builtin.copy:
+        dest: "{{ _pgm_report_cifs_pass_file }}"
+        content: "{{ ansible_password | default('') }}"
+        mode: "0600"
+      delegate_to: "192.168.122.34"
+      become: false
+      no_log: true
+
+    - name: CIFS | Testar acesso ao CIFS do relatório
+      ansible.builtin.shell: >
+        smbclient "{{ _pgm_report_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ _pgm_report_cifs_pass_file }})"
+        -W "{{ pgm_cifs_workgroup }}"
+        -c "cd {{ _pgm_report_cifs_dir }} ; ls"
+      register: _pgm_report_cifs_probe
+      retries: 5
+      delay: 10
+      until: _pgm_report_cifs_probe.rc == 0
+      changed_when: false
+      delegate_to: "192.168.122.34"
+      become: false
+      no_log: true
+
+    - name: CIFS | Enviar anexos para CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _pgm_report_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ _pgm_report_cifs_pass_file }})"
+        -W "{{ pgm_cifs_workgroup }}"
+        -c 'cd {{ _pgm_report_cifs_dir }} ; put {{ item }} {{ item | basename }}'
+      loop: "{{ pgm_collected_local_files }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      register: _pgm_report_cifs_put
+      changed_when: true
+      delegate_to: "192.168.122.34"
+      become: false
+      no_log: true
+
+    - name: CIFS | Publicar lista de anexos remotos
+      ansible.builtin.set_fact:
+        send_mail_cifs_remote_files: "{{ pgm_collected_local_files | map('basename') | list }}"
+        send_mail_attachments: "{{ pgm_collected_local_files | map('basename') | list }}"
+
+  rescue:
+    - name: CIFS | Registrar falha ao publicar anexos
+      ansible.builtin.set_fact:
+        pgm_cifs_report_upload_failed: true
+        pgm_cifs_report_upload_error: >-
+          {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default(ansible_failed_result | to_json)) }}
+        send_mail_cifs_remote_files: []
+        send_mail_attachments: []
+
+  always:
+    - name: CIFS | Remover senha CIFS do controller
+      ansible.builtin.file:
+        path: "{{ pgm_controller_tmp_dir }}/.cifs-pass"
+        state: absent
+      delegate_to: "192.168.122.34"
+      become: false
+      failed_when: false
+      no_log: true
+
+- name: CIFS | Publicar anexos locais quando CIFS desabilitado
+  ansible.builtin.set_fact:
+    send_mail_attachments: "{{ pgm_collected_local_files | default([]) }}"
+  when: not (pgm_cifs_enabled | bool)

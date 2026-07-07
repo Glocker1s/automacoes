@@ -1,0 +1,134 @@
+---
+# Copie este arquivo para:
+#   PostgreSQL_Manager/config/postgres_manager/databases/dbcvm_lab.yml
+#
+# Ajuste os IPs conforme suas VMs.
+# Use pgm_database_key: dbcvm_lab no survey/extra_vars.
+
+cm:
+  postgres_manager:
+    databases:
+      dbcvm_lab:
+        description: "Lab DBCVM PostgreSQL Manager"
+        database_name: "dbcvm"
+
+        default_source_env: "prd"
+        default_sync_targets:
+          - "tu"
+          - "th"
+          - "fix"
+        default_restore_targets: []
+
+        backup:
+          root_dir: "/backup/postgres_manager"
+          jobs: 4
+          format: "directory"
+          extra_args: ""
+          validate_dump: true
+
+        restore:
+          mode: "promote"
+          target_temp_suffix: "_restoring"
+          old_suffix: "_old"
+          no_owner: true
+          no_privileges: true
+          jobs: 4
+          extra_args: ""
+          vacuum_analyze: true
+          exclude_toc_patterns:
+            - "USER MAPPING"
+            - "MATERIALIZED VIEW DATA public mv_search_companys"
+            - "MATERIALIZED VIEW DATA public mv_company_balance_guide"
+
+        grants:
+          capture_before_restore: true
+          apply_after_restore: true
+          fail_on_apply_error: false
+
+        masking:
+          enabled: true
+          fail_on_error: true
+          run_on_envs:
+            - tu
+            - ti
+            - th
+            - fix
+          protected_envs:
+            - prd
+          scripts:
+            - name: "dbcvm_lab_scramble"
+              file: "masking/fc_dbcvm_lab_scramble_database.sql"
+              function: "public.fc_dbcvm_lab_scramble_database"
+              execute_function: true
+
+        dblink:
+          enabled: true
+          server_name: "remote_valemobi"
+          dbname_var: "dblink_dbname"
+          host_var: "dblink_host"
+          port_var: "dblink_port"
+          user_var: "dblink_user"
+          password_var: "dblink_password"
+          # Use estes dois campos depois de aplicar a melhoria connect_before_refresh na task de refresh.
+          connect_before_refresh: true
+          connection_name: "myconn"
+
+        materialized_views:
+          refresh_enabled: true
+          refresh_all: false
+          items:
+            - schema: "public"
+              name: "mv_search_companys"
+              concurrently: false
+            - schema: "public"
+              name: "mv_company_balance_guide"
+              concurrently: false
+
+        users:
+          lock_before_promote:
+            - "svc_dbcvm"
+          unlock_after_promote:
+            - "svc_dbcvm"
+
+        validations:
+          enabled: true
+          queries:
+            - "queries/total.sql"
+            - "queries/total-by-table.sql"
+
+        hosts_env_sync:
+          prd:
+            - name: "prd-dbcvm-01"
+              ansible_host: "192.168.122.165"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              enabled: true
+
+          tu:
+            - name: "tu-dbcvm-01"
+              ansible_host: "192.168.122.34"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              enabled: true
+
+          th:
+            - name: "th-dbcvm-01"
+              ansible_host: "192.168.122.70"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              enabled: true
+
+          fix:
+            - name: "fix-dbcvm-01"
+              ansible_host: "192.168.122.33"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              enabled: true

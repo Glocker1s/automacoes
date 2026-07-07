@@ -1,0 +1,109 @@
+-- PostgreSQL Manager - Captura de grants do destino
+-- Este arquivo é executado antes do restore, conectado no banco original do destino.
+-- A saída gerada é um script SQL para reaplicação depois do pg_restore -x -O.
+
+\pset tuples_only on
+\pset format unaligned
+\pset pager off
+
+SELECT '-- Grants capturados em ' || now();
+SELECT '-- Database: ' || current_database();
+
+-- Database privileges
+SELECT format(
+  'GRANT %s ON DATABASE "__PGM_DATABASE__" TO %s;',
+  p.priv,
+  CASE WHEN r.rolname = 'PUBLIC' THEN 'PUBLIC' ELSE format('%I', r.rolname) END
+)
+FROM pg_roles r
+CROSS JOIN (VALUES ('CONNECT'), ('CREATE'), ('TEMP')) p(priv)
+WHERE has_database_privilege(r.rolname, current_database(), p.priv)
+  AND r.rolname !~ '^pg_'
+ORDER BY r.rolname, p.priv;
+
+-- Schema privileges
+SELECT format(
+  'GRANT %s ON SCHEMA %I TO %s%s;',
+  a.privilege_type,
+  n.nspname,
+  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE format('%I', pg_get_userbyid(a.grantee)) END,
+  CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+)
+FROM pg_namespace n
+CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, a.privilege_type;
+
+-- Tables, partitioned tables, views, materialized views and foreign tables
+SELECT format(
+  'GRANT %s ON TABLE %I.%I TO %s%s;',
+  a.privilege_type,
+  n.nspname,
+  c.relname,
+  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE format('%I', pg_get_userbyid(a.grantee)) END,
+  CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, c.relname, a.privilege_type;
+
+-- Sequences
+SELECT format(
+  'GRANT %s ON SEQUENCE %I.%I TO %s%s;',
+  a.privilege_type,
+  n.nspname,
+  c.relname,
+  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE format('%I', pg_get_userbyid(a.grantee)) END,
+  CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+)
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('S', c.relowner))) a
+WHERE c.relkind = 'S'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, c.relname, a.privilege_type;
+
+-- Functions and procedures
+SELECT format(
+  'GRANT %s ON FUNCTION %I.%I(%s) TO %s%s;',
+  a.privilege_type,
+  n.nspname,
+  p.proname,
+  pg_get_function_identity_arguments(p.oid),
+  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE format('%I', pg_get_userbyid(a.grantee)) END,
+  CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+)
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+ORDER BY n.nspname, p.proname, a.privilege_type;
+
+-- Default privileges
+SELECT format(
+  'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s GRANT %s ON %s TO %s%s;',
+  pg_get_userbyid(d.defaclrole),
+  CASE WHEN ns.nspname IS NULL THEN '' ELSE format(' IN SCHEMA %I', ns.nspname) END,
+  a.privilege_type,
+  CASE d.defaclobjtype
+    WHEN 'r' THEN 'TABLES'
+    WHEN 'S' THEN 'SEQUENCES'
+    WHEN 'f' THEN 'FUNCTIONS'
+    WHEN 'T' THEN 'TYPES'
+    WHEN 'n' THEN 'SCHEMAS'
+    ELSE 'TABLES'
+  END,
+  CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE format('%I', pg_get_userbyid(a.grantee)) END,
+  CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+)
+FROM pg_default_acl d
+LEFT JOIN pg_namespace ns ON ns.oid = d.defaclnamespace
+CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+ORDER BY pg_get_userbyid(d.defaclrole), ns.nspname, d.defaclobjtype, a.privilege_type;

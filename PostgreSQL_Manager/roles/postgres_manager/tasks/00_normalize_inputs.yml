@@ -1,0 +1,94 @@
+---
+- name: Normalizar ação e chaves
+  ansible.builtin.set_fact:
+    pgm_action_normalized: "{{ pgm_action | default('backup') | string | lower | trim }}"
+    pgm_database_key_normalized: "{{ pgm_database_key | default('') | string | lower | trim }}"
+    pgm_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    pgm_job_template_name_effective: "{{ tower_job_template_name | default(awx_job_template_name | default('PostgreSQL Manager')) }}"
+    pgm_run_timestamp: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date +%Y%m%d_%H%M%S') }}"
+
+- name: Validar ação
+  ansible.builtin.assert:
+    that:
+      - pgm_action_normalized in ['backup', 'restore', 'sync']
+    fail_msg: "pgm_action inválida: {{ pgm_action }}. Valores aceitos: backup, restore, sync."
+
+- name: Validar banco informado
+  ansible.builtin.assert:
+    that:
+      - pgm_database_key_normalized | length > 0
+    fail_msg: "Informe pgm_database_key, por exemplo: dbcvm."
+
+- name: Normalizar target_envs bruto do survey
+  ansible.builtin.set_fact:
+    _pgm_target_envs_json: >-
+      {%- set raw = pgm_target_envs | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | to_json }}
+      {%- else -%}
+        {%- set s = raw | string | trim -%}
+        {%- if s | length == 0 -%}
+          {{ [] | to_json }}
+        {%- elif s.startswith('[') and s.endswith(']') -%}
+          {{ (s | from_yaml) | list | to_json }}
+        {%- else -%}
+          {{ s.split(',') | list | to_json }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Normalizar target_hosts bruto do survey
+  ansible.builtin.set_fact:
+    _pgm_target_hosts_json: >-
+      {%- set raw = pgm_target_hosts | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | to_json }}
+      {%- else -%}
+        {%- set s = raw | string | trim -%}
+        {%- if s | length == 0 -%}
+          {{ [] | to_json }}
+        {%- elif s.startswith('[') and s.endswith(']') -%}
+          {{ (s | from_yaml) | list | to_json }}
+        {%- else -%}
+          {{ s.split(',') | list | to_json }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Publicar listas normalizadas do survey
+  ansible.builtin.set_fact:
+    pgm_selected_target_envs: >-
+      {{
+        _pgm_target_envs_json | from_json
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | list
+      }}
+    pgm_selected_target_hosts: >-
+      {{
+        _pgm_target_hosts_json | from_json
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | list
+      }}
+    pgm_source_env_normalized: "{{ pgm_source_env | default('') | string | lower | trim }}"
+    pgm_source_host_normalized: "{{ pgm_source_host | default('') | string | lower | trim }}"
+
+- name: Exibir listas normalizadas
+  ansible.builtin.debug:
+    msg:
+      target_envs_raw: "{{ pgm_target_envs | default('') }}"
+      target_envs_normalized: "{{ pgm_selected_target_envs }}"
+      target_hosts_raw: "{{ pgm_target_hosts | default('') }}"
+      target_hosts_normalized: "{{ pgm_selected_target_hosts }}"
+
+- name: Validar confirmação para restore/sync
+  ansible.builtin.assert:
+    that:
+      - pgm_confirm_restore | default('nao') | string | lower in ['sim', 's', 'yes', 'true', '1']
+    fail_msg: >-
+      A ação {{ pgm_action_normalized }} altera base de dados de destino.
+      Informe pgm_confirm_restore=sim para confirmar.
+  when: pgm_action_normalized in ['restore', 'sync']

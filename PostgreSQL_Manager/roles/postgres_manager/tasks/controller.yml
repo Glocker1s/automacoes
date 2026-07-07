@@ -1,0 +1,34 @@
+---
+- name: Controller | Bloco controlado do planejamento
+  block:
+    - name: Normalizar entradas
+      ansible.builtin.import_tasks: 00_normalize_inputs.yml
+
+    - name: Carregar configuração do banco
+      ansible.builtin.import_tasks: 10_load_database_config.yml
+
+    - name: Resolver plano de execução
+      ansible.builtin.import_tasks: 20_resolve_plan.yml
+
+    - name: Criar inventário dinâmico
+      ansible.builtin.import_tasks: 25_create_dynamic_hosts.yml
+
+  rescue:
+    - name: Marcar falha de planejamento
+      ansible.builtin.set_fact:
+        pgm_controller_failed: true
+        pgm_controller_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+        pgm_controller_error_msg: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result.stdout
+            | default('Falha não detalhada no planejamento.')))
+          }}
+
+    - name: Montar email de falha controlada
+      ansible.builtin.import_tasks: 90_build_report.yml
+
+    - name: Encerrar job após publicar email de falha
+      ansible.builtin.fail:
+        msg: "PostgreSQL Manager falhou no planejamento. O HTML de falha foi publicado em send_mail_body."
