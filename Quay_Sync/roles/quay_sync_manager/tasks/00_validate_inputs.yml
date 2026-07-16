@@ -1,0 +1,61 @@
+---
+- name: Definir modo efetivo
+  ansible.builtin.set_fact:
+    quay_effective_mode: "{{ quay_mode | default('check') | string | lower | trim }}"
+
+- name: Validar modo
+  ansible.builtin.assert:
+    that:
+      - quay_effective_mode in ['check', 'sync']
+    fail_msg: >-
+      Modo inválido para Quay Sync Manager: {{ quay_effective_mode }}.
+      Valores aceitos: check, sync.
+    success_msg: "Modo Quay Sync Manager: {{ quay_effective_mode }}."
+
+- name: Validar variáveis obrigatórias
+  ansible.builtin.assert:
+    that:
+      - quay_source is defined
+      - quay_target is defined
+      - quay_source.url is defined
+      - quay_target.url is defined
+      - quay_source.token is defined
+      - quay_target.token is defined
+      - quay_source.url | string | trim | length > 0
+      - quay_target.url | string | trim | length > 0
+      - quay_source.token | string | trim | length > 0
+      - quay_target.token | string | trim | length > 0
+      - quay_discovery_namespaces is defined
+      - quay_discovery_namespaces | length > 0
+    fail_msg: >-
+      Variáveis obrigatórias ausentes. Verifique quay_source/quay_target
+      com url/token e quay_discovery_namespaces.
+
+- name: Normalizar URLs, nomes e flags
+  ansible.builtin.set_fact:
+    quay_source_url: "{{ quay_source.url | regex_replace('/+$', '') }}"
+    quay_target_url: "{{ quay_target.url | regex_replace('/+$', '') }}"
+    quay_source_name: "{{ quay_source.name | default('PRD') }}"
+    quay_target_name: "{{ quay_target.name | default('DR') }}"
+    quay_source_validate_certs: "{{ quay_source.validate_certs | default(true) | bool }}"
+    quay_target_validate_certs: "{{ quay_target.validate_certs | default(true) | bool }}"
+    quay_report_date_br: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (quay_report_timezone | default('America/Sao_Paulo')) ~ "' date '+%d/%m/%Y %H:%M:%S " ~ (quay_report_timezone | default('America/Sao_Paulo')) ~ "'"
+        )
+      }}
+    quay_executor: "{{ tower_user_name | default(awx_user_name | default(ansible_user_id | default('N/A'))) }}"
+
+- name: Garantir diretório local de saída
+  ansible.builtin.file:
+    path: "{{ quay_output_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Inicializar estruturas de resultado
+  ansible.builtin.set_fact:
+    quay_sync_actions: []
+    quay_sync_performed: false
+    quay_sync_failed_actions: 0

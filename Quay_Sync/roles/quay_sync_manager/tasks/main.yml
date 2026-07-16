@@ -1,0 +1,53 @@
+---
+- name: Main | Bloco controlado da automação
+  block:
+    - name: Main | Validar e normalizar entradas
+      ansible.builtin.import_tasks: 00_validate_inputs.yml
+
+    - name: Main | Validar API e tokens
+      ansible.builtin.import_tasks: 10_check_api_access.yml
+
+    - name: Main | Descobrir repositories
+      ansible.builtin.import_tasks: 20_collect_repositories.yml
+
+    - name: Main | Coletar configuração de mirror inicial
+      ansible.builtin.import_tasks: 30_collect_mirror_config.yml
+
+    - name: Main | Coletar tags iniciais
+      ansible.builtin.include_tasks: 40_collect_tags.yml
+      vars:
+        quay_compare_stage: "initial"
+
+    - name: Main | Comparar estado inicial
+      ansible.builtin.include_tasks: 50_compare_tags.yml
+      vars:
+        quay_compare_stage: "initial"
+
+    - name: Main | Executar sync quando solicitado
+      ansible.builtin.import_tasks: 60_sync_repositories.yml
+      when: quay_effective_mode == 'sync'
+
+    - name: Main | Definir resultado final em modo check
+      ansible.builtin.set_fact:
+        quay_final_result: "{{ quay_initial_result }}"
+        quay_final_summary: "{{ quay_initial_summary }}"
+        quay_final_rows: "{{ quay_initial_rows }}"
+        quay_final_mirror_configs: "{{ quay_mirror_configs }}"
+      when: quay_effective_mode == 'check'
+
+    - name: Main | Consolidar resultado final
+      ansible.builtin.import_tasks: 70_finalize_result.yml
+
+    - name: Main | Montar relatório e set_stats
+      ansible.builtin.import_tasks: 80_build_report.yml
+
+    - name: Main | Aplicar política de falha do job
+      ansible.builtin.import_tasks: 90_apply_failure_policy.yml
+
+  rescue:
+    - name: Main | Montar e-mail de falha controlada
+      ansible.builtin.import_tasks: 95_build_failure_report.yml
+
+    - name: Main | Encerrar job após publicar e-mail de falha
+      ansible.builtin.fail:
+        msg: "Main falhou. O HTML de falha foi publicado em send_mail_body."

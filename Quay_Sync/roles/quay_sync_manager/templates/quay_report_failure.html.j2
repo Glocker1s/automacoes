@@ -1,0 +1,69 @@
+{% macro code(v) -%}
+  <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f3f3f3;color:#222;padding:2px 5px;">{{ v | default('—') }}</span>
+{%- endmacro %}
+
+{% macro th(v) -%}
+  <th bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;">{{ v }}</th>
+{%- endmacro %}
+
+{% macro td_open() -%}
+  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+{%- endmacro %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td align="left" style="padding:8px 8px 12px 8px;">
+      <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px;border-collapse:collapse;">
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#263238" style="width:100%;background-color:#263238;border-collapse:collapse;">
+              <tr>
+                <td bgcolor="#263238" style="background-color:#263238;padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                    <tr>
+                      <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                        <div style="font-size:18px;font-weight:bold;color:#ffffff;margin:0;padding:0;">{{ quay_report_title }} - Falha na execução</div>
+                        <div style="font-size:13px;color:#dbe3e6;margin-top:4px;">
+                          Job: <b>{{ quay_job_id | default(tower_job_id | default(awx_job_id | default('local'))) }}</b>
+                          &nbsp;|&nbsp; Executor: <b>{{ tower_user_name | default(awx_user_name | default(ansible_user_id | default('N/A'))) }}</b>
+                          &nbsp;|&nbsp; Data: <b>{{ quay_failure_date_br }}</b>
+                        </div>
+                      </td>
+                      <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                        <span style="display:inline-block;background-color:#b00020;color:#ffffff;font-size:12px;font-weight:bold;padding:4px 8px;">FALHA</span>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+
+            <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Resumo da falha</div>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>{{ th('Campo') }}{{ th('Valor') }}</tr>
+              <tr>{{ td_open() }}Categoria</td>{{ td_open() }}<b>{{ quay_failure_category | trim }}</b></td></tr>
+              <tr>{{ td_open() }}Orientação</td>{{ td_open() }}{{ quay_failure_guidance | trim }}</td></tr>
+              <tr>{{ td_open() }}Task</td>{{ td_open() }}{{ code(quay_failure_task) }}</td></tr>
+              <tr>{{ td_open() }}Ação/Módulo</td>{{ td_open() }}{{ code(quay_failure_action) }}</td></tr>
+              <tr>{{ td_open() }}Mensagem</td>{{ td_open() }}{{ quay_failure_msg }}</td></tr>
+            </table>
+
+            <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Contexto informado</div>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>{{ th('Variável') }}{{ th('Valor') }}</tr>
+              <tr>{{ td_open() }}quay_mode</td>{{ td_open() }}{{ code(quay_mode | default('check')) }}</td></tr>
+              <tr>{{ td_open() }}quay_source.url</td>{{ td_open() }}{{ code(quay_source.url | default('')) }}</td></tr>
+              <tr>{{ td_open() }}quay_target.url</td>{{ td_open() }}{{ code(quay_target.url | default('')) }}</td></tr>
+              <tr>{{ td_open() }}quay_discovery_namespaces</td>{{ td_open() }}{{ code(quay_discovery_namespaces | default([]) | join(', ')) }}</td></tr>
+              <tr>{{ td_open() }}motivo</td>{{ td_open() }}{{ code(motivo | default('')) }}</td></tr>
+            </table>
+
+            <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:14px;">
+              Este e-mail é gerado pelo bloco rescue da automação. Tokens não são exibidos no relatório.
+            </div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

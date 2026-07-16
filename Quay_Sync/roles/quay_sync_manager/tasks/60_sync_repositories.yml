@@ -1,0 +1,151 @@
+---
+- name: Sync | Definir repositories candidatos
+  ansible.builtin.set_fact:
+    quay_sync_candidate_repositories_effective: "{{ quay_initial_summary.sync_candidate_repositories | default([]) }}"
+
+- name: Sync | Exibir candidatos
+  ansible.builtin.debug:
+    msg:
+      - "Repos candidatos a sync: {{ quay_sync_candidate_repositories_effective }}"
+      - "Executar sync-cancel antes do sync-now: {{ quay_sync_cancel_before_now | bool }}"
+
+- name: Sync | Inicializar ações quando não houver candidatos
+  ansible.builtin.set_fact:
+    quay_sync_actions: []
+    quay_sync_performed: false
+    quay_sync_failed_actions: 0
+  when: quay_sync_candidate_repositories_effective | length == 0
+
+- name: Sync | Executar sync nativo do Quay nos candidatos
+  when: quay_sync_candidate_repositories_effective | length > 0
+  block:
+    - name: Sync | Executar sync-cancel nos repositories candidatos
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item }}/mirror/sync-cancel"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 201
+          - 202
+          - 204
+          - 400
+          - 404
+      loop: "{{ quay_sync_candidate_repositories_effective }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _quay_sync_cancel_results
+      when: quay_sync_cancel_before_now | bool
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Sync | Executar sync-now nos repositories candidatos
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item }}/mirror/sync-now"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 201
+          - 202
+          - 204
+      loop: "{{ quay_sync_candidate_repositories_effective }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _quay_sync_now_results
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Sync | Montar ações executadas
+      ansible.builtin.set_fact:
+        quay_sync_actions_json: >-
+          {%- set out = [] -%}
+          {%- for r in (_quay_sync_cancel_results.results | default([])) -%}
+            {%- set _ = out.append({
+              'repository': r.item,
+              'action': 'sync-cancel',
+              'http_status': r.status | default(0),
+              'ok': (r.status | default(0) | int) in [200, 201, 202, 204, 400, 404],
+              'message': r.json.detail | default(r.json.error_message | default(r.msg | default('')))
+            }) -%}
+          {%- endfor -%}
+          {%- for r in (_quay_sync_now_results.results | default([])) -%}
+            {%- set _ = out.append({
+              'repository': r.item,
+              'action': 'sync-now',
+              'http_status': r.status | default(0),
+              'ok': (r.status | default(0) | int) in [200, 201, 202, 204],
+              'message': r.json.detail | default(r.json.error_message | default(r.msg | default('')))
+            }) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+
+    - name: Sync | Publicar ações executadas
+      ansible.builtin.set_fact:
+        quay_sync_actions: "{{ quay_sync_actions_json | from_json }}"
+        quay_sync_performed: true
+        quay_sync_failed_actions: >-
+          {{ (quay_sync_actions_json | from_json) | rejectattr('ok') | list | length }}
+
+    - name: Sync | Gravar JSON de ações
+      ansible.builtin.copy:
+        dest: "{{ quay_sync_actions_file }}"
+        mode: "0640"
+        content: "{{ quay_sync_actions | to_nice_json }}"
+
+    - name: Sync | Aguardar início/processamento do mirror
+      ansible.builtin.pause:
+        seconds: "{{ quay_sync_wait_after_trigger_seconds | int }}"
+      when: (quay_sync_wait_after_trigger_seconds | int) > 0
+
+    - name: Sync | Aguardar repositories retornarem para SUCCESS
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item }}/mirror"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+      loop: "{{ quay_sync_candidate_repositories_effective }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _quay_sync_wait_results
+      until: >-
+        (_quay_sync_wait_results.status | default(0) | int) == 200
+        and (_quay_sync_wait_results.json.sync_status | default('') in ['SUCCESS', 'NEVER_RUN'])
+      retries: "{{ quay_sync_retries | int }}"
+      delay: "{{ quay_sync_delay | int }}"
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Sync | Recoletar mirror config após sync
+  ansible.builtin.import_tasks: 30_collect_mirror_config.yml
+  when: quay_sync_candidate_repositories_effective | length > 0
+
+- name: Sync | Recoletar tags após sync
+  ansible.builtin.include_tasks: 40_collect_tags.yml
+  vars:
+    quay_compare_stage: "final"
+  when: quay_sync_candidate_repositories_effective | length > 0
+
+- name: Sync | Comparar estado final após sync
+  ansible.builtin.include_tasks: 50_compare_tags.yml
+  vars:
+    quay_compare_stage: "final"
+  when: quay_sync_candidate_repositories_effective | length > 0
+
+- name: Sync | Definir resultado final sem candidatos
+  ansible.builtin.set_fact:
+    quay_final_result: "{{ quay_initial_result }}"
+    quay_final_summary: "{{ quay_initial_summary }}"
+    quay_final_rows: "{{ quay_initial_rows }}"
+    quay_final_mirror_configs: "{{ quay_mirror_configs }}"
+  when: quay_sync_candidate_repositories_effective | length == 0

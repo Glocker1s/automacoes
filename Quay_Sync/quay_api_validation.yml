@@ -1,0 +1,430 @@
+---
+- name: Validar API, tokens e discovery de repository mirror no Quay
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - quay_api_vars.yml
+
+  vars:
+    quay_repository_page_limit: 100
+    quay_execute_sync_actions: false
+    quay_sync_test_max_repositories: 3
+    quay_output_dir: "./quay_api_validation_output"
+
+    # Em lab, deixe false para enxergar retorno da API.
+    # Em cliente, deixe true para não vazar token/log sensível.
+    quay_hide_sensitive_logs: false
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - quay_source is defined
+          - quay_target is defined
+          - quay_source.url is defined
+          - quay_target.url is defined
+          - quay_source.token is defined
+          - quay_target.token is defined
+          - quay_source.url | length > 0
+          - quay_target.url | length > 0
+          - quay_source.token | length > 0
+          - quay_target.token | length > 0
+          - quay_discovery_namespaces is defined
+          - quay_discovery_namespaces | length > 0
+        fail_msg: "Variáveis obrigatórias ausentes. Verifique quay_source/quay_target e quay_discovery_namespaces."
+
+    - name: Normalizar URLs dos Quays
+      ansible.builtin.set_fact:
+        quay_source_url: "{{ quay_source.url | regex_replace('/+$', '') }}"
+        quay_target_url: "{{ quay_target.url | regex_replace('/+$', '') }}"
+        quay_source_validate_certs: "{{ quay_source.validate_certs | default(true) | bool }}"
+        quay_target_validate_certs: "{{ quay_target.validate_certs | default(true) | bool }}"
+
+    - name: Criar diretório local de saída
+      ansible.builtin.file:
+        path: "{{ quay_output_dir }}"
+        state: directory
+        mode: "0755"
+
+    ###########################################################################
+    # 1. Discovery básico da API
+    ###########################################################################
+
+    - name: Validar discovery da API do Quay PRD
+      ansible.builtin.uri:
+        url: "{{ quay_source_url }}/api/v1/discovery"
+        method: GET
+        validate_certs: "{{ quay_source_validate_certs }}"
+        return_content: false
+        status_code:
+          - 200
+      register: quay_source_discovery
+
+    - name: Validar discovery da API do Quay DR
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/discovery"
+        method: GET
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: false
+        status_code:
+          - 200
+      register: quay_target_discovery
+
+    ###########################################################################
+    # 2. Validar tokens e listar repositórios por namespace
+    ###########################################################################
+
+    - name: Validar token do Quay PRD listando repositórios por namespace
+      ansible.builtin.uri:
+        url: "{{ quay_source_url }}/api/v1/repository?namespace={{ item | urlencode }}&last_modified=true"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_source.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_source_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+      loop: "{{ quay_discovery_namespaces }}"
+      loop_control:
+        label: "{{ item }}"
+      register: quay_source_repositories_response
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Validar token do Quay DR listando repositórios por namespace
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository?namespace={{ item | urlencode }}&last_modified=true"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+      loop: "{{ quay_discovery_namespaces }}"
+      loop_control:
+        label: "{{ item }}"
+      register: quay_target_repositories_response
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Inicializar listas de repositórios
+      ansible.builtin.set_fact:
+        quay_source_repositories: []
+        quay_target_repositories: []
+
+    - name: Normalizar lista de repositórios do PRD
+      ansible.builtin.set_fact:
+        quay_source_repositories: >-
+          {{
+            quay_source_repositories +
+            (item.json.repositories | default([]))
+          }}
+      loop: "{{ quay_source_repositories_response.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('namespace') }}"
+
+    - name: Normalizar lista de repositórios do DR
+      ansible.builtin.set_fact:
+        quay_target_repositories: >-
+          {{
+            quay_target_repositories +
+            (item.json.repositories | default([]))
+          }}
+      loop: "{{ quay_target_repositories_response.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('namespace') }}"
+
+    ###########################################################################
+    # 3. Discovery automático dos repositories mirrored no DR
+    ###########################################################################
+
+    - name: Inicializar lista de repositórios mirrored no DR
+      ansible.builtin.set_fact:
+        quay_target_mirror_repositories: []
+
+    - name: Filtrar repositórios com state MIRROR no DR
+      ansible.builtin.set_fact:
+        quay_target_mirror_repositories: "{{ quay_target_mirror_repositories + [item] }}"
+      loop: "{{ quay_target_repositories }}"
+      loop_control:
+        label: "{{ item.namespace | default('') }}/{{ item.name | default('') }}"
+      when:
+        - item.state is defined
+        - item.state == "MIRROR"
+
+    - name: Exibir resumo inicial do discovery
+      ansible.builtin.debug:
+        msg:
+          - "Quay PRD: {{ quay_source_url }}"
+          - "Quay DR : {{ quay_target_url }}"
+          - "Namespaces avaliados: {{ quay_discovery_namespaces | join(', ') }}"
+          - "Repositórios visíveis no PRD: {{ quay_source_repositories | length }}"
+          - "Repositórios visíveis no DR : {{ quay_target_repositories | length }}"
+          - "Repositórios MIRROR encontrados no DR: {{ quay_target_mirror_repositories | length }}"
+
+    - name: Avisar quando nenhum repository mirror for encontrado
+      ansible.builtin.debug:
+        msg:
+          - "Nenhum repositório com state MIRROR foi encontrado no DR."
+          - "Possíveis causas:"
+          - "1. O token do DR não tem permissão para ver os repositórios mirrored."
+          - "2. O mirror ainda não foi configurado como repository mirror."
+          - "3. O namespace informado em quay_discovery_namespaces está errado."
+          - "4. Os repositories mirrored estão em outro namespace."
+      when: quay_target_mirror_repositories | length == 0
+
+    ###########################################################################
+    # 4. Consultar mirror config de cada repository mirror
+    ###########################################################################
+
+    - name: Consultar mirror config dos repositórios mirrored do DR
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item.namespace }}/{{ item.name }}/mirror"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 404
+          - 403
+      loop: "{{ quay_target_mirror_repositories }}"
+      loop_control:
+        label: "{{ item.namespace }}/{{ item.name }}"
+      register: quay_mirror_config_results
+      when: quay_target_mirror_repositories | length > 0
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Inicializar lista normalizada de mirror configs
+      ansible.builtin.set_fact:
+        quay_mirror_configs: []
+
+    - name: Normalizar mirror configs
+      ansible.builtin.set_fact:
+        quay_mirror_configs: >-
+          {{
+            quay_mirror_configs +
+            [
+              {
+                "repository": item.item.namespace ~ "/" ~ item.item.name,
+                "namespace": item.item.namespace,
+                "name": item.item.name,
+                "http_status": item.status | default(0),
+                "mirror_found": (item.status | default(0)) == 200,
+                "is_enabled": item.json.is_enabled | default(None),
+                "mirror_type": item.json.mirror_type | default(""),
+                "external_reference": item.json.external_reference | default(""),
+                "sync_interval": item.json.sync_interval | default(None),
+                "sync_status": item.json.sync_status | default(""),
+                "sync_retries_remaining": item.json.sync_retries_remaining | default(None),
+                "robot_username": item.json.robot_username | default(""),
+                "root_rule": item.json.root_rule | default({}),
+                "raw": item.json | default({})
+              }
+            ]
+          }}
+      loop: "{{ quay_mirror_config_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.namespace }}/{{ item.item.name }}"
+      when:
+        - quay_target_mirror_repositories | length > 0
+        - item.status | default(0) == 200
+
+    - name: Exibir mirror configs encontrados
+      ansible.builtin.debug:
+        msg:
+          repository: "{{ item.repository }}"
+          mirror_found: "{{ item.mirror_found }}"
+          is_enabled: "{{ item.is_enabled }}"
+          sync_status: "{{ item.sync_status }}"
+          sync_retries_remaining: "{{ item.sync_retries_remaining }}"
+          external_reference: "{{ item.external_reference }}"
+          robot_username: "{{ item.robot_username }}"
+          root_rule: "{{ item.root_rule }}"
+      loop: "{{ quay_mirror_configs }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      when: quay_mirror_configs | length > 0
+
+    ###########################################################################
+    # 5. Coletar tags dos repositórios mirrored no DR
+    ###########################################################################
+
+    - name: Coletar tags dos repositórios mirrored no DR
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item.namespace }}/{{ item.name }}/tag/?onlyActiveTags=true&limit=100&page=1"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 404
+          - 403
+      loop: "{{ quay_mirror_configs }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      register: quay_target_tag_results
+      when: quay_mirror_configs | length > 0
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Inicializar resumo de tags do DR
+      ansible.builtin.set_fact:
+        quay_target_tag_summary: []
+
+    - name: Normalizar resumo de tags do DR
+      ansible.builtin.set_fact:
+        quay_target_tag_summary: >-
+          {{
+            quay_target_tag_summary +
+            [
+              {
+                "repository": item.item.repository,
+                "http_status": item.status | default(0),
+                "tag_count": item.json.tags | default([]) | length,
+                "sample_tags": (
+                  item.json.tags | default([]) |
+                  map(attribute='name') |
+                  list
+                )[0:10]
+              }
+            ]
+          }}
+      loop: "{{ quay_target_tag_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.repository }}"
+      when:
+        - quay_mirror_configs | length > 0
+        - item.status | default(0) == 200
+
+    - name: Exibir resumo de tags no DR
+      ansible.builtin.debug:
+        msg:
+          repository: "{{ item.repository }}"
+          http_status: "{{ item.http_status }}"
+          tag_count_first_page: "{{ item.tag_count }}"
+          sample_tags: "{{ item.sample_tags }}"
+      loop: "{{ quay_target_tag_summary }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      when: quay_target_tag_summary | length > 0
+
+    ###########################################################################
+    # 6. Ação opcional: sync-cancel + sync-now
+    ###########################################################################
+
+    - name: Definir lista limitada para teste de sync actions
+      ansible.builtin.set_fact:
+        quay_sync_action_repositories: "{{ quay_mirror_configs[0:(quay_sync_test_max_repositories | int)] }}"
+      when:
+        - quay_execute_sync_actions | bool
+        - quay_mirror_configs | length > 0
+
+    - name: Executar sync-cancel nos repositories mirrored selecionados
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item.repository }}/mirror/sync-cancel"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 201
+          - 202
+          - 204
+          - 400
+          - 404
+      loop: "{{ quay_sync_action_repositories | default([]) }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      register: quay_sync_cancel_results
+      when:
+        - quay_execute_sync_actions | bool
+        - quay_sync_action_repositories | default([]) | length > 0
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Executar sync-now nos repositories mirrored selecionados
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item.repository }}/mirror/sync-now"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 201
+          - 202
+          - 204
+      loop: "{{ quay_sync_action_repositories | default([]) }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      register: quay_sync_now_results
+      when:
+        - quay_execute_sync_actions | bool
+        - quay_sync_action_repositories | default([]) | length > 0
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Exibir resultado do sync-cancel
+      ansible.builtin.debug:
+        msg:
+          repository: "{{ item.item.repository }}"
+          status: "{{ item.status | default('N/A') }}"
+      loop: "{{ quay_sync_cancel_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.repository }}"
+      when:
+        - quay_execute_sync_actions | bool
+        - quay_sync_cancel_results is defined
+
+    - name: Exibir resultado do sync-now
+      ansible.builtin.debug:
+        msg:
+          repository: "{{ item.item.repository }}"
+          status: "{{ item.status | default('N/A') }}"
+      loop: "{{ quay_sync_now_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.repository }}"
+      when:
+        - quay_execute_sync_actions | bool
+        - quay_sync_now_results is defined
+
+    ###########################################################################
+    # 7. Salvar resultado local
+    ###########################################################################
+
+    - name: Montar resumo final
+      ansible.builtin.set_fact:
+        quay_api_validation_summary:
+          source:
+            name: "{{ quay_source.name | default('PRD') }}"
+            url: "{{ quay_source_url }}"
+            repositories_visible: "{{ quay_source_repositories | length }}"
+          target:
+            name: "{{ quay_target.name | default('DR') }}"
+            url: "{{ quay_target_url }}"
+            repositories_visible: "{{ quay_target_repositories | length }}"
+            mirror_repositories_found: "{{ quay_target_mirror_repositories | length }}"
+          discovery_namespaces: "{{ quay_discovery_namespaces }}"
+          mirror_configs: "{{ quay_mirror_configs | default([]) }}"
+          target_tag_summary: "{{ quay_target_tag_summary | default([]) }}"
+          sync_actions_executed: "{{ quay_execute_sync_actions | bool }}"
+
+    - name: Salvar resumo JSON local
+      ansible.builtin.copy:
+        dest: "{{ quay_output_dir }}/quay_api_validation_summary.json"
+        mode: "0644"
+        content: "{{ quay_api_validation_summary | to_nice_json }}"
+
+    - name: Exibir caminho do resumo
+      ansible.builtin.debug:
+        msg: "Resumo salvo em {{ quay_output_dir }}/quay_api_validation_summary.json"

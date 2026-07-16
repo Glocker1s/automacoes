@@ -1,0 +1,393 @@
+{% macro badge(text, level) -%}
+  {%- set bg = '#2e7d32' if level == 'ok' else ('#b00020' if level == 'crit' else ('#ef6c00' if level == 'warn' else '#455a64')) -%}
+  <span style="display:inline-block;background-color:{{ bg }};color:#ffffff;font-size:11px;font-weight:bold;padding:3px 7px;border-radius:3px;white-space:nowrap;">{{ text }}</span>
+{%- endmacro %}
+
+{% macro card(title, value, subtitle, level) -%}
+  {%- set border = '#2e7d32' if level == 'ok' else ('#b00020' if level == 'crit' else ('#ef6c00' if level == 'warn' else '#607d8b')) -%}
+  <td width="25%" style="padding:6px;vertical-align:top;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;border-left:5px solid {{ border }};">
+      <tr><td style="padding:10px;font-family:Arial,sans-serif;">
+        <div style="font-size:12px;color:#555;margin-bottom:4px;">{{ title }}</div>
+        <div style="font-size:22px;font-weight:bold;color:#111;">{{ value }}</div>
+        <div style="font-size:11px;color:#666;margin-top:4px;">{{ subtitle }}</div>
+      </td></tr>
+    </table>
+  </td>
+{%- endmacro %}
+
+{% macro status_label(status) -%}
+  {%- if status == 'OK' -%}Sincronizado
+  {%- elif status == 'SKIPPED_BY_FILTER' -%}Ignorado pelo filtro
+  {%- elif status == 'OUT_OF_FILTER_PRESENT_ON_TARGET' -%}Fora do filtro no DR
+  {%- elif status == 'MISSING_TAG' -%}Tag ausente no DR
+  {%- elif status == 'DIGEST_MISMATCH' -%}Diferença de digest
+  {%- elif status == 'DIGEST_UNAVAILABLE' -%}Digest indisponível
+  {%- elif status == 'EXTRA_TAG_ON_TARGET' -%}Tag extra no DR
+  {%- elif status == 'MIRROR_DISABLED' -%}Mirror desabilitado
+  {%- elif status == 'MIRROR_CONFIG_ERROR' -%}Erro na configuração do mirror
+  {%- elif status == 'TAG_COLLECTION_ERROR' -%}Erro ao coletar tags
+  {%- elif status == 'SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE' -%}Origem vazia ou inacessível
+  {%- else -%}{{ status }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro status_interpretation(status) -%}
+  {%- if status == 'OK' -%}Tag sincronizada com digest igual.
+  {%- elif status == 'SKIPPED_BY_FILTER' -%}Tag fora do filtro configurado no mirror; ausência no DR é esperada.
+  {%- elif status == 'OUT_OF_FILTER_PRESENT_ON_TARGET' -%}Tag não deveria sincronizar pelo filtro, mas existe no DR.
+  {%- elif status == 'MISSING_TAG' -%}Tag existe no PRD, deveria sincronizar, mas não foi encontrada no DR.
+  {%- elif status == 'DIGEST_MISMATCH' -%}Tag existe nos dois lados, mas aponta para digest diferente.
+  {%- elif status == 'DIGEST_UNAVAILABLE' -%}Tag existe nos dois lados, mas não foi possível comparar digest.
+  {%- elif status == 'EXTRA_TAG_ON_TARGET' -%}Tag existe no DR, mas não foi encontrada no PRD.
+  {%- elif status == 'MIRROR_DISABLED' -%}Repository mirror está desabilitado no DR.
+  {%- elif status == 'MIRROR_CONFIG_ERROR' -%}Não foi possível consultar a configuração de mirror do repository.
+  {%- elif status == 'TAG_COLLECTION_ERROR' -%}Falha ao coletar tags no PRD ou DR.
+  {%- elif status == 'SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE' -%}Nenhuma tag foi retornada no PRD para este repository.
+  {%- else -%}Verificar detalhes na tabela de comparação.
+  {%- endif -%}
+{%- endmacro %}
+
+{% set final = quay_manager_result.final | default({}) %}
+{% set initial = quay_manager_result.initial | default({}) %}
+{% set summary = final.summary | default({}) %}
+{% set initial_summary = initial.summary | default({}) %}
+{% set status_counts = summary.status_counts | default({}) %}
+{% set severity_counts = summary.severity_counts | default({}) %}
+{% set rows = final.comparison_rows | default([]) %}
+{% set initial_rows = initial.comparison_rows | default([]) %}
+{% set mirror_configs = final.mirror_configs | default(quay_final_mirror_configs | default([])) %}
+{% set row_limit = quay_report_max_rows | default(200) | int %}
+
+{% if quay_report_show_ok_rows | default(false) | bool %}
+  {% set display_rows = rows %}
+{% else %}
+  {% set display_rows = rows | rejectattr('status', 'equalto', 'OK') | list %}
+{% endif %}
+
+{% if display_rows | length == 0 %}
+  {% set display_rows = rows %}
+{% endif %}
+
+{% set namespaces = quay_discovery_namespaces | default([]) %}
+{% set namespace_preview_limit = quay_report_namespace_preview_limit | default(5) | int %}
+{% set namespace_preview = namespaces[:namespace_preview_limit] %}
+{% set namespace_total = namespaces | length %}
+{% set namespace_remaining = namespace_total - (namespace_preview | length) %}
+
+{% set mirror_total = mirror_configs | length %}
+{% set mirror_enabled_list = [] %}
+{% set mirror_disabled_list = [] %}
+{% set mirror_success_list = [] %}
+{% set mirror_filters = [] %}
+{% for m in mirror_configs %}
+  {% if m.is_enabled %}
+    {% set _ = mirror_enabled_list.append(m.repository) %}
+  {% else %}
+    {% set _ = mirror_disabled_list.append(m.repository) %}
+  {% endif %}
+
+  {% if m.sync_status | default('') == 'SUCCESS' %}
+    {% set _ = mirror_success_list.append(m.repository) %}
+  {% endif %}
+
+  {% set mirror_filter_value = m.root_rule.rule_value | default(['*']) | join(', ') %}
+  {% if mirror_filter_value not in mirror_filters %}
+    {% set _ = mirror_filters.append(mirror_filter_value) %}
+  {% endif %}
+{% endfor %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td align="left" style="padding:8px 8px 12px 8px;">
+      <table role="presentation" width="1100" cellspacing="0" cellpadding="0" border="0" style="width:1100px;border-collapse:collapse;">
+        <tr>
+          <td style="background-color:#263238;padding:14px 16px;color:#ffffff;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td align="left" valign="top" style="color:#ffffff;">
+                  <div style="font-size:20px;font-weight:bold;">{{ quay_report_title }}</div>
+                  <div style="font-size:13px;color:#dbe3e6;margin-top:4px;">
+                    Modo: <b>{{ quay_report_mode_label }}</b>
+                    &nbsp;|&nbsp; Job: <b>{{ quay_job_id }}</b>
+                    &nbsp;|&nbsp; Executor: <b>{{ quay_executor }}</b>
+                    &nbsp;|&nbsp; Data: <b>{{ quay_report_date_br }}</b>
+                  </div>
+                </td>
+                <td align="right" valign="top">
+                  {{ badge(quay_report_level_label | trim, 'crit' if quay_report_level | trim == 'crit' else ('warn' if quay_report_level | trim == 'warn' else 'ok')) }}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr><td style="padding:12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;">
+            <tr>
+              {{ card('Repositories mirror', summary.repositories_evaluated | default(0), 'detectados no DR', 'ok') }}
+              {{ card('Tags PRD', summary.source_tags_evaluated | default(0), 'avaliadas na origem', 'info') }}
+              {{ card('Divergências críticas', severity_counts.critical | default(0), 'faltantes ou digest diferente', 'crit' if (severity_counts.critical | default(0) | int) > 0 else 'ok') }}
+              {{ card('Candidatos a sync', summary.sync_candidate_repositories | default([]) | length, 'repositories com ação sugerida', 'warn' if (summary.sync_candidate_repositories | default([]) | length) > 0 else 'ok') }}
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Origem</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Destino</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Motivo</th>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;word-break:break-word;">{{ quay_source_name }}<br/>{{ quay_source_url }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;word-break:break-word;">{{ quay_target_name }}<br/>{{ quay_target_url }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ motivo | default('—') }}</td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Escopo avaliado</div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;width:160px;background:#f9fafb;font-weight:bold;">Namespaces</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                <b>{{ namespace_total }}</b> namespace(s) avaliado(s)
+                <span style="color:#666;">&nbsp;|&nbsp;Amostra:</span>
+                {% for ns in namespace_preview %}
+                  <span style="display:inline-block;background:#eef2f7;border:1px solid #d6dde6;border-radius:12px;padding:2px 8px;margin:2px;font-family:Consolas,monospace;font-size:12px;">{{ ns }}</span>
+                {% endfor %}
+                {% if namespace_remaining > 0 %}
+                  <span style="display:inline-block;background:#455a64;color:#ffffff;border-radius:12px;padding:2px 8px;margin:2px;font-size:12px;">+{{ namespace_remaining }}</span>
+                {% endif %}
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Resumo de status</div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Status</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Quantidade</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Interpretação</th>
+            </tr>
+            {% for s, c in status_counts.items() %}
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ status_label(s) }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ c }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ status_interpretation(s) }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+        </td></tr>
+
+        {% if quay_effective_mode == 'sync' %}
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Resultado do sync</div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Repository</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Antes</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">sync-cancel</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">sync-now</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Depois</th>
+            </tr>
+
+            {% set sync_repos = initial_summary.sync_candidate_repositories | default([]) %}
+            {% for repo in sync_repos %}
+              {% set ns = namespace(cancel=None, now=None, initial_bad=[], final_bad=[]) %}
+
+              {% for a in quay_sync_actions %}
+                {% if a.repository == repo and a.action == 'sync-cancel' %}
+                  {% set ns.cancel = a %}
+                {% endif %}
+                {% if a.repository == repo and a.action == 'sync-now' %}
+                  {% set ns.now = a %}
+                {% endif %}
+              {% endfor %}
+
+              {% for r in initial_rows %}
+                {% if r.repository == repo and r.status in quay_sync_candidate_statuses %}
+                  {% set _ = ns.initial_bad.append(r) %}
+                {% endif %}
+              {% endfor %}
+
+              {% for r in rows %}
+                {% if r.repository == repo and r.status in quay_sync_candidate_statuses %}
+                  {% set _ = ns.final_bad.append(r) %}
+                {% endif %}
+              {% endfor %}
+
+              <tr>
+                <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ repo }}</td>
+
+                <td style="padding:8px;border:1px solid #d9d9d9;">
+                  {% if ns.initial_bad | length > 0 %}
+                    {{ badge((ns.initial_bad | length) ~ ' divergência(s)', 'crit') }}
+                  {% else %}
+                    {{ badge('Sem divergência', 'ok') }}
+                  {% endif %}
+                </td>
+
+                <td style="padding:8px;border:1px solid #d9d9d9;">
+                  {% if not (quay_sync_cancel_before_now | bool) %}
+                    {{ badge('Desabilitado', 'info') }}
+                  {% elif ns.cancel is none %}
+                    {{ badge('Não executado', 'warn') }}
+                  {% elif ns.cancel.ok %}
+                    {% if ns.cancel.http_status | int == 404 %}
+                      {{ badge('Sem sync ativo (404)', 'info') }}
+                    {% elif ns.cancel.http_status | int == 400 %}
+                      {{ badge('Sem ação necessária (400)', 'info') }}
+                    {% else %}
+                      {{ badge('OK (' ~ ns.cancel.http_status ~ ')', 'ok') }}
+                    {% endif %}
+                  {% else %}
+                    {{ badge('Falha (' ~ (ns.cancel.http_status | default('N/A')) ~ ')', 'crit') }}
+                  {% endif %}
+                </td>
+
+                <td style="padding:8px;border:1px solid #d9d9d9;">
+                  {% if ns.now is none %}
+                    {{ badge('Não executado', 'warn') }}
+                  {% elif ns.now.ok %}
+                    {% if ns.now.http_status | int == 204 %}
+                      {{ badge('Aceito (204)', 'ok') }}
+                    {% else %}
+                      {{ badge('OK (' ~ ns.now.http_status ~ ')', 'ok') }}
+                    {% endif %}
+                  {% else %}
+                    {{ badge('Falha (' ~ (ns.now.http_status | default('N/A')) ~ ')', 'crit') }}
+                  {% endif %}
+                </td>
+
+                <td style="padding:8px;border:1px solid #d9d9d9;">
+                  {% if ns.final_bad | length == 0 %}
+                    {{ badge('Resolvido', 'ok') }}
+                  {% else %}
+                    {{ badge((ns.final_bad | length) ~ ' pendente(s)', 'crit') }}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+
+            {% if sync_repos | length == 0 %}
+            <tr>
+              <td colspan="5" style="padding:8px;border:1px solid #d9d9d9;">Nenhuma ação de sync foi necessária.</td>
+            </tr>
+            {% endif %}
+          </table>
+
+          <div style="font-size:12px;color:#666;margin-top:6px;line-height:17px;">
+            Observação: HTTP 404 no <b>sync-cancel</b> normalmente significa que não havia sincronização ativa para cancelar. O resultado efetivo é validado pela comparação final de tag + digest.
+          </div>
+        </td></tr>
+        {% endif %}
+
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Resumo dos mirrors</div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Total</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Habilitados</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Desabilitados</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Último status SUCCESS</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Filtros encontrados</th>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ mirror_total }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ mirror_enabled_list | length }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ mirror_disabled_list | length }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ mirror_success_list | length }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ mirror_filters | join(' | ') }}</td>
+            </tr>
+          </table>
+
+          {% if not (quay_report_show_mirror_config | default(false) | bool) %}
+          <div style="font-size:12px;color:#666;margin-top:6px;">
+            Detalhamento da configuração dos mirrors oculto por padrão para manter o e-mail compacto.
+            Para exibir, defina <b>quay_report_show_mirror_config: true</b>.
+          </div>
+          {% endif %}
+        </td></tr>
+
+        {% if quay_report_show_mirror_config | default(false) | bool %}
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Configuração dos mirrors</div>
+          {% set mirror_detail_limit = quay_report_mirror_config_max_rows | default(30) | int %}
+          {% if mirror_configs | length > mirror_detail_limit %}
+          <div style="font-size:12px;color:#666;margin-bottom:7px;">
+            Exibindo os primeiros {{ mirror_detail_limit }} mirrors. O JSON local contém o resultado completo.
+          </div>
+          {% endif %}
+
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Repository</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Enabled</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Status mirror</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Filtro</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Intervalo</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Robot</th>
+            </tr>
+            {% for m in mirror_configs[:mirror_detail_limit] %}
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ m.repository }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ badge('true' if m.is_enabled else 'false', 'ok' if m.is_enabled else 'crit') }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ badge(m.sync_status | default('—'), 'ok' if m.sync_status == 'SUCCESS' else 'warn') }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ m.root_rule.rule_value | default(['*']) | join(', ') }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ m.sync_interval | default('—') }}s</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ m.robot_username | default('—') }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+        </td></tr>
+        {% endif %}
+
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Resultado da comparação</div>
+
+          {% if display_rows | length > row_limit %}
+          <div style="font-size:12px;color:#666;margin-bottom:7px;">
+            Exibindo as primeiras {{ row_limit }} linhas
+          </div>
+          {% endif %}
+
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Repository</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Tag</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Status</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Filtro</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Mensagem</th>
+            </tr>
+
+            {% for r in display_rows[:row_limit] %}
+              {% set k = 'ok' if r.severity == 'ok' else ('crit' if r.severity == 'critical' else ('warn' if r.severity == 'warning' else 'info')) %}
+              <tr>
+                <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ r.repository }}</td>
+                <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ r.tag | default('—') }}</td>
+                <td style="padding:8px;border:1px solid #d9d9d9;">{{ badge(status_label(r.status), k) }}</td>
+                <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">{{ r.filter | default('—') }}</td>
+                <td style="padding:8px;border:1px solid #d9d9d9;">{{ r.message }}</td>
+              </tr>
+            {% endfor %}
+
+            {% if display_rows | length == 0 %}
+            <tr>
+              <td colspan="5" style="padding:8px;border:1px solid #d9d9d9;">Nenhuma linha de comparação para exibir.</td>
+            </tr>
+            {% endif %}
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;border-bottom:1px solid #d9d9d9;color:#555;font-size:12px;line-height:17px;">
+        </td></tr>
+      </table>
+    </td>
+  </tr>
+</table>

@@ -1,0 +1,87 @@
+---
+- name: Failure | Capturar contexto da falha
+  ansible.builtin.set_fact:
+    quay_failure_task: "{{ ansible_failed_task.name | default('—') }}"
+    quay_failure_action: "{{ ansible_failed_task.action | default('—') }}"
+    quay_failure_msg: "{{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default(ansible_failed_result.stdout | default('Erro não mapeado'))) }}"
+    quay_failure_raw: "{{ ansible_failed_result | default({}) }}"
+    quay_failure_date_br: >-
+      {{ lookup('ansible.builtin.pipe', "TZ='" ~ (quay_report_timezone | default('America/Sao_Paulo')) ~ "' date '+%d/%m/%Y %H:%M:%S'") }}
+
+- name: Failure | Classificar categoria da falha
+  ansible.builtin.set_fact:
+    quay_failure_category: >-
+      {%- set raw = (quay_failure_msg ~ ' ' ~ (quay_failure_raw | string)) | lower -%}
+      {%- if '401' in raw or 'invalid_token' in raw or 'expired_token' in raw or 'session required' in raw -%}
+      Token inválido ou expirado
+      {%- elif '403' in raw or 'unauthorized' in raw or 'insufficient_scope' in raw or 'forbidden' in raw -%}
+      Permissão insuficiente no Quay
+      {%- elif '404' in raw or 'not found' in raw -%}
+      Recurso não encontrado no Quay
+      {%- elif 'namespace, starred or public' in raw or 'namespace' in raw and 'required' in raw -%}
+      Namespace ausente ou inválido na consulta
+      {%- elif 'nenhum repositório mirror' in raw or 'nenhum repositório mirror' in raw or 'nenhum repositório mirror' in raw -%}
+      Nenhum repository mirror encontrado
+      {%- elif 'nenhum repositório mirror' in raw or 'nenhum repositório mirror' in raw or 'nenhum repository mirror' in raw -%}
+      Nenhum repository mirror encontrado
+      {%- elif 'connection refused' in raw or 'no route to host' in raw or 'timed out' in raw or 'timeout' in raw -%}
+      Falha de conectividade com Quay
+      {%- elif 'certificate' in raw or 'tls' in raw or 'ssl' in raw or 'x509' in raw -%}
+      Falha de certificado/TLS
+      {%- elif 'smbclient' in raw or 'cifs' in raw or 'failed to connect' in raw and 'share' in raw -%}
+      Falha no upload CIFS de anexos
+      {%- elif 'sync-now' in raw or 'sync-cancel' in raw or '/mirror' in raw -%}
+      Falha em operação de mirror/sync
+      {%- elif 'variáveis obrigatórias' in raw or 'assertion' in raw or 'mandatory' in raw -%}
+      Variável obrigatória ausente ou inválida
+      {%- else -%}
+      Erro não classificado automaticamente
+      {%- endif -%}
+
+- name: Failure | Definir orientação da falha
+  ansible.builtin.set_fact:
+    quay_failure_guidance: >-
+      {%- set cat = quay_failure_category | trim -%}
+      {%- if cat == 'Token inválido ou expirado' -%}
+      Gerar novamente o OAuth token no Quay e validar se ele foi autorizado pelo usuário correto. Testar /api/v1/user/ com Authorization Bearer.
+      {%- elif cat == 'Permissão insuficiente no Quay' -%}
+      Validar scopes do token e permissões do usuário nos repositories. Para consultar mirror e executar sync, o token do DR deve ter permissão equivalente a repo:admin nos repositories mirrored.
+      {%- elif cat == 'Recurso não encontrado no Quay' -%}
+      Validar URLs, namespace, nome do repository e se o repository existe no PRD/DR.
+      {%- elif cat == 'Namespace ausente ou inválido na consulta' -%}
+      Validar quay_discovery_namespaces. A API /api/v1/repository do Quay exige namespace, starred ou public.
+      {%- elif cat == 'Nenhum repository mirror encontrado' -%}
+      Confirmar se o cliente usa repository mirror, se os mirrors estão nos namespaces informados e se o token do DR consegue listar repositories com state=MIRROR.
+      {%- elif cat == 'Falha de conectividade com Quay' -%}
+      Validar rota/DNS/firewall/proxy entre o AAP/controller e os Quays PRD/DR.
+      {%- elif cat == 'Falha de certificado/TLS' -%}
+      Validar cadeia de certificado dos Quays ou usar validate_certs=false somente em lab/ambiente controlado.
+      {%- elif cat == 'Falha no upload CIFS de anexos' -%}
+      Validar send_mail_cifs, send_mail_cifs_address, send_mail_cifs_path, credenciais SMB e se o host delegado possui smbclient.
+      {%- elif cat == 'Falha em operação de mirror/sync' -%}
+      Validar se os endpoints de mirror estão habilitados, se o repository é MIRROR e se o token do DR possui permissão repo:admin.
+      {%- elif cat == 'Variável obrigatória ausente ou inválida' -%}
+      Validar defaults, Survey e extra vars: quay_source, quay_target e quay_discovery_namespaces.
+      {%- else -%}
+      Consultar a task, ação e mensagem técnica abaixo para identificar a origem da falha.
+      {%- endif -%}
+
+- name: Failure | Montar assunto e HTML de falha
+  ansible.builtin.set_fact:
+    send_mail_subject: >-
+      {{ quay_report_subject_prefix }} (FALHA) - {{ quay_report_title }} - Job #{{ quay_job_id | default(tower_job_id | default(awx_job_id | default('local'))) }}
+    send_mail_body: "{{ lookup('ansible.builtin.template', 'quay_report_failure.html.j2') }}"
+
+- name: Failure | Publicar set_stats de falha
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "{{ send_mail_subject }}"
+      send_mail_body: "{{ send_mail_body }}"
+      send_mail_attachments: []
+      send_mail_cifs_remote_files: []
+      quay_report_level: "fail"
+      quay_report_level_label: "Falha"
+      quay_failure_category: "{{ quay_failure_category | trim }}"
+      quay_failure_task: "{{ quay_failure_task }}"
+      quay_failure_action: "{{ quay_failure_action }}"
+      quay_failure_msg: "{{ quay_failure_msg }}"

@@ -1,0 +1,122 @@
+---
+# Quay Sync Manager
+# Modos:
+#   check -> descobre repository mirrors, compara PRD x DR por tag/digest e reporta.
+#   sync  -> executa check, aplica sync-cancel + sync-now nos candidatos e revalida.
+
+quay_mode: "check" # check | sync
+motivo: "Validação de mirror Quay PRD x DR"
+
+quay_source:
+  name: "PRD"
+  url: "https://quay-prd-quay-quay-prd.apps.cluster-pnkh7.pnkh7.sandbox2478.opentlc.com"
+  token: "EP2efeWCBZQnk8R9DACeUvDfYeeeZFa0EEAxFmEf"
+  validate_certs: false
+
+quay_target:
+  name: "DR"
+  url: "https://quay-dr-quay-quay-dr.apps.cluster-pnkh7.pnkh7.sandbox2478.opentlc.com"
+  token: "oBsW70zow0xVlCyx8hL11jUkjgP8jGXaYOZ7ZpiG"
+  validate_certs: false
+
+# A API /api/v1/repository exige namespace, starred ou public.
+# Para uso enterprise, informar as organizations/namespaces de escopo.
+# A automação descobre automaticamente os repositories MIRROR dentro desses namespaces.
+quay_discovery_namespaces:
+  - apps
+  - qsync-lab-01
+  - qsync-lab-02
+  - qsync-lab-03
+  - qsync-lab-04
+  - qsync-lab-05
+  - qsync-lab-06
+
+# Paginação/limites.
+# O endpoint de tags usa page/limit.
+# A automação consulta até quay_max_pages, mas por padrão para automaticamente
+# quando uma página retorna menos itens que quay_tag_page_limit.
+quay_repository_page_limit: 100
+quay_tag_page_limit: 100
+quay_max_pages: 10
+
+# Paginação inteligente de tags.
+# true:
+#   page 1 retornou 5 tags com limit=100 -> não consulta page 2.
+#   page 1 retornou 100 tags com limit=100 -> consulta page 2.
+# false:
+#   consulta todas as páginas até quay_max_pages, comportamento antigo.
+quay_tag_pagination_stop_when_page_not_full: true
+
+# Debug operacional.
+# false evita imprimir detalhes de todos os mirrors no log do AAP.
+# true ajuda no lab/troubleshooting, mas pode poluir muito em cliente grande.
+quay_debug_enabled: false
+
+# Segurança de logs.
+# Em cliente, mantenha true para não vazar token nas saídas do AAP.
+# Em lab, pode usar false para debugar retorno da API.
+quay_hide_sensitive_logs: false
+
+# Diretórios/arquivos locais no controller/AAP.
+quay_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+quay_output_dir: "/tmp/quay-sync-manager-{{ quay_job_id }}"
+quay_result_file: "{{ quay_output_dir }}/quay_result.json"
+quay_initial_json_file: "{{ quay_output_dir }}/quay_compare_initial.json"
+quay_final_json_file: "{{ quay_output_dir }}/quay_compare_final.json"
+quay_sync_actions_file: "{{ quay_output_dir }}/quay_sync_actions.json"
+
+# Sync nativo do Quay.
+quay_sync_cancel_before_now: true
+quay_sync_wait_after_trigger_seconds: 20
+quay_sync_retries: 10
+quay_sync_delay: 30
+quay_sync_candidate_statuses:
+  - MISSING_TAG
+  - DIGEST_MISMATCH
+  - DIGEST_UNAVAILABLE
+
+# Falha formal do job.
+# Divergências de conteúdo por padrão só alertam no relatório.
+# Erros de API/token/conexão entram no bloco rescue e geram e-mail de falha.
+quay_fail_job_on_divergence: false
+
+# Relatório.
+quay_report_timezone: "America/Sao_Paulo"
+quay_report_title: "Quay Sync Manager"
+quay_report_subject_prefix: "Ansible-Report"
+quay_report_max_rows: 200
+
+# Quantos namespaces aparecem no cabeçalho do e-mail.
+# Se houver mais namespaces, o report mostra "+N".
+quay_report_namespace_preview_limit: 5
+
+# Exibir ou ocultar a tabela detalhada de configuração dos mirrors.
+quay_report_show_mirror_config: false
+
+# Quando quay_report_show_mirror_config=true, limita quantas linhas aparecem.
+quay_report_mirror_config_max_rows: 30
+
+# Exibir linhas OK na tabela de comparação.
+# false = mostra apenas divergências/atenções.
+# true  = mostra tudo, incluindo OK.
+quay_report_show_ok_rows: false
+
+# Anexos do e-mail.
+# Por padrão, a automação envia o relatório HTML no corpo do e-mail e NÃO anexa JSON
+quay_report_attach_artifacts: false
+
+# Upload de anexos via CIFS para integração com job de e-mail.
+# Só será usado quando quay_report_attach_artifacts=true.
+quay_report_cifs_upload_enabled: false
+quay_report_cifs_delegate: "localhost"
+quay_report_cifs_stage_dir: "/tmp/quay-sync-cifs-{{ quay_job_id }}"
+
+send_mail_cifs: "producao"
+send_mail_cifs_path: "/Ansible/mail_attachments"
+send_mail_cifs_address:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.115/certs"
+cifs_workgroup: "WORKGROUP"
+
+# Usuário/senha CIFS normalmente vêm da Credential do AAP.
+# ansible_user / ansible_password são usados por padrão.

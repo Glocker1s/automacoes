@@ -1,0 +1,195 @@
+---
+- name: Report | Definir métricas finais
+  ansible.builtin.set_fact:
+    quay_initial_summary: "{{ quay_manager_result.initial.summary | default({}) }}"
+    quay_final_summary: "{{ quay_manager_result.final.summary | default({}) }}"
+    quay_final_rows: "{{ quay_manager_result.final.comparison_rows | default([]) }}"
+    quay_sync_actions: "{{ quay_manager_result.sync.actions | default([]) }}"
+    quay_sync_performed: "{{ quay_manager_result.sync.performed | default(false) }}"
+    quay_final_mirror_configs: "{{ quay_manager_result.final.mirror_configs | default(quay_mirror_configs | default([])) }}"
+
+- name: Report | Calcular nível do relatório
+  ansible.builtin.set_fact:
+    quay_report_level: >-
+      {%- set crit = (quay_final_summary.severity_counts.critical | default(0) | int) -%}
+      {%- set warn = (quay_final_summary.severity_counts.warning | default(0) | int) -%}
+      {%- set sync_failed = (quay_manager_result.sync.failed_actions | default(0) | int) -%}
+      {%- if crit > 0 or sync_failed > 0 -%}crit
+      {%- elif warn > 0 -%}warn
+      {%- else -%}ok{%- endif -%}
+
+- name: Report | Definir labels do relatório
+  ansible.builtin.set_fact:
+    quay_report_level_label: >-
+      {%- if quay_report_level | trim == 'crit' -%}Crítico
+      {%- elif quay_report_level | trim == 'warn' -%}Alerta
+      {%- else -%}OK{%- endif -%}
+    quay_report_mode_label: "{{ 'Sync' if quay_effective_mode == 'sync' else 'Check' }}"
+
+- name: Report | Montar assunto e HTML
+  ansible.builtin.set_fact:
+    send_mail_subject: >-
+      {{ quay_report_subject_prefix }} ({{ quay_report_level_label | trim }}) -
+      {{ quay_report_title }} - {{ quay_report_mode_label }} -
+      Job #{{ quay_job_id }}
+    send_mail_body: "{{ lookup('ansible.builtin.template', 'quay_report.html.j2') }}"
+
+- name: Report | Definir anexos locais
+  ansible.builtin.set_fact:
+    quay_report_local_attachments: >-
+      {{
+        (([quay_sync_actions_file] if quay_effective_mode == 'sync' else []))
+        if quay_report_attach_artifacts | default(false) | bool
+        else []
+      }}
+
+- name: Report | Verificar anexos locais
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ quay_report_local_attachments }}"
+  register: quay_report_attachment_stats
+  changed_when: false
+  failed_when: false
+
+- name: Report | Filtrar anexos locais válidos
+  ansible.builtin.set_fact:
+    quay_report_valid_local_attachments: >-
+      {{
+        (quay_report_attachment_stats.results | default([]))
+        | selectattr('stat.exists', 'defined')
+        | selectattr('stat.exists')
+        | selectattr('stat.size', 'defined')
+        | selectattr('stat.size', '>', 0)
+        | map(attribute='stat.path')
+        | list
+      }}
+
+- name: Report | Inicializar lista de anexos remotos
+  ansible.builtin.set_fact:
+    send_mail_cifs_remote_files: []
+
+- name: Report | Publicar anexos no CIFS
+  when:
+    - quay_report_attach_artifacts | default(false) | bool
+    - quay_report_cifs_upload_enabled | default(false) | bool
+    - quay_report_valid_local_attachments | length > 0
+  block:
+    - name: Report | Normalizar configuração CIFS
+      ansible.builtin.set_fact:
+        _quay_cifs_server: "{{ (send_mail_cifs_address | default({}))[send_mail_cifs | lower] | default('') }}"
+        _quay_cifs_dir: "{{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}"
+        _quay_cifs_user: "{{ ansible_user | default('') }}"
+        _quay_cifs_pass: "{{ ansible_password | default('') }}"
+        _quay_cifs_workgroup: "{{ cifs_workgroup | default('WORKGROUP') }}"
+        _quay_cifs_delegate: "{{ quay_report_cifs_delegate | default('localhost') }}"
+        _quay_cifs_stage_dir: "{{ quay_report_cifs_stage_dir }}"
+        _quay_cifs_password_file: "{{ quay_report_cifs_stage_dir }}/.cifs-pass"
+      no_log: true
+
+    - name: Report | Falhar se CIFS não estiver mapeado
+      ansible.builtin.fail:
+        msg: >-
+          CIFS não mapeado para upload dos anexos do Quay Sync Manager:
+          send_mail_cifs='{{ send_mail_cifs | default('') }}' não existe em send_mail_cifs_address.
+      when: _quay_cifs_server | length == 0
+
+    - name: Report | Garantir diretório temporário no host do smbclient
+      ansible.builtin.file:
+        path: "{{ _quay_cifs_stage_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: "{{ _quay_cifs_delegate }}"
+      become: false
+
+    - name: Report | Copiar anexos para host do smbclient
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ _quay_cifs_stage_dir }}/{{ item | basename }}"
+        mode: "0640"
+      loop: "{{ quay_report_valid_local_attachments }}"
+      delegate_to: "{{ _quay_cifs_delegate }}"
+      become: false
+
+    - name: Report | Criar arquivo temporário de senha CIFS
+      ansible.builtin.copy:
+        dest: "{{ _quay_cifs_password_file }}"
+        content: "{{ _quay_cifs_pass }}"
+        mode: "0600"
+      delegate_to: "{{ _quay_cifs_delegate }}"
+      become: false
+      no_log: true
+
+    - name: Report | Testar acesso ao CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _quay_cifs_server }}"
+        -U "{{ _quay_cifs_user }}%$(cat {{ _quay_cifs_password_file }})"
+        -W "{{ _quay_cifs_workgroup }}"
+        -c "cd {{ _quay_cifs_dir }} ; ls"
+      register: _quay_cifs_probe
+      retries: 5
+      delay: 10
+      until: _quay_cifs_probe.rc == 0
+      changed_when: false
+      delegate_to: "{{ _quay_cifs_delegate }}"
+      become: false
+
+    - name: Report | Subir anexos para CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _quay_cifs_server }}"
+        -U "{{ _quay_cifs_user }}%$(cat {{ _quay_cifs_password_file }})"
+        -W "{{ _quay_cifs_workgroup }}"
+        -c 'cd {{ _quay_cifs_dir }} ; put {{ _quay_cifs_stage_dir }}/{{ item | basename }} {{ item | basename }}'
+      loop: "{{ quay_report_valid_local_attachments }}"
+      register: _quay_cifs_put
+      changed_when: true
+      delegate_to: "{{ _quay_cifs_delegate }}"
+      become: false
+
+    - name: Report | Montar lista de anexos remotos para e-mail
+      ansible.builtin.set_fact:
+        send_mail_cifs_remote_files: >-
+          {{ quay_report_valid_local_attachments | map('basename') | list }}
+
+  always:
+    - name: Report | Remover arquivo temporário de senha CIFS
+      ansible.builtin.file:
+        path: "{{ _quay_cifs_password_file | default('/tmp/.quay-cifs-pass') }}"
+        state: absent
+      failed_when: false
+      no_log: true
+      delegate_to: "{{ _quay_cifs_delegate | default('localhost') }}"
+      become: false
+
+    - name: Report | Remover anexos temporários do host do smbclient
+      ansible.builtin.file:
+        path: "{{ _quay_cifs_stage_dir | default('/tmp') }}/{{ item | basename }}"
+        state: absent
+      loop: "{{ quay_report_valid_local_attachments | default([]) }}"
+      failed_when: false
+      delegate_to: "{{ _quay_cifs_delegate | default('localhost') }}"
+      become: false
+
+- name: Report | Publicar set_stats para envio externo de e-mail
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: "{{ send_mail_subject }}"
+      send_mail_body: "{{ send_mail_body }}"
+      send_mail_cifs: "{{ send_mail_cifs | default('') }}"
+      send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+      send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+      cifs_workgroup: "{{ cifs_workgroup | default('WORKGROUP') }}"
+      send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
+      send_mail_attachments: >-
+        {{
+          (send_mail_cifs_remote_files | default([]))
+          if (quay_report_attach_artifacts | default(false) | bool and quay_report_cifs_upload_enabled | default(false) | bool)
+          else ((quay_report_valid_local_attachments | default([])) if quay_report_attach_artifacts | default(false) | bool else [])
+        }}
+      quay_report_level: "{{ quay_report_level }}"
+      quay_report_level_label: "{{ quay_report_level_label | trim }}"
+      quay_mode: "{{ quay_effective_mode }}"
+      quay_result_file: "{{ quay_result_file }}"
+      quay_final_json_file: "{{ quay_final_json_file }}"
+      quay_sync_candidates: "{{ quay_final_summary.sync_candidate_repositories | default([]) }}"
+      quay_status_counts: "{{ quay_final_summary.status_counts | default({}) }}"
+      quay_severity_counts: "{{ quay_final_summary.severity_counts | default({}) }}"

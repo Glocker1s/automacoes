@@ -1,0 +1,4 @@
+repository,tag,status,severity,mirror_status,mirror_enabled,filter,source_digest,target_digest,message
+{% for r in quay_current_result.comparison_rows | default([]) -%}
+"{{ r.repository | default('') | replace('"', '""') }}","{{ r.tag | default('') | replace('"', '""') }}","{{ r.status | default('') | replace('"', '""') }}","{{ r.severity | default('') | replace('"', '""') }}","{{ r.mirror_status | default('') | replace('"', '""') }}","{{ r.mirror_enabled | default('') }}","{{ r.filter | default('') | replace('"', '""') }}","{{ r.source_digest | default('') | replace('"', '""') }}","{{ r.target_digest | default('') | replace('"', '""') }}","{{ r.message | default('') | replace('"', '""') }}"
+{% endfor -%}

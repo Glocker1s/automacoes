@@ -1,0 +1,248 @@
+---
+- name: Compare {{ quay_compare_stage }} | Montar estruturas auxiliares
+  ansible.builtin.set_fact:
+    _quay_compare_json: >-
+      {%- set rows = [] -%}
+      {%- set sync_candidates = [] -%}
+      {%- set source_tags = quay_current_source_tag_records | default([]) -%}
+      {%- set target_tags = quay_current_target_tag_records | default([]) -%}
+      {%- set target_map = {} -%}
+      {%- for t in target_tags -%}
+        {%- set _ = target_map.update({(t.repository ~ '::' ~ t.tag): t}) -%}
+      {%- endfor -%}
+
+      {%- for m in (quay_mirror_configs | default([])) -%}
+        {%- set repo = m.repository -%}
+        {%- set repo_source_tags = source_tags | selectattr('repository', 'equalto', repo) | list -%}
+        {%- set repo_target_tags = target_tags | selectattr('repository', 'equalto', repo) | list -%}
+        {%- set repo_source_tag_names = repo_source_tags | map(attribute='tag') | list -%}
+        {%- set root_rule = m.root_rule | default({}) -%}
+        {%- set raw_patterns = root_rule.rule_value | default(['*']) -%}
+        {%- set patterns = raw_patterns if (raw_patterns is sequence and raw_patterns is not string) else [raw_patterns | string] -%}
+        {%- set filter_text = patterns | join(',') -%}
+
+        {%- if not (m.mirror_found | default(false) | bool) -%}
+          {%- set _ = rows.append({
+            'repository': repo,
+            'tag': '',
+            'status': 'MIRROR_CONFIG_ERROR',
+            'severity': 'critical',
+            'mirror_status': m.sync_status | default('CONFIG_ERROR'),
+            'mirror_enabled': m.is_enabled | default(false),
+            'filter': filter_text,
+            'source_digest': '',
+            'target_digest': '',
+            'message': 'Falha ao consultar configuração de mirror no DR. HTTP ' ~ (m.http_status | default('0') | string) ~ '. ' ~ (m.api_error | default(''))
+          }) -%}
+          {%- if repo not in sync_candidates -%}{%- set _ = sync_candidates.append(repo) -%}{%- endif -%}
+        {%- elif not (m.is_enabled | default(false) | bool) -%}
+          {%- set _ = rows.append({
+            'repository': repo,
+            'tag': '',
+            'status': 'MIRROR_DISABLED',
+            'severity': 'critical',
+            'mirror_status': m.sync_status | default(''),
+            'mirror_enabled': m.is_enabled | default(false),
+            'filter': filter_text,
+            'source_digest': '',
+            'target_digest': '',
+            'message': 'Repository mirror está desabilitado no DR.'
+          }) -%}
+          {%- if repo not in sync_candidates -%}{%- set _ = sync_candidates.append(repo) -%}{%- endif -%}
+        {%- endif -%}
+
+        {%- if repo_source_tags | length == 0 -%}
+          {%- set _ = rows.append({
+            'repository': repo,
+            'tag': '',
+            'status': 'SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE',
+            'severity': 'warning',
+            'mirror_status': m.sync_status | default(''),
+            'mirror_enabled': m.is_enabled | default(false),
+            'filter': filter_text,
+            'source_digest': '',
+            'target_digest': '',
+            'message': 'Nenhuma tag foi retornada no PRD para este repository.'
+          }) -%}
+        {%- endif -%}
+
+        {%- for src in repo_source_tags -%}
+          {%- set tag = src.tag -%}
+          {%- set target_key = repo ~ '::' ~ tag -%}
+          {%- set tgt = target_map.get(target_key, {}) -%}
+          {%- set source_digest = src.manifest_digest | default('') -%}
+          {%- set target_digest = tgt.manifest_digest | default('') -%}
+          {%- set match = namespace(value=false) -%}
+
+          {%- for p in patterns -%}
+            {%- set pat = p | string -%}
+            {%- if pat == '*' -%}
+              {%- set match.value = true -%}
+            {%- elif pat == tag -%}
+              {%- set match.value = true -%}
+            {%- elif pat.startswith('*') and pat.endswith('*') and (pat | length) > 2 and (pat[1:-1] in tag) -%}
+              {%- set match.value = true -%}
+            {%- elif pat.endswith('*') and (pat | length) > 1 and tag.startswith(pat[:-1]) -%}
+              {%- set match.value = true -%}
+            {%- elif pat.startswith('*') and (pat | length) > 1 and tag.endswith(pat[1:]) -%}
+              {%- set match.value = true -%}
+            {%- endif -%}
+          {%- endfor -%}
+
+          {%- if not match.value -%}
+            {%- if tgt -%}
+              {%- set status = 'OUT_OF_FILTER_PRESENT_ON_TARGET' -%}
+              {%- set severity = 'info' -%}
+              {%- set message = 'Tag não casa com filtro do mirror, mas existe no DR.' -%}
+            {%- else -%}
+              {%- set status = 'SKIPPED_BY_FILTER' -%}
+              {%- set severity = 'info' -%}
+              {%- set message = 'Tag não casa com filtro do mirror; ausência no DR é esperada.' -%}
+            {%- endif -%}
+          {%- else -%}
+            {%- if not tgt -%}
+              {%- set status = 'MISSING_TAG' -%}
+              {%- set severity = 'critical' -%}
+              {%- set message = 'Tag deveria estar no DR, mas não foi encontrada.' -%}
+              {%- if repo not in sync_candidates -%}{%- set _ = sync_candidates.append(repo) -%}{%- endif -%}
+            {%- elif source_digest | length == 0 or target_digest | length == 0 -%}
+              {%- set status = 'DIGEST_UNAVAILABLE' -%}
+              {%- set severity = 'warning' -%}
+              {%- set message = 'Tag existe nos dois lados, mas não foi possível comparar digest.' -%}
+              {%- if repo not in sync_candidates -%}{%- set _ = sync_candidates.append(repo) -%}{%- endif -%}
+            {%- elif source_digest != target_digest -%}
+              {%- set status = 'DIGEST_MISMATCH' -%}
+              {%- set severity = 'critical' -%}
+              {%- set message = 'Tag existe nos dois lados, mas aponta para digest diferente.' -%}
+              {%- if repo not in sync_candidates -%}{%- set _ = sync_candidates.append(repo) -%}{%- endif -%}
+            {%- else -%}
+              {%- set status = 'OK' -%}
+              {%- set severity = 'ok' -%}
+              {%- set message = 'Tag sincronizada com digest igual.' -%}
+            {%- endif -%}
+          {%- endif -%}
+
+          {%- set _ = rows.append({
+            'repository': repo,
+            'tag': tag,
+            'status': status,
+            'severity': severity,
+            'mirror_status': m.sync_status | default(''),
+            'mirror_enabled': m.is_enabled | default(false),
+            'filter': filter_text,
+            'source_digest': source_digest,
+            'target_digest': target_digest,
+            'message': message
+          }) -%}
+        {%- endfor -%}
+
+        {%- for tgt in repo_target_tags -%}
+          {%- if tgt.tag not in repo_source_tag_names -%}
+            {%- set _ = rows.append({
+              'repository': repo,
+              'tag': tgt.tag,
+              'status': 'EXTRA_TAG_ON_TARGET',
+              'severity': 'warning',
+              'mirror_status': m.sync_status | default(''),
+              'mirror_enabled': m.is_enabled | default(false),
+              'filter': filter_text,
+              'source_digest': '',
+              'target_digest': tgt.manifest_digest | default(''),
+              'message': 'Tag existe no DR, mas não foi encontrada no PRD.'
+            }) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+
+      {%- for e in (quay_current_tag_collection_errors | default([])) -%}
+        {%- set _ = rows.append({
+          'repository': e.repository,
+          'tag': '',
+          'status': 'TAG_COLLECTION_ERROR',
+          'severity': 'critical',
+          'mirror_status': '',
+          'mirror_enabled': '',
+          'filter': '',
+          'source_digest': '',
+          'target_digest': '',
+          'message': e.side ~ ' HTTP ' ~ (e.http_status | string) ~ ': ' ~ e.message
+        }) -%}
+        {%- if e.repository not in sync_candidates -%}{%- set _ = sync_candidates.append(e.repository) -%}{%- endif -%}
+      {%- endfor -%}
+
+      {%- set status_counts = {} -%}
+      {%- set severity_counts = {} -%}
+      {%- for r in rows -%}
+        {%- set _ = status_counts.update({r.status: (status_counts.get(r.status, 0) + 1)}) -%}
+        {%- set _ = severity_counts.update({r.severity: (severity_counts.get(r.severity, 0) + 1)}) -%}
+      {%- endfor -%}
+
+      {%- set candidate_statuses = quay_sync_candidate_statuses | default(['MISSING_TAG', 'DIGEST_MISMATCH', 'DIGEST_UNAVAILABLE']) -%}
+      {%- set candidates_final = [] -%}
+      {%- for r in rows -%}
+        {%- if r.status in candidate_statuses and r.repository not in candidates_final -%}
+          {%- set _ = candidates_final.append(r.repository) -%}
+        {%- endif -%}
+      {%- endfor -%}
+
+      {{ {
+        'stage': quay_compare_stage,
+        'source': {'name': quay_source_name, 'url': quay_source_url},
+        'target': {'name': quay_target_name, 'url': quay_target_url},
+        'discovery_namespaces': quay_discovery_namespaces,
+        'summary': {
+          'repositories_evaluated': quay_mirror_configs | length,
+          'source_tags_evaluated': source_tags | length,
+          'target_tags_evaluated': target_tags | length,
+          'total_rows': rows | length,
+          'status_counts': status_counts,
+          'severity_counts': severity_counts,
+          'sync_candidate_repositories': candidates_final,
+          'has_divergence': candidates_final | length > 0
+        },
+        'mirror_configs': quay_mirror_configs,
+        'comparison_rows': rows
+      } | to_json }}
+
+- name: Compare {{ quay_compare_stage }} | Publicar resultado atual
+  ansible.builtin.set_fact:
+    quay_current_result: "{{ _quay_compare_json | from_json }}"
+    quay_current_summary: "{{ (_quay_compare_json | from_json).summary }}"
+    quay_current_rows: "{{ (_quay_compare_json | from_json).comparison_rows }}"
+
+- name: Compare {{ quay_compare_stage }} | Salvar resultado inicial
+  ansible.builtin.set_fact:
+    quay_initial_result: "{{ quay_current_result }}"
+    quay_initial_summary: "{{ quay_current_summary }}"
+    quay_initial_rows: "{{ quay_current_rows }}"
+  when: quay_compare_stage == 'initial'
+
+- name: Compare {{ quay_compare_stage }} | Salvar resultado final
+  ansible.builtin.set_fact:
+    quay_final_result: "{{ quay_current_result }}"
+    quay_final_summary: "{{ quay_current_summary }}"
+    quay_final_rows: "{{ quay_current_rows }}"
+    quay_final_mirror_configs: "{{ quay_mirror_configs }}"
+  when: quay_compare_stage == 'final'
+
+- name: Compare {{ quay_compare_stage }} | Definir arquivos de saída
+  ansible.builtin.set_fact:
+    _quay_compare_json_file: "{{ quay_initial_json_file if quay_compare_stage == 'initial' else quay_final_json_file }}"
+
+- name: Compare {{ quay_compare_stage }} | Gravar JSON da comparação
+  ansible.builtin.copy:
+    dest: "{{ _quay_compare_json_file }}"
+    mode: "0640"
+    content: "{{ quay_current_result | to_nice_json }}"
+
+- name: Compare {{ quay_compare_stage }} | Exibir resumo
+  ansible.builtin.debug:
+    msg:
+      - "Stage: {{ quay_compare_stage }}"
+      - "Repositories avaliados: {{ quay_current_summary.repositories_evaluated }}"
+      - "Tags PRD avaliadas: {{ quay_current_summary.source_tags_evaluated }}"
+      - "Tags DR avaliadas: {{ quay_current_summary.target_tags_evaluated }}"
+      - "Status: {{ quay_current_summary.status_counts }}"
+      - "Severidade: {{ quay_current_summary.severity_counts }}"
+      - "Repos candidatos a sync: {{ quay_current_summary.sync_candidate_repositories }}"
+      - "JSON: {{ _quay_compare_json_file }}"

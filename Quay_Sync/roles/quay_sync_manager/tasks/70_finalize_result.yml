@@ -1,0 +1,47 @@
+---
+- name: Finalize | Montar resultado consolidado
+  ansible.builtin.set_fact:
+    quay_manager_result:
+      mode: "{{ quay_effective_mode }}"
+      motivo: "{{ motivo | default('') }}"
+      job_id: "{{ quay_job_id }}"
+      executor: "{{ quay_executor }}"
+      generated_at: "{{ quay_report_date_br }}"
+      source:
+        name: "{{ quay_source_name }}"
+        url: "{{ quay_source_url }}"
+        authenticated_user: "{{ quay_source_authenticated_user | default('N/A') }}"
+      target:
+        name: "{{ quay_target_name }}"
+        url: "{{ quay_target_url }}"
+        authenticated_user: "{{ quay_target_authenticated_user | default('N/A') }}"
+      discovery_namespaces: "{{ quay_discovery_namespaces }}"
+      repositories:
+        source_visible: "{{ quay_source_repositories | length }}"
+        target_visible: "{{ quay_target_repositories | length }}"
+        mirror_found: "{{ quay_target_mirror_repositories | length }}"
+      initial: "{{ quay_initial_result }}"
+      final: "{{ quay_final_result }}"
+      sync:
+        performed: "{{ quay_sync_performed | default(false) }}"
+        candidates: "{{ quay_initial_summary.sync_candidate_repositories | default([]) }}"
+        actions: "{{ quay_sync_actions | default([]) }}"
+        failed_actions: "{{ quay_sync_failed_actions | default(0) }}"
+
+- name: Finalize | Gravar resultado consolidado
+  ansible.builtin.copy:
+    dest: "{{ quay_result_file }}"
+    mode: "0640"
+    content: "{{ quay_manager_result | to_nice_json }}"
+
+- name: Finalize | Exibir resumo operacional
+  ansible.builtin.debug:
+    msg:
+      - "Modo: {{ quay_manager_result.mode }}"
+      - "Repos mirror avaliados: {{ quay_manager_result.final.summary.repositories_evaluated }}"
+      - "Tags PRD avaliadas: {{ quay_manager_result.final.summary.source_tags_evaluated }}"
+      - "Tags DR avaliadas: {{ quay_manager_result.final.summary.target_tags_evaluated }}"
+      - "Status final: {{ quay_manager_result.final.summary.status_counts }}"
+      - "Severidade final: {{ quay_manager_result.final.summary.severity_counts }}"
+      - "Repos candidatos a sync final: {{ quay_manager_result.final.summary.sync_candidate_repositories }}"
+      - "Resultado JSON: {{ quay_result_file }}"
