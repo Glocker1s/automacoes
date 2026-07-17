@@ -1,58 +1,96 @@
 ---
-- name: Listar repositórios visíveis no PRD por namespace
-  ansible.builtin.uri:
-    url: "{{ quay_source_url }}/api/v1/repository?namespace={{ item | urlencode }}&last_modified=true"
-    method: GET
-    headers:
-      Authorization: "Bearer {{ quay_source.token }}"
-      Accept: "application/json"
-    validate_certs: "{{ quay_source_validate_certs }}"
-    return_content: true
-    status_code:
-      - 200
-  loop: "{{ quay_discovery_namespaces }}"
-  loop_control:
-    label: "{{ item }}"
-  register: _quay_source_repositories_response
-  no_log: "{{ quay_hide_sensitive_logs | bool }}"
-
-- name: Listar repositórios visíveis no DR por namespace
-  ansible.builtin.uri:
-    url: "{{ quay_target_url }}/api/v1/repository?namespace={{ item | urlencode }}&last_modified=true"
-    method: GET
-    headers:
-      Authorization: "Bearer {{ quay_target.token }}"
-      Accept: "application/json"
-    validate_certs: "{{ quay_target_validate_certs }}"
-    return_content: true
-    status_code:
-      - 200
-  loop: "{{ quay_discovery_namespaces }}"
-  loop_control:
-    label: "{{ item }}"
-  register: _quay_target_repositories_response
-  no_log: "{{ quay_hide_sensitive_logs | bool }}"
-
-- name: Inicializar listas
+- name: Repository discovery | Inicializar resultados paginados
   ansible.builtin.set_fact:
+    _quay_source_repository_page_results: []
+    _quay_target_repository_page_results: []
     quay_source_repositories: []
     quay_target_repositories: []
+    quay_target_mirror_repositories: []
 
-- name: Normalizar repositórios do PRD
-  ansible.builtin.set_fact:
-    quay_source_repositories: "{{ quay_source_repositories + (item.json.repositories | default([])) }}"
-  loop: "{{ _quay_source_repositories_response.results | default([]) }}"
+- name: Repository discovery | Coletar repositórios visíveis no PRD por namespace
+  ansible.builtin.include_tasks: 21_collect_repository_namespace.yml
+  vars:
+    _quay_repo_side: "source"
+    _quay_repo_namespace: "{{ item }}"
+  loop: "{{ quay_discovery_namespaces }}"
   loop_control:
-    label: "{{ item.item | default('namespace') }}"
+    label: "PRD {{ item }}"
 
-- name: Normalizar repositórios do DR
-  ansible.builtin.set_fact:
-    quay_target_repositories: "{{ quay_target_repositories + (item.json.repositories | default([])) }}"
-  loop: "{{ _quay_target_repositories_response.results | default([]) }}"
+- name: Repository discovery | Coletar repositórios visíveis no DR por namespace
+  ansible.builtin.include_tasks: 21_collect_repository_namespace.yml
+  vars:
+    _quay_repo_side: "target"
+    _quay_repo_namespace: "{{ item }}"
+  loop: "{{ quay_discovery_namespaces }}"
   loop_control:
-    label: "{{ item.item | default('namespace') }}"
+    label: "DR {{ item }}"
 
-- name: Filtrar repositórios com state MIRROR no DR
+- name: Repository discovery | Normalizar repositórios do PRD
+  ansible.builtin.set_fact:
+    _quay_source_repositories_json: >-
+      {%- set out = [] -%}
+      {%- set seen = [] -%}
+      {%- for r in (_quay_source_repository_page_results | default([])) -%}
+        {%- if (r.status | default(0) | int) == 200 -%}
+          {%- for repo in (r.json.repositories | default([])) -%}
+            {%- set repo_ns = repo.namespace | default(r.namespace | default('')) -%}
+            {%- set repo_name_raw = repo.name | default(repo.repository | default('')) -%}
+            {%- set repo_short_name = (repo_name_raw.split('/') | last) if ('/' in repo_name_raw) else repo_name_raw -%}
+            {%- set repo_full = repo_name_raw if ('/' in repo_name_raw) else repo_ns ~ '/' ~ repo_short_name -%}
+            {%- if repo_full | length > 1 and repo_full not in seen -%}
+              {%- set _ = seen.append(repo_full) -%}
+              {%- set _ = out.append({
+                'repository': repo_full,
+                'namespace': repo_ns,
+                'name': repo_short_name,
+                'state': repo.state | default(''),
+                'is_public': repo.is_public | default(false),
+                'description': repo.description | default(''),
+                'last_modified': repo.last_modified | default(''),
+                'kind': repo.kind | default(repo.repo_kind | default(''))
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Repository discovery | Normalizar repositórios do DR
+  ansible.builtin.set_fact:
+    _quay_target_repositories_json: >-
+      {%- set out = [] -%}
+      {%- set seen = [] -%}
+      {%- for r in (_quay_target_repository_page_results | default([])) -%}
+        {%- if (r.status | default(0) | int) == 200 -%}
+          {%- for repo in (r.json.repositories | default([])) -%}
+            {%- set repo_ns = repo.namespace | default(r.namespace | default('')) -%}
+            {%- set repo_name_raw = repo.name | default(repo.repository | default('')) -%}
+            {%- set repo_short_name = (repo_name_raw.split('/') | last) if ('/' in repo_name_raw) else repo_name_raw -%}
+            {%- set repo_full = repo_name_raw if ('/' in repo_name_raw) else repo_ns ~ '/' ~ repo_short_name -%}
+            {%- if repo_full | length > 1 and repo_full not in seen -%}
+              {%- set _ = seen.append(repo_full) -%}
+              {%- set _ = out.append({
+                'repository': repo_full,
+                'namespace': repo_ns,
+                'name': repo_short_name,
+                'state': repo.state | default(''),
+                'is_public': repo.is_public | default(false),
+                'description': repo.description | default(''),
+                'last_modified': repo.last_modified | default(''),
+                'kind': repo.kind | default(repo.repo_kind | default(''))
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Repository discovery | Publicar repositórios normalizados
+  ansible.builtin.set_fact:
+    quay_source_repositories: "{{ _quay_source_repositories_json | from_json }}"
+    quay_target_repositories: "{{ _quay_target_repositories_json | from_json }}"
+
+- name: Repository discovery | Filtrar repositórios com state MIRROR no DR
   ansible.builtin.set_fact:
     quay_target_mirror_repositories: >-
       {{
@@ -62,20 +100,23 @@
         | list
       }}
 
-- name: Exibir resumo do discovery
+- name: Repository discovery | Exibir resumo do discovery
   ansible.builtin.debug:
     msg:
       - "Quay PRD: {{ quay_source_url }}"
       - "Quay DR : {{ quay_target_url }}"
       - "Namespaces avaliados: {{ quay_discovery_namespaces | join(', ') }}"
+      - "Páginas de repository consultadas no PRD: {{ _quay_source_repository_page_results | length }}"
+      - "Páginas de repository consultadas no DR : {{ _quay_target_repository_page_results | length }}"
       - "Repositórios visíveis no PRD: {{ quay_source_repositories | length }}"
       - "Repositórios visíveis no DR : {{ quay_target_repositories | length }}"
       - "Repositórios MIRROR encontrados no DR: {{ quay_target_mirror_repositories | length }}"
 
-- name: Falhar se nenhum repository mirror for encontrado
+- name: Repository discovery | Falhar se nenhum repository mirror for encontrado
   ansible.builtin.fail:
     msg: >-
       Nenhum repositório MIRROR foi encontrado no DR para os namespaces informados:
       {{ quay_discovery_namespaces | join(', ') }}.
       Valide se o token do DR tem repo:read/admin e se os repositories mirrored estão nesses namespaces.
-  when: quay_target_mirror_repositories | length == 0
+  when:
+    - quay_target_mirror_repositories | length == 0
