@@ -8,11 +8,69 @@
     quay_sync_performed: "{{ quay_manager_result.sync.performed | default(false) }}"
     quay_final_mirror_configs: "{{ quay_manager_result.final.mirror_configs | default(quay_mirror_configs | default([])) }}"
 
+- name: Report | Definir status ocultos do relatório
+  ansible.builtin.set_fact:
+    quay_report_noise_statuses_effective: >-
+      {{
+        quay_report_noise_statuses
+        | default([
+            'SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE',
+            'TAG_COLLECTION_ERROR'
+          ])
+      }}
+
+- name: Report | Montar linhas visíveis no relatório
+  ansible.builtin.set_fact:
+    quay_report_visible_rows_json: >-
+      {%- set out = [] -%}
+      {%- set hide_noise = quay_report_hide_noise_statuses | default(true) | bool -%}
+      {%- set hidden_statuses = quay_report_noise_statuses_effective | default([]) -%}
+      {%- for r in quay_final_rows | default([]) -%}
+        {%- if not hide_noise or (r.status | default('')) not in hidden_statuses -%}
+          {%- set _ = out.append(r) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report | Publicar linhas visíveis no relatório
+  ansible.builtin.set_fact:
+    quay_report_visible_rows: "{{ quay_report_visible_rows_json | from_json }}"
+
+- name: Report | Calcular contadores visíveis do relatório
+  ansible.builtin.set_fact:
+    quay_report_visible_counts_json: >-
+      {%- set status_counts = {} -%}
+      {%- set severity_counts = {} -%}
+      {%- for r in quay_report_visible_rows | default([]) -%}
+        {%- set status = r.status | default('UNKNOWN') -%}
+        {%- set severity = r.severity | default('info') -%}
+        {%- set _ = status_counts.update({status: (status_counts.get(status, 0) + 1)}) -%}
+        {%- set _ = severity_counts.update({severity: (severity_counts.get(severity, 0) + 1)}) -%}
+      {%- endfor -%}
+      {{
+        {
+          'status_counts': status_counts,
+          'severity_counts': severity_counts,
+          'hidden_rows': ((quay_final_rows | default([]) | length) - (quay_report_visible_rows | default([]) | length))
+        } | to_json
+      }}
+
+- name: Report | Publicar contadores visíveis do relatório
+  ansible.builtin.set_fact:
+    quay_report_visible_status_counts: "{{ (quay_report_visible_counts_json | from_json).status_counts }}"
+    quay_report_visible_severity_counts: "{{ (quay_report_visible_counts_json | from_json).severity_counts }}"
+    quay_report_hidden_rows_count: "{{ (quay_report_visible_counts_json | from_json).hidden_rows }}"
+
 - name: Report | Calcular nível do relatório
   ansible.builtin.set_fact:
     quay_report_level: >-
-      {%- set crit = (quay_final_summary.severity_counts.critical | default(0) | int) -%}
-      {%- set warn = (quay_final_summary.severity_counts.warning | default(0) | int) -%}
+      {%- if quay_report_ignore_noise_statuses_for_level | default(true) | bool -%}
+        {%- set severity_ref = quay_report_visible_severity_counts | default({}) -%}
+      {%- else -%}
+        {%- set severity_ref = quay_final_summary.severity_counts | default({}) -%}
+      {%- endif -%}
+      {%- set crit = (severity_ref.critical | default(0) | int) -%}
+      {%- set warn = (severity_ref.warning | default(0) | int) -%}
       {%- set sync_failed = (quay_manager_result.sync.failed_actions | default(0) | int) -%}
       {%- if crit > 0 or sync_failed > 0 -%}crit
       {%- elif warn > 0 -%}warn
