@@ -52,9 +52,9 @@
 {% set initial = quay_manager_result.initial | default({}) %}
 {% set summary = final.summary | default({}) %}
 {% set initial_summary = initial.summary | default({}) %}
-{% set status_counts = summary.status_counts | default({}) %}
-{% set severity_counts = summary.severity_counts | default({}) %}
-{% set rows = final.comparison_rows | default([]) %}
+{% set status_counts = quay_report_visible_status_counts | default(summary.status_counts | default({})) %}
+{% set severity_counts = quay_report_visible_severity_counts | default(summary.severity_counts | default({})) %}
+{% set rows = quay_report_visible_rows | default(final.comparison_rows | default([])) %}
 {% set initial_rows = initial.comparison_rows | default([]) %}
 {% set mirror_configs = final.mirror_configs | default(quay_final_mirror_configs | default([])) %}
 {% set row_limit = quay_report_max_rows | default(200) | int %}
