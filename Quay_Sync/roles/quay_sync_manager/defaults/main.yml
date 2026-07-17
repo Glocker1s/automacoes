@@ -10,13 +10,13 @@ motivo: "Validação de mirror Quay PRD x DR"
 quay_source:
   name: "PRD"
   url: "https://quay-prd-quay-quay-prd.apps.cluster-pnkh7.pnkh7.sandbox2478.opentlc.com"
-  token: "EP2efeWCBZQnk8R9DACeUvDfYeeeZFa0EEAxFmEf"
+  token:
   validate_certs: false
 
 quay_target:
   name: "DR"
   url: "https://quay-dr-quay-quay-dr.apps.cluster-pnkh7.pnkh7.sandbox2478.opentlc.com"
-  token: "oBsW70zow0xVlCyx8hL11jUkjgP8jGXaYOZ7ZpiG"
+  token: 
   validate_certs: false
 
 # A API /api/v1/repository exige namespace, starred ou public.
@@ -36,6 +36,9 @@ quay_discovery_namespaces:
 # A automação consulta até quay_max_pages, mas por padrão para automaticamente
 # quando uma página retorna menos itens que quay_tag_page_limit.
 quay_repository_page_limit: 100
+quay_repository_max_pages: 50
+quay_fail_on_repository_pagination_limit_reached: true
+
 quay_tag_page_limit: 100
 quay_max_pages: 10
 
@@ -100,6 +103,23 @@ quay_report_mirror_config_max_rows: 30
 # false = mostra apenas divergências/atenções.
 # true  = mostra tudo, incluindo OK.
 quay_report_show_ok_rows: false
+
+# Ocultar status considerados ruído operacional no e-mail.
+# A comparação completa continua salva no JSON local.
+quay_report_hide_noise_statuses: true
+
+# Status ocultados do relatório quando quay_report_hide_noise_statuses=true.
+# SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE:
+#   Repo mirror existe no DR, mas nenhuma tag foi retornada no PRD.
+# TAG_COLLECTION_ERROR:
+#   Falha ao coletar tags em um lado, normalmente source/target HTTP 404.
+quay_report_noise_statuses:
+  - SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE
+  - TAG_COLLECTION_ERROR
+
+# Quando true, os status ocultados também não impactam o nível do e-mail.
+# Exemplo: se só existir TAG_COLLECTION_ERROR ocultado, o e-mail não fica Crítico.
+quay_report_ignore_noise_statuses_for_level: true
 
 # Anexos do e-mail.
 # Por padrão, a automação envia o relatório HTML no corpo do e-mail e NÃO anexa JSON
