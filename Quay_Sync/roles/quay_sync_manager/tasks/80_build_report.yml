@@ -6,6 +6,7 @@
     quay_final_rows: "{{ quay_manager_result.final.comparison_rows | default([]) }}"
     quay_sync_actions: "{{ quay_manager_result.sync.actions | default([]) }}"
     quay_sync_performed: "{{ quay_manager_result.sync.performed | default(false) }}"
+    quay_sync_wait_summary: "{{ quay_manager_result.sync.wait_summary | default({}) }}"
     quay_final_mirror_configs: "{{ quay_manager_result.final.mirror_configs | default(quay_mirror_configs | default([])) }}"
 
 - name: Report | Definir status ocultos do relatório
@@ -72,7 +73,10 @@
       {%- set crit = (severity_ref.critical | default(0) | int) -%}
       {%- set warn = (severity_ref.warning | default(0) | int) -%}
       {%- set sync_failed = (quay_manager_result.sync.failed_actions | default(0) | int) -%}
-      {%- if crit > 0 or sync_failed > 0 -%}crit
+      {%- set sync_timeout = (quay_sync_wait_summary.total_timeout | default(0) | int) -%}
+      {%- set sync_terminal_failed = (quay_sync_wait_summary.total_terminal_failed | default(0) | int) -%}
+      {%- set sync_http_errors = (quay_sync_wait_summary.total_http_errors | default(0) | int) -%}
+      {%- if crit > 0 or sync_failed > 0 or sync_timeout > 0 or sync_terminal_failed > 0 or sync_http_errors > 0 -%}crit
       {%- elif warn > 0 -%}warn
       {%- else -%}ok{%- endif -%}
 
