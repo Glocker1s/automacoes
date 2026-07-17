@@ -27,6 +27,15 @@
         candidates: "{{ quay_initial_summary.sync_candidate_repositories | default([]) }}"
         actions: "{{ quay_sync_actions | default([]) }}"
         failed_actions: "{{ quay_sync_failed_actions | default(0) }}"
+        wait_summary: "{{ quay_sync_wait_summary | default({
+          'timeout': [],
+          'terminal_failed': [],
+          'http_errors': [],
+          'total_timeout': 0,
+          'total_terminal_failed': 0,
+          'total_http_errors': 0,
+          'has_partial_failure': false
+          }) }}"
 
 - name: Finalize | Gravar resultado consolidado
   ansible.builtin.copy:
