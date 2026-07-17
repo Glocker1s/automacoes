@@ -35,6 +35,7 @@
           - 204
           - 400
           - 404
+        timeout: "{{ quay_api_timeout | default(30) }}"
       loop: "{{ quay_sync_candidate_repositories_effective }}"
       loop_control:
         label: "{{ item }}"
@@ -56,6 +57,7 @@
           - 201
           - 202
           - 204
+        timeout: "{{ quay_api_timeout | default(30) }}"
       loop: "{{ quay_sync_candidate_repositories_effective }}"
       loop_control:
         label: "{{ item }}"
@@ -115,16 +117,115 @@
         return_content: true
         status_code:
           - 200
+          - 401
+          - 403
+          - 404
+          - 429
+          - 500
+          - 502
+          - 503
+          - 504
+        timeout: "{{ quay_api_timeout | default(30) }}"
       loop: "{{ quay_sync_candidate_repositories_effective }}"
       loop_control:
         label: "{{ item }}"
       register: _quay_sync_wait_results
       until: >-
         (_quay_sync_wait_results.status | default(0) | int) == 200
-        and (_quay_sync_wait_results.json.sync_status | default('') in ['SUCCESS', 'NEVER_RUN'])
+        and
+        (_quay_sync_wait_results.json.sync_status | default('')) in ['SUCCESS', 'NEVER_RUN']
       retries: "{{ quay_sync_retries | int }}"
       delay: "{{ quay_sync_delay | int }}"
+      failed_when: false
       no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Sync | Consolidar resultado da espera dos mirrors
+      ansible.builtin.set_fact:
+        quay_sync_wait_summary_json: >-
+          {%- set timeout = [] -%}
+          {%- set terminal_failed = [] -%}
+          {%- set http_errors = [] -%}
+          {%- for r in (_quay_sync_wait_results.results | default([])) -%}
+            {%- set repo = r.item | default('N/A') -%}
+            {%- set http_status = r.status | default(0) | int -%}
+            {%- set sync_status = r.json.sync_status | default('UNKNOWN') -%}
+            {%- set attempts = r.attempts | default(1) | int -%}
+            {%- set message = r.json.detail | default(r.json.error_message | default(r.msg | default(''))) -%}
+
+            {%- if http_status != 200 -%}
+              {%- set _ = http_errors.append({
+                'repository': repo,
+                'http_status': http_status,
+                'sync_status': sync_status,
+                'attempts': attempts,
+                'message': message
+              }) -%}
+            {%- elif sync_status in ['FAIL', 'FAILED', 'ERROR'] -%}
+              {%- set _ = terminal_failed.append({
+                'repository': repo,
+                'http_status': http_status,
+                'sync_status': sync_status,
+                'attempts': attempts,
+                'message': message
+              }) -%}
+            {%- elif sync_status not in ['SUCCESS', 'NEVER_RUN'] -%}
+              {%- set _ = timeout.append({
+                'repository': repo,
+                'http_status': http_status,
+                'sync_status': sync_status,
+                'attempts': attempts,
+                'message': message
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{
+            {
+              'timeout': timeout,
+              'terminal_failed': terminal_failed,
+              'http_errors': http_errors,
+              'total_timeout': timeout | length,
+              'total_terminal_failed': terminal_failed | length,
+              'total_http_errors': http_errors | length
+            } | to_json
+          }}
+
+    - name: Sync | Publicar resultado da espera dos mirrors
+      ansible.builtin.set_fact:
+        quay_sync_wait_summary: "{{ quay_sync_wait_summary_json | from_json }}"
+
+    - name: Sync | Falhar quando houver erro HTTP ao consultar mirror
+      ansible.builtin.fail:
+        msg: >-
+          SYNC_HTTP_ERROR:
+          Falha HTTP ao consultar o status de mirror após sync-now.
+          Repositories afetados: {{ quay_sync_wait_summary.http_errors | map(attribute='repository') | list | join(', ') }}.
+          Detalhes: {{ quay_sync_wait_summary.http_errors[:10] | to_json }}.
+      when:
+        - (quay_sync_wait_summary.total_http_errors | int) > 0
+
+    - name: Sync | Falhar quando o mirror finalizar com status de erro
+      ansible.builtin.fail:
+        msg: >-
+          SYNC_TERMINAL_FAILURE:
+          Um ou mais mirrors finalizaram com status de falha no Quay.
+          Repositories afetados: {{ quay_sync_wait_summary.terminal_failed | map(attribute='repository') | list | join(', ') }}.
+          Detalhes: {{ quay_sync_wait_summary.terminal_failed[:10] | to_json }}.
+      when:
+        - (quay_sync_wait_summary.total_terminal_failed | int) > 0
+
+    - name: Sync | Falhar quando o mirror não concluir dentro do tempo
+      ansible.builtin.fail:
+        msg: >-
+          SYNC_WAIT_TIMEOUT:
+          O sync foi acionado, mas um ou mais mirrors não retornaram para SUCCESS dentro do tempo configurado.
+          Isso normalmente indica sync ainda em andamento, imagem grande, fila no Quay, lentidão no registry/storage ou mirror worker ocupado.
+          Repositories pendentes: {{ quay_sync_wait_summary.timeout | map(attribute='repository') | list | join(', ') }}.
+          Últimos status: {{ quay_sync_wait_summary.timeout[:10] | to_json }}.
+          Tempo configurado: wait_after={{ quay_sync_wait_after_trigger_seconds }}s,
+          retries={{ quay_sync_retries }},
+          delay={{ quay_sync_delay }}s.
+      when:
+        - (quay_sync_wait_summary.total_timeout | int) > 0
 
 - name: Sync | Recoletar mirror config após sync
   ansible.builtin.import_tasks: 30_collect_mirror_config.yml
