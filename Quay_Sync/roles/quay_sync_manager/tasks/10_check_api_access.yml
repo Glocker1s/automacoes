@@ -26,7 +26,7 @@
 
 - name: Validar token do Quay origem usando listagem de repositories por namespace
   ansible.builtin.uri:
-    url: "{{ quay_source_url }}/api/v1/repository?namespace={{ quay_token_validation_namespace | urlencode }}&last_modified=true"
+    url: "{{ quay_source_url }}/api/v1/repository?public=true&starred=false&namespace={{ quay_token_validation_namespace | urlencode }}&last_modified=true"
     method: GET
     headers:
       Authorization: "Bearer {{ quay_source.token }}"
@@ -41,7 +41,7 @@
 
 - name: Validar token do Quay destino usando listagem de repositories por namespace
   ansible.builtin.uri:
-    url: "{{ quay_target_url }}/api/v1/repository?namespace={{ quay_token_validation_namespace | urlencode }}&last_modified=true"
+    url: "{{ quay_target_url }}/api/v1/repository?public=true&starred=false&namespace={{ quay_token_validation_namespace | urlencode }}&last_modified=true"
     method: GET
     headers:
       Authorization: "Bearer {{ quay_target.token }}"
