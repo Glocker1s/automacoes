@@ -12,28 +12,56 @@
   ansible.builtin.set_fact:
     quay_failure_category: >-
       {%- set raw = (quay_failure_msg ~ ' ' ~ (quay_failure_raw | string)) | lower -%}
-      {%- if '401' in raw or 'invalid_token' in raw or 'expired_token' in raw or 'session required' in raw -%}
+      {%- set task = quay_failure_task | default('') | lower -%}
+
+      {%- if 'sync_wait_timeout' in raw or ('aguardar repositories retornarem para success' in task and 'syncing' in raw) -%}
+      Timeout aguardando conclusão do mirror/sync
+
+      {%- elif 'sync_terminal_failure' in raw -%}
+      Mirror/sync finalizou com falha no Quay
+
+      {%- elif 'sync_http_error' in raw -%}
+      Falha HTTP ao consultar status do mirror/sync
+
+      {%- elif 'quay_repository_max_pages' in raw or 'listagem pode estar incompleta' in raw or ('next_page' in raw and 'limite' in raw) -%}
+      Limite de paginação de repositories atingido
+
+      {%- elif '"status": 429' in raw or "'status': 429" in raw or 'status=429' in raw or 'too many requests' in raw or 'rate limit' in raw -%}
+      Limite de requisições da API do Quay
+
+      {%- elif '"status": 401' in raw or "'status': 401" in raw or 'status=401' in raw or 'invalid_token' in raw or 'expired_token' in raw or 'session required' in raw -%}
       Token inválido ou expirado
-      {%- elif '403' in raw or 'unauthorized' in raw or 'insufficient_scope' in raw or 'forbidden' in raw -%}
+
+      {%- elif '"status": 403' in raw or "'status': 403" in raw or 'status=403' in raw or 'insufficient_scope' in raw or 'forbidden' in raw or 'unauthorized' in raw -%}
       Permissão insuficiente no Quay
-      {%- elif '404' in raw or 'not found' in raw -%}
+
+      {%- elif '"status": 404' in raw or "'status': 404" in raw or 'status=404' in raw or 'not found' in raw -%}
       Recurso não encontrado no Quay
-      {%- elif 'namespace, starred or public' in raw or 'namespace' in raw and 'required' in raw -%}
+
+      {%- elif 'namespace, starred or public' in raw or ('namespace' in raw and 'required' in raw) -%}
       Namespace ausente ou inválido na consulta
-      {%- elif 'nenhum repositório mirror' in raw or 'nenhum repositório mirror' in raw or 'nenhum repositório mirror' in raw -%}
+
+      {%- elif 'nenhum repositório mirror' in raw or 'nenhum repository mirror' in raw or 'nenhum repository com state mirror' in raw -%}
       Nenhum repository mirror encontrado
-      {%- elif 'nenhum repositório mirror' in raw or 'nenhum repositório mirror' in raw or 'nenhum repository mirror' in raw -%}
-      Nenhum repository mirror encontrado
-      {%- elif 'connection refused' in raw or 'no route to host' in raw or 'timed out' in raw or 'timeout' in raw -%}
+
+      {%- elif 'connection refused' in raw or 'no route to host' in raw or 'name or service not known' in raw or 'temporary failure in name resolution' in raw -%}
       Falha de conectividade com Quay
+
+      {%- elif 'timed out' in raw or 'timeout' in raw -%}
+      Timeout de conexão com Quay
+
       {%- elif 'certificate' in raw or 'tls' in raw or 'ssl' in raw or 'x509' in raw -%}
       Falha de certificado/TLS
-      {%- elif 'smbclient' in raw or 'cifs' in raw or 'failed to connect' in raw and 'share' in raw -%}
+
+      {%- elif 'smbclient' in raw or 'cifs' in raw or ('failed to connect' in raw and 'share' in raw) -%}
       Falha no upload CIFS de anexos
+
       {%- elif 'sync-now' in raw or 'sync-cancel' in raw or '/mirror' in raw -%}
       Falha em operação de mirror/sync
+
       {%- elif 'variáveis obrigatórias' in raw or 'assertion' in raw or 'mandatory' in raw -%}
       Variável obrigatória ausente ou inválida
+
       {%- else -%}
       Erro não classificado automaticamente
       {%- endif -%}
@@ -42,26 +70,54 @@
   ansible.builtin.set_fact:
     quay_failure_guidance: >-
       {%- set cat = quay_failure_category | trim -%}
-      {%- if cat == 'Token inválido ou expirado' -%}
-      Gerar novamente o OAuth token no Quay e validar se ele foi autorizado pelo usuário correto. Testar /api/v1/user/ com Authorization Bearer.
+      {%- if cat == 'Timeout aguardando conclusão do mirror/sync' -%}
+      O sync foi acionado no Quay, mas não retornou para SUCCESS dentro do tempo configurado. Validar na UI do Quay se o mirror ainda está SYNCING, se há fila no mirror worker, imagens grandes, lentidão no storage/registry ou falha posterior. Se for apenas lentidão esperada, aumentar quay_sync_retries e/ou quay_sync_delay no template/survey.
+
+      {%- elif cat == 'Mirror/sync finalizou com falha no Quay' -%}
+      Validar os logs do Quay mirror worker, credenciais externas do mirror, robot account, permissões no repository, conectividade PRD -> DR e se a imagem/tag existe na origem.
+
+      {%- elif cat == 'Falha HTTP ao consultar status do mirror/sync' -%}
+      Validar se o repository mirror existe no DR, se o token possui acesso ao endpoint /api/v1/repository/<namespace>/<repo>/mirror e se houve erro temporário na API do Quay.
+
+      {%- elif cat == 'Limite de paginação de repositories atingido' -%}
+      A listagem de repositories ainda possuía next_page quando o limite de paginação foi atingido. Aumentar o limite de páginas de discovery para evitar comparação parcial.
+
+      {%- elif cat == 'Limite de requisições da API do Quay' -%}
+      A API retornou rate limit ou excesso de requisições. Reduzir escopo de namespaces ou reexecutar após a janela de limite.
+
+      {%- elif cat == 'Token inválido ou expirado' -%}
+      Gerar novamente o OAuth token no Quay e validar se ele foi autorizado pelo usuário correto. Testar com /api/v1/repository?namespace=<namespace>&public=true&starred=false usando Authorization Bearer.
+
       {%- elif cat == 'Permissão insuficiente no Quay' -%}
       Validar scopes do token e permissões do usuário nos repositories. Para consultar mirror e executar sync, o token do DR deve ter permissão equivalente a repo:admin nos repositories mirrored.
+
       {%- elif cat == 'Recurso não encontrado no Quay' -%}
       Validar URLs, namespace, nome do repository e se o repository existe no PRD/DR.
+
       {%- elif cat == 'Namespace ausente ou inválido na consulta' -%}
       Validar quay_discovery_namespaces. A API /api/v1/repository do Quay exige namespace, starred ou public.
+
       {%- elif cat == 'Nenhum repository mirror encontrado' -%}
       Confirmar se o cliente usa repository mirror, se os mirrors estão nos namespaces informados e se o token do DR consegue listar repositories com state=MIRROR.
+
       {%- elif cat == 'Falha de conectividade com Quay' -%}
       Validar rota/DNS/firewall/proxy entre o AAP/controller e os Quays PRD/DR.
+
+      {%- elif cat == 'Timeout de conexão com Quay' -%}
+      Validar disponibilidade da API do Quay, latência, proxy/firewall e timeout configurado para chamadas HTTP.
+
       {%- elif cat == 'Falha de certificado/TLS' -%}
       Validar cadeia de certificado dos Quays ou usar validate_certs=false somente em lab/ambiente controlado.
+
       {%- elif cat == 'Falha no upload CIFS de anexos' -%}
       Validar send_mail_cifs, send_mail_cifs_address, send_mail_cifs_path, credenciais SMB e se o host delegado possui smbclient.
+
       {%- elif cat == 'Falha em operação de mirror/sync' -%}
       Validar se os endpoints de mirror estão habilitados, se o repository é MIRROR e se o token do DR possui permissão repo:admin.
+
       {%- elif cat == 'Variável obrigatória ausente ou inválida' -%}
       Validar defaults, Survey e extra vars: quay_source, quay_target e quay_discovery_namespaces.
+
       {%- else -%}
       Consultar a task, ação e mensagem técnica abaixo para identificar a origem da falha.
       {%- endif -%}
