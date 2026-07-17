@@ -186,8 +186,38 @@
         </td></tr>
 
         {% if quay_effective_mode == 'sync' %}
+        {% set sync_wait = quay_sync_wait_summary | default({}) %}
+        {% set sync_timeout = sync_wait.timeout | default([]) %}
+        {% set sync_terminal_failed = sync_wait.terminal_failed | default([]) %}
+        {% set sync_http_errors = sync_wait.http_errors | default([]) %}
+        {% set sync_repos = initial_summary.sync_candidate_repositories | default([]) %}
         <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
           <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Resultado do sync</div>
+
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;margin-bottom:8px;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Candidatos</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Falha ação</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Timeout/SYNCING</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Falha terminal</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Erro HTTP</th>
+            </tr>
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ sync_repos | length }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ quay_manager_result.sync.failed_actions | default(0) }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ sync_wait.total_timeout | default(0) }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ sync_wait.total_terminal_failed | default(0) }}</td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">{{ sync_wait.total_http_errors | default(0) }}</td>
+            </tr>
+          </table>
+
+          {% if sync_wait.has_partial_failure | default(false) or (quay_manager_result.sync.failed_actions | default(0) | int) > 0 %}
+          <div style="font-size:12px;color:#b00020;margin-bottom:8px;line-height:17px;">
+            <b>Atenção:</b> o sync foi acionado, porém alguns repositories não concluíram com sucesso dentro da janela configurada ou apresentaram falha operacional.
+            A comparação final abaixo mostra o estado após a tentativa de sync.
+          </div>
+          {% endif %}
+
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
             <tr style="background:#f3f4f6;">
               <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Repository</th>
@@ -197,9 +227,8 @@
               <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Depois</th>
             </tr>
 
-            {% set sync_repos = initial_summary.sync_candidate_repositories | default([]) %}
             {% for repo in sync_repos %}
-              {% set ns = namespace(cancel=None, now=None, initial_bad=[], final_bad=[]) %}
+              {% set ns = namespace(cancel=None, now=None, wait_timeout=None, wait_failed=None, wait_http=None, initial_bad=[], final_bad=[]) %}
 
               {% for a in quay_sync_actions %}
                 {% if a.repository == repo and a.action == 'sync-cancel' %}
@@ -207,6 +236,24 @@
                 {% endif %}
                 {% if a.repository == repo and a.action == 'sync-now' %}
                   {% set ns.now = a %}
+                {% endif %}
+              {% endfor %}
+
+              {% for w in sync_timeout %}
+                {% if w.repository == repo %}
+                  {% set ns.wait_timeout = w %}
+                {% endif %}
+              {% endfor %}
+
+              {% for w in sync_terminal_failed %}
+                {% if w.repository == repo %}
+                  {% set ns.wait_failed = w %}
+                {% endif %}
+              {% endfor %}
+
+              {% for w in sync_http_errors %}
+                {% if w.repository == repo %}
+                  {% set ns.wait_http = w %}
                 {% endif %}
               {% endfor %}
 
@@ -266,7 +313,13 @@
                 </td>
 
                 <td style="padding:8px;border:1px solid #d9d9d9;">
-                  {% if ns.final_bad | length == 0 %}
+                  {% if ns.wait_http is not none %}
+                    {{ badge('Erro HTTP ' ~ ns.wait_http.http_status, 'crit') }}
+                  {% elif ns.wait_failed is not none %}
+                    {{ badge('Falha mirror ' ~ ns.wait_failed.sync_status, 'crit') }}
+                  {% elif ns.wait_timeout is not none %}
+                    {{ badge('Timeout / ' ~ ns.wait_timeout.sync_status, 'warn') }}
+                  {% elif ns.final_bad | length == 0 %}
                     {{ badge('Resolvido', 'ok') }}
                   {% else %}
                     {{ badge((ns.final_bad | length) ~ ' pendente(s)', 'crit') }}
@@ -283,7 +336,8 @@
           </table>
 
           <div style="font-size:12px;color:#666;margin-top:6px;line-height:17px;">
-            Observação: HTTP 404 no <b>sync-cancel</b> normalmente significa que não havia sincronização ativa para cancelar. O resultado efetivo é validado pela comparação final de tag + digest.
+            Observação: HTTP 404 no <b>sync-cancel</b> normalmente significa que não havia sincronização ativa para cancelar.
+            O resultado efetivo é validado pela comparação final de tag + digest.
           </div>
         </td></tr>
         {% endif %}
