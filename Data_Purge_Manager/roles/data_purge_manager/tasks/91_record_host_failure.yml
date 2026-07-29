@@ -1,0 +1,201 @@
+---
+- name: Falha de execução | Capturar identificação da falha
+  ansible.builtin.set_fact:
+    _purge_runtime_failure_host: "{{ data_purge_failure_host | default(inventory_hostname) }}"
+    _purge_runtime_failure_os: "{{ data_purge_failure_os | default('unknown') }}"
+    _purge_runtime_failure_phase: "{{ data_purge_failure_phase | default(data_purge_phase | default('execução')) }}"
+    _purge_runtime_failure_task: "{{ ansible_failed_task.name | default('Task não identificada') }}"
+    _purge_runtime_failure_action: "{{ ansible_failed_task.action | default('ação não identificada') }}"
+    _purge_runtime_failure_raw: "{{ ansible_failed_result | default({}) }}"
+
+- name: Falha de execução | Montar detalhes retornados pela task
+  ansible.builtin.set_fact:
+    _purge_runtime_failure_details_json: >-
+      {%- set out = [] -%}
+      {%- set raw = _purge_runtime_failure_raw | default({}) -%}
+      {%- if raw.results is defined and raw.results is sequence -%}
+        {%- for result in raw.results -%}
+          {%- if result.failed | default(false) or result.unreachable | default(false) -%}
+            {%- set item_label = result.item | default('item não identificado') | string -%}
+            {%- set result_msg = result.msg
+              | default(result.stderr
+              | default(result.stdout
+              | default(result.exception
+              | default('Erro não detalhado'))))
+              | string
+              | trim -%}
+            {%- set _ = out.append(item_label ~ ': ' ~ result_msg) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endif -%}
+      {%- if out | length == 0 -%}
+        {%- set main_msg = raw.msg
+          | default(raw.stderr
+          | default(raw.stdout
+          | default(raw.exception
+          | default('Erro técnico não mapeado'))))
+          | string
+          | trim -%}
+        {%- set _ = out.append(main_msg) -%}
+      {%- endif -%}
+      {{ out | to_json }}
+
+- name: Falha de execução | Publicar detalhes normalizados
+  ansible.builtin.set_fact:
+    _purge_runtime_failure_details: "{{ _purge_runtime_failure_details_json | from_json }}"
+    _purge_runtime_failure_text: >-
+      {{
+        (
+          (_purge_runtime_failure_details_json | from_json | join(' '))
+          ~ ' ' ~ (_purge_runtime_failure_task | default(''))
+          ~ ' ' ~ (_purge_runtime_failure_action | default(''))
+        ) | lower
+      }}
+
+- name: Falha de execução | Classificar categoria
+  ansible.builtin.set_fact:
+    _purge_runtime_failure_category: >-
+      {%- if
+        'permission denied' in _purge_runtime_failure_text
+        or 'access is denied' in _purge_runtime_failure_text
+        or 'acesso negado' in _purge_runtime_failure_text
+        or 'unauthorized' in _purge_runtime_failure_text
+      -%}
+      Permissão insuficiente
+      {%- elif 'timed out' in _purge_runtime_failure_text or 'timeout' in _purge_runtime_failure_text -%}
+      Timeout
+      {%- elif
+        'unreachable' in _purge_runtime_failure_text
+        or 'connection' in _purge_runtime_failure_text
+        or 'winrm' in _purge_runtime_failure_text
+        or 'ssh' in _purge_runtime_failure_text
+        or 'no route to host' in _purge_runtime_failure_text
+        or 'could not resolve' in _purge_runtime_failure_text
+      -%}
+      Falha de conectividade
+      {%- elif
+        'failed to transfer file' in _purge_runtime_failure_text
+        or 'fetch' in _purge_runtime_failure_text
+        or 'filetransfer' in _purge_runtime_failure_text
+      -%}
+      Falha na transferência de arquivo
+      {%- elif
+        'undefined variable' in _purge_runtime_failure_text
+        or 'is undefined' in _purge_runtime_failure_text
+        or 'template' in _purge_runtime_failure_text
+        or 'jinja' in _purge_runtime_failure_text
+      -%}
+      Falha de template ou variável
+      {%- else -%}
+      Erro não classificado automaticamente
+      {%- endif -%}
+
+- name: Falha de execução | Obter plano do host
+  ansible.builtin.set_fact:
+    _purge_runtime_host_plan: >-
+      {{ hostvars['localhost'].purge_plan_by_host[_purge_runtime_failure_host] | default({}) }}
+
+- name: Falha de execução | Montar relatório base do host
+  ansible.builtin.set_fact:
+    _purge_runtime_report_base: >-
+      {{
+        purge_host_report
+        | default(
+            {
+              'host': _purge_runtime_failure_host,
+              'os': _purge_runtime_failure_os,
+              'applications': _purge_runtime_host_plan.get('applications', []),
+              'envs': _purge_runtime_host_plan.get('envs', []),
+              'mode': 'apply' if (hostvars['localhost'].purge_apply_enabled | default(false) | bool) else 'check',
+              'disk_usage_before': [],
+              'disk_usage_after': [],
+              'rows': [],
+              'errors': []
+            },
+            true
+          )
+      }}
+
+- name: Falha de execução | Montar mensagens exibidas no relatório
+  ansible.builtin.set_fact:
+    _purge_runtime_fatal_errors: >-
+      {%- set out = [] -%}
+      {%- set _ = out.append('Categoria: ' ~ (_purge_runtime_failure_category | trim)) -%}
+      {%- set _ = out.append('Task: ' ~ (_purge_runtime_failure_task | string | trim)) -%}
+      {%- for detail in (_purge_runtime_failure_details | default([]))[:10] -%}
+        {%- set _ = out.append((detail | string)[:1500]) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Falha de execução | Registrar falha no relatório do host
+  ansible.builtin.set_fact:
+    purge_host_runtime_failure:
+      host: "{{ _purge_runtime_failure_host }}"
+      os: "{{ _purge_runtime_failure_os }}"
+      phase: "{{ _purge_runtime_failure_phase }}"
+      task: "{{ _purge_runtime_failure_task }}"
+      action: "{{ _purge_runtime_failure_action }}"
+      category: "{{ _purge_runtime_failure_category | trim }}"
+      details: "{{ _purge_runtime_failure_details }}"
+    purge_host_execution_failure_recorded: true
+    purge_host_execution_completed: false
+    purge_host_report: >-
+      {{
+        _purge_runtime_report_base
+        | combine(
+            {
+              'rows': (_purge_runtime_report_base.rows | default([])) + [
+                {
+                  'rule': 'Falha inesperada na execução',
+                  'description': 'A execução do host foi interrompida por uma falha técnica não tratada pela regra.',
+                  'application': (_purge_runtime_report_base.applications | default([]) | join(', ')) or '—',
+                  'environment': (_purge_runtime_report_base.envs | default([]) | join(', ')) or '—',
+                  'os': _purge_runtime_failure_os,
+                  'engine': 'runtime',
+                  'source': 'runtime',
+                  'status': 'failed',
+                  'status_detail': _purge_runtime_failure_category | trim,
+                  'age_days': '—',
+                  'recursive': false,
+                  'delete_empty_dirs': false,
+                  'apply': hostvars['localhost'].purge_apply_enabled | default(false) | bool,
+                  'patterns': [],
+                  'exclude_patterns': [],
+                  'paths_total': 0,
+                  'paths_allowed': 0,
+                  'paths_existing': 0,
+                  'blocked_paths': [],
+                  'missing_paths': [],
+                  'matched_files': 0,
+                  'deleted_files': 0,
+                  'failed_files': 0,
+                  'matched_bytes': 0,
+                  'deleted_bytes': 0,
+                  'removed_empty_dirs': 0,
+                  'failed_empty_dirs': 0,
+                  'fatal_errors': _purge_runtime_fatal_errors,
+                  'samples': []
+                }
+              ],
+              'errors': (_purge_runtime_report_base.errors | default([])) + [
+                {
+                  'phase': _purge_runtime_failure_phase,
+                  'task': _purge_runtime_failure_task,
+                  'action': _purge_runtime_failure_action,
+                  'category': _purge_runtime_failure_category | trim,
+                  'details': _purge_runtime_failure_details
+                }
+              ]
+            },
+            recursive=True
+          )
+      }}
+
+- name: Falha de execução | Confirmar registro da falha
+  ansible.builtin.debug:
+    msg: >-
+      Falha registrada para consolidação:
+      host={{ _purge_runtime_failure_host }},
+      fase={{ _purge_runtime_failure_phase }},
+      task={{ _purge_runtime_failure_task }},
+      categoria={{ _purge_runtime_failure_category | trim }}.

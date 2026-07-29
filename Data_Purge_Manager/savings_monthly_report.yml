@@ -1,0 +1,959 @@
+---
+- name: Data Purge Manager | Relatório de economia
+  hosts: localhost
+  gather_facts: true
+
+  vars:
+    # monthly | annual
+    savings_report_period: "monthly"
+
+    # Mensal
+    # Se preenchido, tem prioridade sobre savings_report_month_mode.
+    # Exemplo: "202606"
+    savings_report_month: ""
+
+    # current  -> usa o mês atual quando savings_report_month estiver vazio
+    # previous -> usa o mês anterior quando savings_report_month estiver vazio
+    savings_report_month_mode: "previous"
+
+    # Anual
+    # Se preenchido, tem prioridade sobre savings_report_year_mode.
+    # Exemplo: "2026"
+    savings_report_year: ""
+
+    # current  -> usa o ano atual quando savings_report_year estiver vazio
+    # previous -> usa o ano anterior quando savings_report_year estiver vazio
+    savings_report_year_mode: "previous"
+
+    savings_report_timezone: "America/Sao_Paulo"
+    savings_report_title: "Data Purge Manager - Relatório de economia"
+    savings_report_subject_prefix: "Ansible-Report"
+    savings_report_debug: false
+
+    # Consolidação mensal
+    savings_consolidate_month: true
+    savings_prefer_monthly_consolidated: true
+    savings_delete_raw_after_monthly_consolidation: true
+
+    # Consolidação anual
+    savings_consolidate_year: true
+    savings_prefer_yearly_consolidated: true
+    savings_annual_fallback_to_raw: true
+
+    # CIFS
+    send_mail_cifs: "producao"
+    savings_metrics_cifs_path: "/Ansible/data_purge_metrics"
+    send_mail_cifs_address:
+      tutihofix: "//192.168.0.247/certs"
+      producao: "//192.168.0.115/certs"
+    cifs_workgroup: "WORKGROUP"
+
+    # Host que executa smbclient. Vazio = localhost.
+    savings_report_cifs_delegate: "192.168.122.34"
+
+    savings_report_tmpdir: "/tmp/data-purge-savings-report-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    savings_monthly_report_template: "{{ playbook_dir }}/templates/savings_monthly_report.html.j2"
+
+  tasks:
+    - name: Validar período do relatório
+      ansible.builtin.assert:
+        that:
+          - (savings_report_period | default('monthly') | string | lower | trim) in ['monthly', 'annual']
+        fail_msg: >-
+          savings_report_period inválido.
+          Valores aceitos: monthly ou annual.
+          Valor recebido: {{ savings_report_period | default('') }}
+
+    - name: Validar modo de mês do relatório
+      ansible.builtin.assert:
+        that:
+          - (savings_report_month_mode | default('current') | string | lower | trim) in ['current', 'previous']
+        fail_msg: >-
+          savings_report_month_mode inválido.
+          Valores aceitos: current ou previous.
+          Valor recebido: {{ savings_report_month_mode | default('') }}
+      when: (savings_report_period | default('monthly') | string | lower | trim) == 'monthly'
+
+    - name: Validar modo de ano do relatório
+      ansible.builtin.assert:
+        that:
+          - (savings_report_year_mode | default('current') | string | lower | trim) in ['current', 'previous']
+        fail_msg: >-
+          savings_report_year_mode inválido.
+          Valores aceitos: current ou previous.
+          Valor recebido: {{ savings_report_year_mode | default('') }}
+      when: (savings_report_period | default('monthly') | string | lower | trim) == 'annual'
+
+    - name: Definir período normalizado
+      ansible.builtin.set_fact:
+        _savings_report_period: "{{ savings_report_period | default('monthly') | string | lower | trim }}"
+
+    - name: Definir data/hora de geração do relatório
+      ansible.builtin.set_fact:
+        _savings_report_generated_at: >-
+          {{
+            lookup(
+              'ansible.builtin.pipe',
+              "TZ='" ~ savings_report_timezone ~ "' date '+%d/%m/%Y %H:%M:%S " ~ savings_report_timezone ~ "'"
+            )
+          }}
+
+    - name: Capturar ano e mês atual no timezone do relatório
+      ansible.builtin.set_fact:
+        _savings_now_year: '{{ lookup(''ansible.builtin.pipe'', "TZ=''" ~ savings_report_timezone ~ "'' date ''+%Y''") | int }}'
+        _savings_now_month: '{{ lookup(''ansible.builtin.pipe'', "TZ=''" ~ savings_report_timezone ~ "'' date ''+%m''") | int }}'
+
+    - name: Definir mês efetivo do relatório mensal
+      ansible.builtin.set_fact:
+        _savings_report_month: >-
+          {%- set explicit_month = savings_report_month | default('') | string | trim -%}
+          {%- set month_mode = savings_report_month_mode | default('current') | string | lower | trim -%}
+          {%- if explicit_month | length > 0 -%}
+          {{ explicit_month }}
+          {%- elif month_mode == 'previous' -%}
+            {%- set prev_year = (_savings_now_year | int) -%}
+            {%- set prev_month = (_savings_now_month | int) - 1 -%}
+            {%- if (_savings_now_month | int) == 1 -%}
+              {%- set prev_year = (_savings_now_year | int) - 1 -%}
+              {%- set prev_month = 12 -%}
+            {%- endif -%}
+          {{ '%04d%02d' | format(prev_year, prev_month) }}
+          {%- else -%}
+          {{ '%04d%02d' | format((_savings_now_year | int), (_savings_now_month | int)) }}
+          {%- endif -%}
+      when: _savings_report_period == 'monthly'
+
+    - name: Validar formato do mês efetivo
+      ansible.builtin.assert:
+        that:
+          - _savings_report_month is match('^[0-9]{6}$')
+        fail_msg: >-
+          Mês inválido. Use o formato YYYYMM.
+          Valor recebido: {{ _savings_report_month | default('') }}
+      when: _savings_report_period == 'monthly'
+
+    - name: Definir label do mês
+      ansible.builtin.set_fact:
+        _savings_report_month_label: "{{ _savings_report_month[4:6] ~ '/' ~ _savings_report_month[0:4] }}"
+        _savings_report_period_label: "{{ _savings_report_month[4:6] ~ '/' ~ _savings_report_month[0:4] }}"
+      when: _savings_report_period == 'monthly'
+
+    - name: Definir ano efetivo do relatório anual
+      ansible.builtin.set_fact:
+        _savings_report_year: >-
+          {%- set explicit_year = savings_report_year | default('') | string | trim -%}
+          {%- set year_mode = savings_report_year_mode | default('current') | string | lower | trim -%}
+          {%- if explicit_year | length > 0 -%}
+          {{ explicit_year }}
+          {%- elif year_mode == 'previous' -%}
+          {{ '%04d' | format((_savings_now_year | int) - 1) }}
+          {%- else -%}
+          {{ '%04d' | format((_savings_now_year | int)) }}
+          {%- endif -%}
+      when: _savings_report_period == 'annual'
+
+    - name: Validar formato do ano efetivo
+      ansible.builtin.assert:
+        that:
+          - _savings_report_year is match('^[0-9]{4}$')
+        fail_msg: >-
+          Ano inválido. Use o formato YYYY.
+          Valor recebido: {{ _savings_report_year | default('') }}
+      when: _savings_report_period == 'annual'
+
+    - name: Definir meses esperados do relatório anual
+      ansible.builtin.set_fact:
+        _savings_report_year_months:
+          - "{{ _savings_report_year }}01"
+          - "{{ _savings_report_year }}02"
+          - "{{ _savings_report_year }}03"
+          - "{{ _savings_report_year }}04"
+          - "{{ _savings_report_year }}05"
+          - "{{ _savings_report_year }}06"
+          - "{{ _savings_report_year }}07"
+          - "{{ _savings_report_year }}08"
+          - "{{ _savings_report_year }}09"
+          - "{{ _savings_report_year }}10"
+          - "{{ _savings_report_year }}11"
+          - "{{ _savings_report_year }}12"
+        _savings_report_year_label: "{{ _savings_report_year }}"
+        _savings_report_period_label: "{{ _savings_report_year }}"
+      when: _savings_report_period == 'annual'
+
+    - name: Inicializar variáveis do relatório
+      ansible.builtin.set_fact:
+        _savings_metric_files: []
+        _savings_raw_fallback_files: []
+        _savings_monthly_files: []
+        _savings_metric_records: []
+        _savings_monthly_records: []
+        _savings_report_records: []
+        _savings_missing_months: []
+        _savings_existing_months: []
+        _savings_report_source_type: "raw"
+        _savings_monthly_consolidated_file: ""
+        _savings_monthly_consolidated_record: {}
+        _savings_monthly_consolidation_generated: false
+        _savings_yearly_consolidated_file: ""
+        _savings_yearly_consolidated_record: {}
+        _savings_use_yearly_consolidated: false
+        _savings_yearly_consolidation_generated: false
+
+    - name: Definir executor do CIFS
+      ansible.builtin.set_fact:
+        _savings_cifs_delegate: >-
+          {{
+            savings_report_cifs_delegate
+            if (savings_report_cifs_delegate | default('') | string | trim | length > 0)
+            else 'localhost'
+          }}
+
+    - name: Normalizar configuração CIFS
+      ansible.builtin.set_fact:
+        _savings_cifs_server: "{{ (send_mail_cifs_address | default({}))[send_mail_cifs | lower] | default('') }}"
+        _savings_cifs_dir: "{{ savings_metrics_cifs_path }}"
+        _savings_cifs_user: "{{ ansible_user | default('') }}"
+        _savings_cifs_pass: "{{ ansible_password | default('') }}"
+        _savings_cifs_workgroup: "{{ cifs_workgroup | default('WORKGROUP') }}"
+        _savings_cifs_password_file: "{{ savings_report_tmpdir }}/.cifs-pass"
+      no_log: true
+
+    - name: Falhar se CIFS não estiver mapeado
+      ansible.builtin.fail:
+        msg: "CIFS não mapeado: send_mail_cifs='{{ send_mail_cifs }}' não existe em send_mail_cifs_address."
+      when: (_savings_cifs_server | length) == 0
+
+    - name: Garantir diretório temporário no host do smbclient
+      ansible.builtin.file:
+        path: "{{ savings_report_tmpdir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+
+    - name: Criar arquivo temporário de senha do CIFS
+      ansible.builtin.copy:
+        dest: "{{ _savings_cifs_password_file }}"
+        content: "{{ _savings_cifs_pass }}"
+        mode: "0600"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      no_log: true
+
+    # Fluxo mensal
+
+    - name: Mensal | Listar consolidado mensal existente
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        smbclient "{{ _savings_cifs_server }}" \
+          -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})" \
+          -W "{{ _savings_cifs_workgroup }}" \
+          -c 'cd {{ _savings_cifs_dir }} ; ls data_purge_monthly_{{ _savings_report_month }}.json' \
+        | awk '{
+            for (i = 1; i <= NF; i++) {
+              if ($i == "data_purge_monthly_{{ _savings_report_month }}.json") {
+                print $i
+              }
+            }
+          }'
+      args:
+        executable: /bin/bash
+      register: _savings_monthly_consolidated_ls
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when: _savings_report_period == 'monthly'
+
+    - name: Mensal | Definir consolidado mensal existente
+      ansible.builtin.set_fact:
+        _savings_monthly_consolidated_file: "{{ (_savings_monthly_consolidated_ls.stdout_lines | default([]) | map('trim') | reject('equalto', '') | list | first) | default('') }}"
+      when: _savings_report_period == 'monthly'
+
+    - name: Mensal | Definir se deve usar consolidado mensal
+      ansible.builtin.set_fact:
+        _savings_use_monthly_consolidated: >-
+          {{
+            savings_prefer_monthly_consolidated | default(true) | bool
+            and (_savings_monthly_consolidated_file | default('') | string | trim | length > 0)
+          }}
+      when: _savings_report_period == 'monthly'
+
+    - name: Mensal | Baixar consolidado mensal
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; get {{ _savings_monthly_consolidated_file }} {{ savings_report_tmpdir }}/{{ _savings_monthly_consolidated_file }}'
+      register: _savings_monthly_consolidated_get
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: _savings_monthly_consolidated_get.rc == 0
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - _savings_use_monthly_consolidated | default(false) | bool
+
+    - name: Mensal | Ler consolidado mensal
+      ansible.builtin.slurp:
+        src: "{{ savings_report_tmpdir }}/{{ _savings_monthly_consolidated_file }}"
+      register: _savings_monthly_consolidated_slurp
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - _savings_use_monthly_consolidated | default(false) | bool
+
+    - name: Mensal | Converter consolidado mensal para registros
+      ansible.builtin.set_fact:
+        _savings_monthly_consolidated_record: "{{ _savings_monthly_consolidated_slurp.content | b64decode | from_json }}"
+        _savings_report_records: "{{ (_savings_monthly_consolidated_slurp.content | b64decode | from_json).executions | default([]) }}"
+        _savings_metric_files: "{{ (_savings_monthly_consolidated_slurp.content | b64decode | from_json).source_files | default([]) }}"
+        _savings_report_source_type: "monthly_consolidated"
+      when:
+        - _savings_report_period == 'monthly'
+        - _savings_use_monthly_consolidated | default(false) | bool
+
+    - name: Mensal | Validar se consolidado mensal pertence ao mês esperado
+      ansible.builtin.assert:
+        that:
+          - _savings_monthly_consolidated_record.month | default('') == _savings_report_month
+        fail_msg: >-
+          Consolidado mensal com mês divergente.
+          Mês esperado={{ _savings_report_month }}.
+          Mês dentro do JSON={{ _savings_monthly_consolidated_record.month | default('') }}.
+          Arquivo={{ _savings_monthly_consolidated_file | default('') }}.
+      when:
+        - _savings_report_period == 'monthly'
+        - _savings_use_monthly_consolidated | default(false) | bool
+
+    - name: Mensal | Listar métricas brutas do mês no CIFS
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        smbclient "{{ _savings_cifs_server }}" \
+          -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})" \
+          -W "{{ _savings_cifs_workgroup }}" \
+          -c 'cd {{ _savings_cifs_dir }} ; ls data_purge_metric_{{ _savings_report_month | trim }}_*.json' \
+        | awk '{
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /^data_purge_metric_{{ _savings_report_month | trim }}_[^[:space:]]+\.json$/) {
+                print $i
+              }
+            }
+          }'
+      args:
+        executable: /bin/bash
+      register: _savings_cifs_ls
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+
+    - name: Mensal | Extrair lista de arquivos brutos
+      ansible.builtin.set_fact:
+        _savings_metric_files: >-
+          {{
+            (_savings_cifs_ls.stdout_lines | default([]))
+            | map('trim')
+            | reject('equalto', '')
+            | unique
+            | list
+          }}
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+
+    - name: Mensal | Baixar métricas brutas do CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; get {{ item }} {{ savings_report_tmpdir }}/{{ item }}'
+      register: _savings_cifs_get
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: _savings_cifs_get.rc == 0
+      loop: "{{ _savings_metric_files }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+        - (_savings_metric_files | length) > 0
+
+    - name: Mensal | Ler métricas brutas baixadas
+      ansible.builtin.slurp:
+        src: "{{ savings_report_tmpdir }}/{{ item }}"
+      register: _savings_metric_slurps
+      loop: "{{ _savings_metric_files }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+        - (_savings_metric_files | length) > 0
+
+    - name: Mensal | Converter métricas brutas JSON para objetos
+      ansible.builtin.set_fact:
+        _savings_metric_records: "{{ _savings_metric_records + [ (item.content | b64decode | from_json) ] }}"
+      loop: "{{ _savings_metric_slurps.results | default([]) }}"
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+        - (_savings_metric_slurps.results | default([]) | length) > 0
+        - item.content is defined
+
+    - name: Mensal | Validar se métricas brutas pertencem ao mês esperado
+      ansible.builtin.assert:
+        that:
+          - item.month | default('') == _savings_report_month
+        fail_msg: >-
+          Métrica bruta com mês divergente.
+          Mês esperado={{ _savings_report_month }}.
+          Mês dentro do JSON={{ item.month | default('') }}.
+          Job={{ item.job_id | default('') }}.
+      loop: "{{ _savings_metric_records | default([]) }}"
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+        - (_savings_metric_records | default([]) | length) > 0
+
+    - name: Mensal | Usar métricas brutas como registros do relatório
+      ansible.builtin.set_fact:
+        _savings_report_records: "{{ _savings_metric_records | default([]) }}"
+        _savings_report_source_type: "raw_metrics"
+      when:
+        - _savings_report_period == 'monthly'
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+
+    # Fluxo anual
+
+    - name: Anual | Listar consolidado anual existente
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        smbclient "{{ _savings_cifs_server }}" \
+          -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})" \
+          -W "{{ _savings_cifs_workgroup }}" \
+          -c 'cd {{ _savings_cifs_dir }} ; ls data_purge_yearly_{{ _savings_report_year }}.json' \
+        | awk '{
+            for (i = 1; i <= NF; i++) {
+              if ($i == "data_purge_yearly_{{ _savings_report_year }}.json") {
+                print $i
+              }
+            }
+          }'
+      args:
+        executable: /bin/bash
+      register: _savings_yearly_consolidated_ls
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when: _savings_report_period == 'annual'
+
+    - name: Anual | Definir consolidado anual existente
+      ansible.builtin.set_fact:
+        _savings_yearly_consolidated_file: "{{ (_savings_yearly_consolidated_ls.stdout_lines | default([]) | map('trim') | reject('equalto', '') | list | first) | default('') }}"
+      when: _savings_report_period == 'annual'
+
+    - name: Anual | Definir se deve usar consolidado anual
+      ansible.builtin.set_fact:
+        _savings_use_yearly_consolidated: >-
+          {{
+            savings_prefer_yearly_consolidated | default(true) | bool
+            and (_savings_yearly_consolidated_file | default('') | string | trim | length > 0)
+          }}
+      when: _savings_report_period == 'annual'
+
+    - name: Anual | Baixar consolidado anual
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; get {{ _savings_yearly_consolidated_file }} {{ savings_report_tmpdir }}/{{ _savings_yearly_consolidated_file }}'
+      register: _savings_yearly_consolidated_get
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: _savings_yearly_consolidated_get.rc == 0
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - _savings_use_yearly_consolidated | default(false) | bool
+
+    - name: Anual | Ler consolidado anual
+      ansible.builtin.slurp:
+        src: "{{ savings_report_tmpdir }}/{{ _savings_yearly_consolidated_file }}"
+      register: _savings_yearly_consolidated_slurp
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - _savings_use_yearly_consolidated | default(false) | bool
+
+    - name: Anual | Converter consolidado anual para objeto
+      ansible.builtin.set_fact:
+        _savings_yearly_consolidated_record: "{{ _savings_yearly_consolidated_slurp.content | b64decode | from_json }}"
+      when:
+        - _savings_report_period == 'annual'
+        - _savings_use_yearly_consolidated | default(false) | bool
+
+    - name: Anual | Usar consolidado anual como fonte do relatório
+      ansible.builtin.set_fact:
+        _savings_report_records: "{{ _savings_yearly_consolidated_record.executions | default([]) }}"
+        _savings_monthly_records: "{{ _savings_yearly_consolidated_record.monthly_records | default([]) }}"
+        _savings_monthly_files: "{{ _savings_yearly_consolidated_record.monthly_source_files | default([]) }}"
+        _savings_raw_fallback_files: "{{ _savings_yearly_consolidated_record.raw_fallback_files | default([]) }}"
+        _savings_missing_months: "{{ _savings_yearly_consolidated_record.missing_months_without_data | default([]) }}"
+        _savings_report_source_type: "yearly_consolidated"
+      when:
+        - _savings_report_period == 'annual'
+        - _savings_use_yearly_consolidated | default(false) | bool
+
+    - name: Anual | Validar se consolidado anual pertence ao ano esperado
+      ansible.builtin.assert:
+        that:
+          - _savings_yearly_consolidated_record.year | default('') | string == _savings_report_year | string
+        fail_msg: >-
+          Consolidado anual com ano divergente.
+          Ano esperado={{ _savings_report_year }}.
+          Ano dentro do JSON={{ _savings_yearly_consolidated_record.year | default('') }}.
+          Arquivo={{ _savings_yearly_consolidated_file | default('') }}.
+      when:
+        - _savings_report_period == 'annual'
+        - _savings_use_yearly_consolidated | default(false) | bool
+
+    - name: Anual | Listar consolidados mensais do ano no CIFS
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        smbclient "{{ _savings_cifs_server }}" \
+          -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})" \
+          -W "{{ _savings_cifs_workgroup }}" \
+          -c 'cd {{ _savings_cifs_dir }} ; ls data_purge_monthly_{{ _savings_report_year }}*.json' \
+        | awk '{
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /^data_purge_monthly_{{ _savings_report_year }}[0-9][0-9]\.json$/) {
+                print $i
+              }
+            }
+          }'
+      args:
+        executable: /bin/bash
+      register: _savings_monthly_files_ls
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+
+    - name: Anual | Extrair lista de consolidados mensais
+      ansible.builtin.set_fact:
+        _savings_monthly_files: >-
+          {{
+            (_savings_monthly_files_ls.stdout_lines | default([]))
+            | map('trim')
+            | reject('equalto', '')
+            | unique
+            | sort
+            | list
+          }}
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+
+    - name: Anual | Baixar consolidados mensais
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; get {{ item }} {{ savings_report_tmpdir }}/{{ item }}'
+      register: _savings_monthly_get
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: _savings_monthly_get.rc == 0
+      loop: "{{ _savings_monthly_files }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_monthly_files | length) > 0
+
+    - name: Anual | Ler consolidados mensais
+      ansible.builtin.slurp:
+        src: "{{ savings_report_tmpdir }}/{{ item }}"
+      register: _savings_monthly_slurps
+      loop: "{{ _savings_monthly_files }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_monthly_files | length) > 0
+
+    - name: Anual | Converter consolidados mensais para objetos
+      ansible.builtin.set_fact:
+        _savings_monthly_records: "{{ _savings_monthly_records + [ (item.content | b64decode | from_json) ] }}"
+      loop: "{{ _savings_monthly_slurps.results | default([]) }}"
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_monthly_slurps.results | default([]) | length) > 0
+        - item.content is defined
+
+    - name: Anual | Validar se consolidados mensais pertencem ao ano esperado
+      ansible.builtin.assert:
+        that:
+          - item.month | default('') is match('^' ~ _savings_report_year ~ '[0-9]{2}$')
+        fail_msg: >-
+          Consolidado mensal com ano/mês divergente.
+          Ano esperado={{ _savings_report_year }}.
+          Mês dentro do JSON={{ item.month | default('') }}.
+      loop: "{{ _savings_monthly_records | default([]) }}"
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_monthly_records | default([]) | length) > 0
+
+    - name: Anual | Montar registros a partir dos consolidados mensais
+      ansible.builtin.set_fact:
+        _savings_report_records: "{{ _savings_report_records + (item.executions | default([])) }}"
+        _savings_existing_months: "{{ _savings_existing_months + [item.month | default('')] }}"
+      loop: "{{ _savings_monthly_records | default([]) }}"
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+
+    - name: Anual | Definir meses sem consolidado mensal
+      ansible.builtin.set_fact:
+        _savings_existing_months: "{{ _savings_existing_months | reject('equalto', '') | unique | list }}"
+        _savings_missing_months: "{{ _savings_report_year_months | difference(_savings_existing_months | reject('equalto', '') | unique | list) }}"
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+
+    - name: Anual | Listar métricas brutas dos meses sem consolidado
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        smbclient "{{ _savings_cifs_server }}" \
+          -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})" \
+          -W "{{ _savings_cifs_workgroup }}" \
+          -c 'cd {{ _savings_cifs_dir }} ; ls data_purge_metric_{{ item }}_*.json' \
+        | awk '{
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /^data_purge_metric_{{ item }}_[^[:space:]]+\.json$/) {
+                print $i
+              }
+            }
+          }'
+      args:
+        executable: /bin/bash
+      register: _savings_raw_missing_ls
+      changed_when: false
+      failed_when: false
+      loop: "{{ _savings_missing_months | default([]) }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - savings_annual_fallback_to_raw | default(true) | bool
+        - (_savings_missing_months | default([]) | length) > 0
+
+    - name: Anual | Montar lista de métricas brutas de fallback
+      ansible.builtin.set_fact:
+        _savings_raw_fallback_files: "{{ (_savings_raw_fallback_files + (item.stdout_lines | default([]))) | map('trim') | reject('equalto', '') | unique | sort | list }}"
+      loop: "{{ _savings_raw_missing_ls.results | default([]) }}"
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - savings_annual_fallback_to_raw | default(true) | bool
+        - (_savings_raw_missing_ls.results | default([]) | length) > 0
+
+    - name: Anual | Baixar métricas brutas de fallback
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; get {{ item }} {{ savings_report_tmpdir }}/{{ item }}'
+      register: _savings_raw_fallback_get
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: _savings_raw_fallback_get.rc == 0
+      loop: "{{ _savings_raw_fallback_files }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_raw_fallback_files | length) > 0
+
+    - name: Anual | Ler métricas brutas de fallback
+      ansible.builtin.slurp:
+        src: "{{ savings_report_tmpdir }}/{{ item }}"
+      register: _savings_raw_fallback_slurps
+      loop: "{{ _savings_raw_fallback_files }}"
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_raw_fallback_files | length) > 0
+
+    - name: Anual | Converter métricas brutas de fallback para registros
+      ansible.builtin.set_fact:
+        _savings_report_records: "{{ _savings_report_records + [ (item.content | b64decode | from_json) ] }}"
+      loop: "{{ _savings_raw_fallback_slurps.results | default([]) }}"
+      when:
+        - _savings_report_period == 'annual'
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_raw_fallback_slurps.results | default([]) | length) > 0
+        - item.content is defined
+
+    # Totais e consolidação
+
+    - name: Calcular totais do período
+      ansible.builtin.set_fact:
+        _savings_total_deleted_bytes: >-
+          {%- set ns = namespace(v=0) -%}
+          {%- for r in _savings_report_records | default([]) -%}
+            {%- set ns.v = ns.v + (r.total_deleted_bytes | default(0) | int) -%}
+          {%- endfor -%}
+          {{ ns.v }}
+        _savings_total_deleted_files: >-
+          {%- set ns = namespace(v=0) -%}
+          {%- for r in _savings_report_records | default([]) -%}
+            {%- set ns.v = ns.v + (r.total_deleted_files | default(0) | int) -%}
+          {%- endfor -%}
+          {{ ns.v }}
+        _savings_total_failed_files: >-
+          {%- set ns = namespace(v=0) -%}
+          {%- for r in _savings_report_records | default([]) -%}
+            {%- set ns.v = ns.v + (r.total_failed_files | default(0) | int) -%}
+          {%- endfor -%}
+          {{ ns.v }}
+
+    - name: Mensal | Definir arquivo consolidado mensal
+      ansible.builtin.set_fact:
+        _savings_monthly_output_file: "data_purge_monthly_{{ _savings_report_month }}.json"
+        _savings_monthly_output_path: "{{ savings_report_tmpdir }}/data_purge_monthly_{{ _savings_report_month }}.json"
+      when: _savings_report_period == 'monthly'
+
+    - name: Mensal | Gerar consolidado mensal
+      ansible.builtin.copy:
+        dest: "{{ _savings_monthly_output_path }}"
+        mode: "0640"
+        content: |-
+          {
+            "schema_version": 1,
+            "source": "Data Purge Manager",
+            "period_type": "month",
+            "month": {{ _savings_report_month | to_json }},
+            "month_label": {{ _savings_report_month_label | to_json }},
+            "generated_at": {{ _savings_report_generated_at | to_json }},
+            "timezone": {{ savings_report_timezone | to_json }},
+            "source_files": {{ _savings_metric_files | default([]) | to_nice_json(indent=2) }},
+            "totals": {
+              "total_deleted_files": {{ _savings_total_deleted_files | default(0) | int }},
+              "total_deleted_bytes": {{ _savings_total_deleted_bytes | default(0) | int }},
+              "total_failed_files": {{ _savings_total_failed_files | default(0) | int }},
+              "execution_count": {{ _savings_report_records | default([]) | length }}
+            },
+            "executions": {{ _savings_report_records | default([]) | to_nice_json(indent=2) }}
+          }
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - savings_consolidate_month | default(true) | bool
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+        - (_savings_report_records | default([]) | length) > 0
+
+    - name: Mensal | Publicar consolidado mensal no CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; put {{ _savings_monthly_output_path }} {{ _savings_monthly_output_file }}'
+      register: _savings_monthly_put
+      changed_when: true
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - savings_consolidate_month | default(true) | bool
+        - not (_savings_use_monthly_consolidated | default(false) | bool)
+        - (_savings_report_records | default([]) | length) > 0
+
+    - name: Mensal | Marcar consolidação mensal gerada
+      ansible.builtin.set_fact:
+        _savings_monthly_consolidation_generated: true
+        _savings_monthly_consolidated_file: "{{ _savings_monthly_output_file }}"
+      when:
+        - _savings_report_period == 'monthly'
+        - _savings_monthly_put is defined
+        - _savings_monthly_put.rc is defined
+        - _savings_monthly_put.rc == 0
+
+    - name: Mensal | Remover métricas brutas após consolidação mensal
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; del {{ item }}'
+      loop: "{{ _savings_metric_files | default([]) }}"
+      changed_when: true
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'monthly'
+        - savings_delete_raw_after_monthly_consolidation | default(false) | bool
+        - _savings_monthly_consolidation_generated | default(false) | bool
+        - (_savings_metric_files | default([]) | length) > 0
+
+    - name: Anual | Definir arquivo consolidado anual
+      ansible.builtin.set_fact:
+        _savings_yearly_output_file: "data_purge_yearly_{{ _savings_report_year }}.json"
+        _savings_yearly_output_path: "{{ savings_report_tmpdir }}/data_purge_yearly_{{ _savings_report_year }}.json"
+      when: _savings_report_period == 'annual'
+
+    - name: Anual | Gerar consolidado anual
+      ansible.builtin.copy:
+        dest: "{{ _savings_yearly_output_path }}"
+        mode: "0640"
+        content: |-
+          {
+            "schema_version": 1,
+            "source": "Data Purge Manager",
+            "period_type": "year",
+            "year": {{ _savings_report_year | to_json }},
+            "generated_at": {{ _savings_report_generated_at | to_json }},
+            "timezone": {{ savings_report_timezone | to_json }},
+            "monthly_source_files": {{ _savings_monthly_files | default([]) | to_nice_json(indent=2) }},
+            "raw_fallback_files": {{ _savings_raw_fallback_files | default([]) | to_nice_json(indent=2) }},
+            "missing_months_without_data": {{ _savings_missing_months | default([]) | to_nice_json(indent=2) }},
+            "totals": {
+              "total_deleted_files": {{ _savings_total_deleted_files | default(0) | int }},
+              "total_deleted_bytes": {{ _savings_total_deleted_bytes | default(0) | int }},
+              "total_failed_files": {{ _savings_total_failed_files | default(0) | int }},
+              "execution_count": {{ _savings_report_records | default([]) | length }}
+            },
+            "monthly_records": {{ _savings_monthly_records | default([]) | to_nice_json(indent=2) }},
+            "executions": {{ _savings_report_records | default([]) | to_nice_json(indent=2) }}
+          }
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - savings_consolidate_year | default(true) | bool
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_report_records | default([]) | length) > 0
+
+    - name: Anual | Publicar consolidado anual no CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _savings_cifs_server }}"
+        -U "{{ _savings_cifs_user }}%$(cat {{ _savings_cifs_password_file }})"
+        -W "{{ _savings_cifs_workgroup }}"
+        -c 'cd {{ _savings_cifs_dir }} ; put {{ _savings_yearly_output_path }} {{ _savings_yearly_output_file }}'
+      register: _savings_yearly_put
+      changed_when: true
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      when:
+        - _savings_report_period == 'annual'
+        - savings_consolidate_year | default(true) | bool
+        - not (_savings_use_yearly_consolidated | default(false) | bool)
+        - (_savings_report_records | default([]) | length) > 0
+
+    - name: Anual | Marcar consolidação anual gerada
+      ansible.builtin.set_fact:
+        _savings_yearly_consolidation_generated: true
+      when:
+        - _savings_report_period == 'annual'
+        - _savings_yearly_put is defined
+        - _savings_yearly_put.rc is defined
+        - _savings_yearly_put.rc == 0
+
+    - name: Debug opcional do relatório
+      ansible.builtin.debug:
+        msg:
+          period: "{{ _savings_report_period }}"
+          period_label: "{{ _savings_report_period_label }}"
+          source_type: "{{ _savings_report_source_type }}"
+          metric_files: "{{ _savings_metric_files }}"
+          monthly_files: "{{ _savings_monthly_files }}"
+          raw_fallback_files: "{{ _savings_raw_fallback_files }}"
+          records: "{{ _savings_report_records | length }}"
+          total_deleted_bytes: "{{ _savings_total_deleted_bytes }}"
+          monthly_consolidated_file: "{{ _savings_monthly_consolidated_file | default('') }}"
+          monthly_consolidation_generated: "{{ _savings_monthly_consolidation_generated }}"
+          yearly_consolidated_file: "{{ _savings_yearly_consolidated_file | default('') }}"
+          use_yearly_consolidated: "{{ _savings_use_yearly_consolidated | default(false) }}"
+          yearly_consolidation_generated: "{{ _savings_yearly_consolidation_generated }}"
+      when: savings_report_debug | bool
+
+    - name: Montar assunto e HTML do relatório
+      ansible.builtin.set_fact:
+        send_mail_subject: >-
+          {{ savings_report_subject_prefix }} (OK) -
+          {{ savings_report_title }} -
+          {{ 'Mensal' if _savings_report_period == 'monthly' else 'Anual' }} -
+          {{ _savings_report_period_label }}
+        send_mail_body: "{{ lookup('ansible.builtin.template', savings_monthly_report_template) }}"
+
+    - name: Publicar set_stats para envio de e-mail
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: "{{ send_mail_subject }}"
+          send_mail_body: "{{ send_mail_body }}"
+          send_mail_attachments: []
+          send_mail_cifs_remote_files: []
+
+    - name: Remover arquivo temporário de senha do CIFS
+      ansible.builtin.file:
+        path: "{{ _savings_cifs_password_file }}"
+        state: absent
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false
+      no_log: true
+
+    - name: Remover arquivos temporários baixados/gerados
+      ansible.builtin.file:
+        path: "{{ savings_report_tmpdir }}/{{ item }}"
+        state: absent
+      loop: >-
+        {{
+          (
+            (_savings_metric_files | default([]))
+            + (_savings_monthly_files | default([]))
+            + (_savings_raw_fallback_files | default([]))
+            + ([_savings_monthly_consolidated_file] if (_savings_monthly_consolidated_file | default('') | length > 0) else [])
+            + ([_savings_yearly_consolidated_file] if (_savings_yearly_consolidated_file | default('') | length > 0) else [])
+            + ([_savings_monthly_output_file] if (_savings_monthly_output_file | default('') | length > 0) else [])
+            + ([_savings_yearly_output_file] if (_savings_yearly_output_file | default('') | length > 0) else [])
+          )
+          | reject('equalto', '')
+          | unique
+          | list
+        }}
+      failed_when: false
+      delegate_to: "{{ _savings_cifs_delegate }}"
+      become: false

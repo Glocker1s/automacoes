@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "source": "Data Purge Manager",
+  "job_id": {{ _savings_job_id | to_json }},
+  "job_template": {{ awx_job_template_name | default(tower_job_template_name | default('Data Purge Manager')) | to_json }},
+  "workflow_job_id": {{ workflow_job_id | default(tower_workflow_job_id | default('')) | string | to_json }},
+  "generated_at": {{ _savings_generated_at | to_json }},
+  "month": {{ _savings_month | to_json }},
+  "timezone": {{ _savings_timezone | to_json }},
+
+  "mode": {{ purge_mode | default('') | to_json }},
+  "status": {{ ('partial' if ((purge_total_failed_files | default(0) | int) > 0 or (purge_total_failed_rules | default(0) | int) > 0) else 'success') | to_json }},
+
+  "reason": {{ motivo | default('') | to_json }},
+
+  "envs": {{ selected_purge_envs | default([]) | to_json }},
+  "groups": {{ selected_purge_applications | default([]) | to_json }},
+
+  "total_deleted_files": {{ purge_total_deleted | default(0) | int }},
+  "total_deleted_bytes": {{ purge_total_deleted_bytes | default(0) | int }},
+  "total_failed_files": {{ purge_total_failed_files | default(0) | int }},
+  "total_failed_rules": {{ purge_total_failed_rules | default(0) | int }},
+
+  "hosts": [
+    {% set ns_hosts = namespace(first=true) %}
+    {% for host_report in purge_reports | default([]) %}
+      {% set h = namespace(deleted_files=0, deleted_bytes=0, failed_files=0, matched_files=0, matched_bytes=0) %}
+      {% for row in host_report.rows | default([]) %}
+        {% set h.deleted_files = h.deleted_files + (row.deleted_files | default(0) | int) %}
+        {% set h.deleted_bytes = h.deleted_bytes + (row.deleted_bytes | default(0) | int) %}
+        {% set h.failed_files = h.failed_files + (row.failed_files | default(0) | int) %}
+        {% set h.matched_files = h.matched_files + (row.matched_files | default(0) | int) %}
+        {% set h.matched_bytes = h.matched_bytes + (row.matched_bytes | default(0) | int) %}
+      {% endfor %}
+
+      {% if (h.deleted_files | int) > 0 or (h.deleted_bytes | int) > 0 %}
+        {% if not ns_hosts.first %},{% endif %}
+        {
+          "host": {{ host_report.host | default('') | to_json }},
+          "os": {{ host_report.os | default('unknown') | to_json }},
+          "envs": {{ host_report.envs | default([]) | to_json }},
+          "groups": {{ host_report.applications | default([]) | to_json }},
+          "matched_files": {{ h.matched_files }},
+          "matched_bytes": {{ h.matched_bytes }},
+          "deleted_files": {{ h.deleted_files }},
+          "deleted_bytes": {{ h.deleted_bytes }},
+          "failed_files": {{ h.failed_files }}
+        }
+        {% set ns_hosts.first = false %}
+      {% endif %}
+    {% endfor %}
+  ],
+
+  "rules": [
+    {% set ns = namespace(first=true) %}
+    {% for host_report in purge_reports | default([]) %}
+      {% for row in host_report.rows | default([]) %}
+        {% if (row.deleted_files | default(0) | int) > 0 or (row.deleted_bytes | default(0) | int) > 0 %}
+          {% if not ns.first %},{% endif %}
+          {
+            "host": {{ host_report.host | default('') | to_json }},
+            "os": {{ host_report.os | default('unknown') | to_json }},
+            "rule": {{ row.rule | default('') | to_json }},
+            "description": {{ row.description | default('') | to_json }},
+            "group": {{ row.application | default('') | to_json }},
+            "environment": {{ row.environment | default('') | to_json }},
+            "source": {{ row.source | default('application') | to_json }},
+            "deleted_files": {{ row.deleted_files | default(0) | int }},
+            "deleted_bytes": {{ row.deleted_bytes | default(0) | int }},
+            "failed_files": {{ row.failed_files | default(0) | int }}
+          }
+          {% set ns.first = false %}
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+  ]
+}

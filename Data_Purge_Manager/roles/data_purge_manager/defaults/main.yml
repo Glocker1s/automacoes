@@ -1,0 +1,157 @@
+---
+# Modo seguro por padrão. Para apagar de verdade, usar:
+# purge_mode=apply + purge_confirm_delete=sim
+
+purge_mode: "check" # check | apply
+purge_confirm_delete: "nao" # sim | nao
+purge_include_global_rules: "nao" # sim | nao
+purge_delete_empty_dirs_default: "nao" # sim | nao
+
+# survey
+survey_hosts: "" # host1,host2. Quando vazio, resolve pela matriz.
+purge_applications: "" # app1,app2. Quando vazio, usa todas as apps carregadas.
+purge_env: "" # hml,prd,dr. Quando vazio, usa todos os ambientes da matriz.
+motivo: "" # motivo operacional para aparecer no relatório.
+
+# Caminhos de configuração. Como o playbook fica em playbooks/site.yml, o default aponta para ../config.
+purge_config_root: "{{ playbook_dir }}/config/purge_manager"
+purge_matrix_file: "{{ purge_config_root }}/purge_matrix.yml"
+purge_apps_dir: "{{ purge_config_root }}/apps"
+
+# Comportamento de resolução.
+purge_fail_on_no_hosts: true
+purge_allow_survey_hosts_outside_matrix: false
+purge_global_rules_apply_to_adhoc_hosts: true
+
+# Estratégia padrão de execução.
+# modules: usa módulos Ansible. Mais rastreável, porém pode ser mais lento em alto volume.
+# shell: usa shell no Linux e PowerShell no Windows. Mais performático para grandes volumes.
+purge_engine_default: "modules"
+
+# Detecção de SO por porta.
+purge_wait_timeout: 3
+purge_windows_port: 5985
+purge_linux_port: 22
+
+# Conexão Windows padrão usada ao criar inventário dinâmico.
+purge_windows_connection: "winrm"
+purge_windows_winrm_transport: "ntlm"
+purge_windows_winrm_server_cert_validation: "ignore"
+purge_windows_operation_timeout_sec: 120
+purge_windows_read_timeout_sec: 180
+
+# Linux
+purge_linux_become: true
+
+# Segurança de path.
+purge_min_path_length_linux: 4
+purge_min_path_length_windows: 6
+purge_enforce_allowed_prefixes: true
+purge_allowed_prefixes_required: false
+
+purge_forbidden_paths_linux:
+  - "/"
+  - "/bin"
+  - "/boot"
+  - "/dev"
+  - "/etc"
+  - "/home"
+  - "/lib"
+  - "/lib64"
+  - "/opt"
+  - "/proc"
+  - "/root"
+  - "/run"
+  - "/sbin"
+  - "/sys"
+  - "/usr"
+  - "/var"
+
+purge_forbidden_paths_windows:
+  - "C:\\"
+  - "D:\\"
+  - "E:\\"
+  - "C:\\Windows"
+  - "C:\\Program Files"
+  - "C:\\Program Files (x86)"
+  - "C:\\Users"
+
+purge_default_allowed_prefixes_linux: []
+purge_default_allowed_prefixes_windows: []
+
+# Relatório.
+purge_report_timezone: "America/Sao_Paulo"
+purge_report_sample_limit: 50
+purge_report_title: "Data Purge Manager"
+purge_report_subject_prefix: "Ansible-Report"
+
+purge_disk_usage_enabled: true
+
+# Limites para classificação do uso de disco no relatório.
+#
+# Abaixo de 75%: normal
+# De 75% até 89%: Alerta
+# A partir de 90%: Crítico
+purge_disk_usage_warning_pct: 19
+purge_disk_usage_critical_pct: 20
+
+# Inclui paths ausentes no TXT de auditoria por host.
+purge_missing_paths_audit_enabled: true
+
+#=========
+# Auditoria de arquivos removidos
+
+purge_deleted_files_audit_enabled: true
+purge_audit_controller_dir: "/tmp/data-purge-audit-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+purge_linux_audit_tmpdir: "/tmp"
+purge_windows_audit_tmpdir: "C:\\Windows\\Temp"
+
+purge_audit_cifs_upload_enabled: true
+
+purge_audit_cifs_delegate: "192.168.122.34"
+
+purge_audit_cifs_stage_dir: "/tmp/data-purge-audit-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+send_mail_cifs: "producao"
+send_mail_cifs_path: "/Ansible/mail_attachments"
+send_mail_cifs_address:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.149/certs"
+cifs_workgroup: "WORKGROUP"
+
+#========
+# Métricas mensais de economia
+
+purge_savings_metrics_enabled: true
+
+# Quando true, só gera métrica se houver economia real.
+# Ou seja: apply executado e purge_total_deleted_bytes > 0.
+purge_savings_metrics_only_when_deleted: true
+
+# Diretório local temporário no controller/AAP para montar o JSON.
+purge_savings_metrics_controller_dir: "/tmp/data-purge-savings-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# Caminho dentro do CIFS onde os JSON de métrica serão armazenados.
+purge_savings_cifs_path: "/Ansible/data_purge_metrics"
+purge_savings_cifs_upload_enabled: true
+purge_savings_cifs_delegate: "192.168.122.34"
+
+# Diretório temporário no host que executa o smbclient.
+purge_savings_cifs_stage_dir: "/tmp/data-purge-savings-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+purge_savings_timezone: "{{ purge_report_timezone | default('America/Sao_Paulo') }}"
+
+# Tratamento de falhas inesperadas por host.
+purge_fail_job_on_runtime_errors: true
+
+# Preparação dos anexos para o e-mail.
+purge_audit_attachment_compress_enabled: true
+purge_audit_attachment_safe_limit_mb: 0.2
+
+# Diretório temporário usado no localhost/controller para criar o pacote.
+purge_audit_attachment_work_dir: >-
+  /tmp/data-purge-email-attachments-{{ tower_job_id | default(awx_job_id | default('local')) }}
+
+# Nome do pacote enviado quando os TXT ultrapassarem o limite.
+purge_audit_attachment_archive_filename: >-
+  data_purge_audit_{{ tower_job_id | default(awx_job_id | default('local')) }}.tar.gz

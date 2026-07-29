@@ -1,0 +1,160 @@
+---
+- name: Data Purge Manager | Planejamento e inventário dinâmico
+  hosts: localhost
+  gather_facts: false
+  vars:
+    data_purge_phase: controller
+  tasks:
+    - name: Data Purge Manager | Executar fase de planejamento
+      block:
+        - name: Data Purge Manager | Executar role - controller
+          ansible.builtin.include_role:
+            name: data_purge_manager
+
+      rescue:
+        - name: Data Purge Manager | Publicar relatório de falha - controller
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 90_build_failure_report.yml
+          vars:
+            data_purge_failure_phase: "Planejamento e inventário dinâmico"
+            data_purge_failure_os: "controller"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Encerrar job após falha no planejamento
+          ansible.builtin.fail:
+            msg: >-
+              Data Purge Manager falhou na fase de planejamento.
+              O HTML de falha foi publicado em send_mail_body.
+
+- name: Data Purge Manager | Expurgo Linux
+  hosts: "linux_targets:localhost"
+  gather_facts: false
+  become: false
+  vars:
+    data_purge_phase: linux_purge
+
+  tasks:
+    - name: Data Purge Manager | Executar fase Linux
+      block:
+        - name: Data Purge Manager | Inicializar controle da execução Linux
+          ansible.builtin.set_fact:
+            purge_host_execution_started: true
+            purge_host_execution_completed: false
+            purge_host_execution_failure_recorded: false
+            purge_host_execution_phase: "Expurgo Linux"
+            purge_host_execution_os: "linux"
+
+        - name: Data Purge Manager | Executar role - linux_purge
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            apply:
+              become: "{{ purge_linux_become | default(true) }}"
+
+        - name: Data Purge Manager | Marcar conclusão da execução Linux
+          ansible.builtin.set_fact:
+            purge_host_execution_completed: true
+
+      rescue:
+        - name: Data Purge Manager | Registrar falha inesperada do host Linux
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 91_record_host_failure.yml
+            apply:
+              become: false
+          vars:
+            data_purge_failure_phase: "Expurgo Linux"
+            data_purge_failure_os: "linux"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Informar falha Linux registrada
+          ansible.builtin.debug:
+            msg: >-
+              A falha inesperada do host {{ inventory_hostname }} foi registrada.
+              Os demais hosts continuarão e a falha será exibida no relatório.
+
+      when:
+        - inventory_hostname in (groups['linux_targets'] | default([]))
+
+- name: Data Purge Manager | Expurgo Windows
+  hosts: "windows_targets:localhost"
+  gather_facts: false
+  vars:
+    data_purge_phase: windows_purge
+
+  tasks:
+    - name: Data Purge Manager | Executar fase Windows
+      block:
+        - name: Data Purge Manager | Inicializar controle da execução Windows
+          ansible.builtin.set_fact:
+            purge_host_execution_started: true
+            purge_host_execution_completed: false
+            purge_host_execution_failure_recorded: false
+            purge_host_execution_phase: "Expurgo Windows"
+            purge_host_execution_os: "windows"
+
+        - name: Data Purge Manager | Executar role - windows_purge
+          ansible.builtin.include_role:
+            name: data_purge_manager
+
+        - name: Data Purge Manager | Marcar conclusão da execução Windows
+          ansible.builtin.set_fact:
+            purge_host_execution_completed: true
+
+      rescue:
+        - name: Data Purge Manager | Registrar falha inesperada do host Windows
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 91_record_host_failure.yml
+          vars:
+            data_purge_failure_phase: "Expurgo Windows"
+            data_purge_failure_os: "windows"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Informar falha Windows registrada
+          ansible.builtin.debug:
+            msg: >-
+              A falha inesperada do host {{ inventory_hostname }} foi registrada.
+              Os demais hosts continuarão e a falha será exibida no relatório.
+
+      when:
+        - inventory_hostname in (groups['windows_targets'] | default([]))
+
+- name: Data Purge Manager | Relatório consolidado
+  hosts: localhost
+  gather_facts: true
+  vars:
+    data_purge_phase: report
+  tasks:
+    - name: Data Purge Manager | Executar fase de relatório
+      block:
+        - name: Data Purge Manager | Executar role - report
+          ansible.builtin.include_role:
+            name: data_purge_manager
+
+      rescue:
+        - name: Data Purge Manager | Publicar relatório de falha - report
+          ansible.builtin.include_role:
+            name: data_purge_manager
+            tasks_from: 90_build_failure_report.yml
+          vars:
+            data_purge_failure_phase: "Relatório consolidado"
+            data_purge_failure_os: "controller"
+            data_purge_failure_host: "{{ inventory_hostname }}"
+
+        - name: Data Purge Manager | Encerrar job após falha no relatório
+          ansible.builtin.fail:
+            msg: >-
+              Data Purge Manager falhou na fase de relatório consolidado.
+              O HTML de falha foi publicado em send_mail_body.
+
+    - name: Data Purge Manager | Encerrar job com falhas operacionais consolidadas
+      ansible.builtin.fail:
+        msg: >-
+          A execução terminou com falha inesperada ou interrupção em
+          {{ purge_runtime_failure_count | default(0) | int }} host(s):
+          {{ purge_runtime_failed_hosts | default([]) | join(', ') }}.
+          O relatório consolidado foi publicado para o job de envio de e-mail.
+      when:
+        - purge_fail_job_on_runtime_errors_effective | default(true) | bool
+        - (purge_runtime_failure_count | default(0) | int) > 0

@@ -1,0 +1,75 @@
+---
+- name: Normalizar strings brutas do survey
+  ansible.builtin.set_fact:
+    _survey_hosts_raw: "{{ survey_hosts | default('') }}"
+    _purge_applications_raw: "{{ purge_applications | default(purge_application | default('')) }}"
+    _purge_env_raw: "{{ purge_env | default(purge_envs | default(environment | default(environments | default('')))) }}"
+    purge_apply_enabled: >-
+      {{
+        (purge_mode | default('check') | string | lower) == 'apply'
+        and (purge_confirm_delete | default('nao') | string | lower) in ['sim', 's', 'yes', 'true', '1']
+      }}
+    purge_global_rules_enabled: >-
+      {{ (purge_include_global_rules | default('sim') | string | lower) in ['sim', 's', 'yes', 'true', '1'] }}
+    purge_delete_empty_dirs_default_bool: >-
+      {{ (purge_delete_empty_dirs_default | default('nao') | string | lower) in ['sim', 's', 'yes', 'true', '1'] }}
+
+- name: Calcular lista de hosts informados no survey
+  ansible.builtin.set_fact:
+    survey_target_hosts: >-
+      {{
+        (
+          _survey_hosts_raw
+          if (_survey_hosts_raw is sequence and _survey_hosts_raw is not string)
+          else (_survey_hosts_raw | string | regex_replace('\s+', '') | regex_replace(',+', ',') | trim | split(','))
+        )
+        | map('string')
+        | map('trim')
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
+
+- name: Calcular aplicações selecionadas
+  ansible.builtin.set_fact:
+    selected_purge_applications: >-
+      {{
+        (
+          _purge_applications_raw
+          if (_purge_applications_raw is sequence and _purge_applications_raw is not string)
+          else (_purge_applications_raw | string | regex_replace('\s+', '') | regex_replace(',+', ',') | trim | split(','))
+        )
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
+
+- name: Calcular ambientes selecionados
+  ansible.builtin.set_fact:
+    selected_purge_envs: >-
+      {{
+        (
+          _purge_env_raw
+          if (_purge_env_raw is sequence and _purge_env_raw is not string)
+          else (_purge_env_raw | string | regex_replace('\s+', '') | regex_replace(',+', ',') | trim | split(','))
+        )
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
+
+- name: Exibir entradas normalizadas
+  ansible.builtin.debug:
+    msg:
+      purge_mode: "{{ purge_mode }}"
+      purge_apply_enabled: "{{ purge_apply_enabled }}"
+      selected_purge_applications: "{{ selected_purge_applications }}"
+      selected_purge_envs: "{{ selected_purge_envs }}"
+      survey_target_hosts: "{{ survey_target_hosts }}"
+      motivo: "{{ motivo | default('') }}"

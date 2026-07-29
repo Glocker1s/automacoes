@@ -1,0 +1,540 @@
+---
+- name: Windows | Definir plano do host
+  ansible.builtin.set_fact:
+    purge_plan: "{{ hostvars['localhost'].purge_plan_by_host[inventory_hostname] | default({}) }}"
+    purge_apply_enabled: "{{ hostvars['localhost'].purge_apply_enabled | default(false) }}"
+    purge_delete_empty_dirs_default_bool: "{{ hostvars['localhost'].purge_delete_empty_dirs_default_bool | default(false) }}"
+    _purge_host_audit_enabled: >-
+      {{
+        (purge_deleted_files_audit_enabled | default(true) | bool)
+        or
+        (purge_missing_paths_audit_enabled | default(true) | bool)
+      }}
+
+- name: Windows | Inicializar relatório do host
+  ansible.builtin.set_fact:
+    purge_host_report:
+      host: "{{ inventory_hostname }}"
+      os: "windows"
+      applications: "{{ purge_plan.applications | default([]) }}"
+      envs: "{{ purge_plan.envs | default([]) }}"
+      mode: "{{ 'apply' if (purge_apply_enabled | bool) else 'check' }}"
+      disk_usage_before: []
+      disk_usage_after: []
+      rows: []
+      errors: []
+
+- name: Teste | Windows | Simular host inalcançável
+  ansible.builtin.include_tasks: 93_test_force_unreachable.yml
+  vars:
+    purge_test_current_os: "windows"
+  when:
+    - purge_test_fault_injection_enabled | default(false) | bool
+    - inventory_hostname in (purge_test_unreachable_hosts | default([]))
+
+- name: Teste | Windows | Simular falha antes do processamento
+  ansible.builtin.include_tasks: 92_test_force_runtime_failure.yml
+  vars:
+    purge_test_current_os: "Windows"
+    purge_test_current_stage: "before_role"
+  when:
+    - purge_test_fault_injection_enabled | default(false) | bool
+    - purge_test_runtime_fail_stage | default('before_role') == 'before_role'
+    - inventory_hostname in (purge_test_runtime_fail_hosts | default([]))
+
+- name: Windows | Definir caminhos do arquivo de auditoria
+  ansible.builtin.set_fact:
+    _purge_audit_controller_dir: "{{ purge_audit_controller_dir }}"
+    _purge_audit_file_name: >-
+      data_purge_audit_{{
+        tower_job_id | default(awx_job_id | default('local'))
+      }}_{{
+        inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_')
+      }}.txt
+    _purge_audit_remote_file: >-
+      {{
+        purge_windows_audit_tmpdir | default('C:\Windows\Temp')
+      }}\data_purge_audit_{{
+        tower_job_id | default(awx_job_id | default('local'))
+      }}_{{
+        inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_')
+      }}.txt
+  when:
+    - _purge_host_audit_enabled | bool
+
+- name: Windows | Garantir diretório local de auditoria no controller
+  ansible.builtin.file:
+    path: "{{ _purge_audit_controller_dir }}"
+    state: directory
+    mode: "0750"
+  become: false
+  delegate_to: localhost
+  when:
+    - _purge_host_audit_enabled | bool
+
+- name: Windows | Inicializar arquivo remoto de auditoria
+  ansible.windows.win_shell: |
+    $AuditFile = [System.Text.Encoding]::UTF8.GetString(
+      [System.Convert]::FromBase64String(
+        "{{ (_purge_audit_remote_file | default('')) | b64encode }}"
+      )
+    )
+
+    $Tz = [System.TimeZoneInfo]::FindSystemTimeZoneById(
+      "E. South America Standard Time"
+    )
+
+    $Now = [System.TimeZoneInfo]::ConvertTimeFromUtc(
+      (Get-Date).ToUniversalTime(),
+      $Tz
+    ).ToString("dd/MM/yyyy HH:mm:ss") + " America/Sao_Paulo"
+
+    $Header = @(
+      "Data Purge Manager - Auditoria por host",
+      "Job: {{ tower_job_id | default(awx_job_id | default('local')) }}",
+      "Host: {{ inventory_hostname }}",
+      "Sistema operacional: windows",
+      "Modo: {{ 'apply' if (purge_apply_enabled | bool) else 'check' }}",
+      "Gerado em: $Now",
+      "",
+      "Paths ausentes:",
+      "__DPM_MISSING_PATHS__",
+      "",
+      "Arquivos removidos:"
+    )
+
+    Set-Content `
+      -LiteralPath $AuditFile `
+      -Value $Header `
+      -Encoding UTF8
+  changed_when: false
+  when:
+    - _purge_host_audit_enabled | bool
+
+- name: Windows | Normalizar regras habilitadas
+  ansible.builtin.set_fact:
+    _windows_rules_enabled_json: >-
+      {%- set out = [] -%}
+      {%- for r in purge_plan.windows.rules | default([]) -%}
+        {%- if (r.get('enabled', true)) | bool -%}
+          {%- set _ = out.append(r) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Windows | Publicar regras habilitadas
+  ansible.builtin.set_fact:
+    _windows_rules_enabled: "{{ _windows_rules_enabled_json | from_json }}"
+
+- name: Windows | Montar lista de paths para coleta de disco
+  ansible.builtin.set_fact:
+    _windows_disk_paths_json: >-
+      {%- set out = [] -%}
+      {%- for r in _windows_rules_enabled | default([]) -%}
+        {%- set raw = r.get('paths', []) -%}
+        {%- set paths = raw if (raw is sequence and raw is not string) else [raw] -%}
+        {%- for p in paths -%}
+          {%- set pp = p | string | trim -%}
+          {%- if pp | length > 0 and pp not in out -%}
+            {%- set _ = out.append(pp) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Windows | Publicar paths para coleta de disco
+  ansible.builtin.set_fact:
+    _windows_disk_paths: "{{ _windows_disk_paths_json | from_json }}"
+
+- name: Windows | Coletar uso de disco antes da execução
+  ansible.windows.win_shell: |
+    $PathsJsonB64 = "{{ _windows_disk_paths | default([]) | to_json | b64encode }}"
+
+    function Convert-Base64JsonToArray {
+      param([string]$Value)
+      if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
+      try {
+        $Json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Value))
+        $Obj = $Json | ConvertFrom-Json
+        if ($null -eq $Obj) { return @() }
+        return @($Obj)
+      } catch {
+        return @()
+      }
+    }
+
+    $Paths = Convert-Base64JsonToArray -Value $PathsJsonB64
+    $Drives = New-Object System.Collections.ArrayList
+
+    foreach ($Path in $Paths) {
+      if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+      if ($Path -match '^([A-Za-z]:)') {
+        $Drive = $Matches[1].ToUpper()
+        if (-not $Drives.Contains($Drive)) {
+          [void]$Drives.Add($Drive)
+        }
+      }
+    }
+
+    foreach ($Drive in $Drives) {
+      try {
+        $Disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$Drive'" -ErrorAction Stop
+        if ($null -eq $Disk -or $null -eq $Disk.Size -or [int64]$Disk.Size -le 0) { continue }
+
+        $Size = [int64]$Disk.Size
+        $Free = [int64]$Disk.FreeSpace
+        $Used = $Size - $Free
+        $Pct = [int][Math]::Round(($Used / $Size) * 100, 0)
+
+        Write-Output "DPM_DISK=$Drive|$Size|$Used|$Free|$Pct"
+      } catch {
+        Write-Output "DPM_DISK_ERROR=$Drive|$($_.Exception.Message)"
+      }
+    }
+  register: _windows_disk_before_result
+  changed_when: false
+  failed_when: false
+  when:
+    - purge_disk_usage_enabled | default(true) | bool
+    - _windows_disk_paths | length > 0
+
+- name: Windows | Interpretar uso de disco antes da execução
+  ansible.builtin.set_fact:
+    _windows_disk_usage_before_json: >-
+      {%- set out = [] -%}
+      {%- for line in (_windows_disk_before_result.stdout_lines | default([])) -%}
+        {%- if line.startswith('DPM_DISK=') -%}
+          {%- set parts = (line | regex_replace('^DPM_DISK=', '')).split('|') -%}
+          {%- if parts | length >= 5 -%}
+            {%- set _ = out.append({
+              'filesystem': parts[0],
+              'mount': parts[0],
+              'size_bytes': parts[1] | int,
+              'used_bytes': parts[2] | int,
+              'free_bytes': parts[3] | int,
+              'used_pct': parts[4] | int
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Windows | Publicar uso de disco antes da execução
+  ansible.builtin.set_fact:
+    _windows_disk_usage_before: "{{ _windows_disk_usage_before_json | from_json }}"
+
+- name: Windows | Executar regras por módulos Ansible
+  ansible.builtin.include_tasks: 61_windows_rule_modules.yml
+  loop: "{{ _windows_rules_enabled }}"
+  loop_control:
+    loop_var: purge_rule
+    label: "{{ purge_rule.name | default('regra_sem_nome') }}"
+  when: (purge_rule.engine | default(purge_engine_default)) == 'modules'
+
+- name: Windows | Executar regras por PowerShell
+  ansible.builtin.include_tasks: 62_windows_rule_shell.yml
+  loop: "{{ _windows_rules_enabled }}"
+  loop_control:
+    loop_var: purge_rule
+    label: "{{ purge_rule.name | default('regra_sem_nome') }}"
+  when: (purge_rule.engine | default(purge_engine_default)) == 'shell'
+
+- name: Windows | Registrar regras com engine não suportada
+  ansible.builtin.set_fact:
+    purge_host_report: >-
+      {{
+        purge_host_report
+        | combine({'rows': (purge_host_report.rows | default([])) + [
+          {
+            'rule': item.name | default('regra_sem_nome'),
+            'description': item.description | default(''),
+            'application': item.application | default('—'),
+            'environment': item.environment | default('—'),
+            'os': 'windows',
+            'engine': item.engine | default(purge_engine_default),
+            'source': item.source | default('—'),
+            'status': 'blocked',
+            'status_detail': 'Engine não suportada. Use engine=modules ou engine=shell.',
+            'matched_files': 0,
+            'deleted_files': 0,
+            'failed_files': 0,
+            'matched_bytes': 0,
+            'deleted_bytes': 0,
+            'blocked_paths': [],
+            'missing_paths': [],
+            'samples': []
+          }
+        ]}, recursive=True)
+      }}
+  loop: "{{ _windows_rules_enabled }}"
+  when: (item.engine | default(purge_engine_default)) not in ['modules', 'shell']
+
+- name: Windows | Coletar uso de disco depois da execução
+  ansible.windows.win_shell: |
+    $PathsJsonB64 = "{{ _windows_disk_paths | default([]) | to_json | b64encode }}"
+
+    function Convert-Base64JsonToArray {
+      param([string]$Value)
+      if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
+      try {
+        $Json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Value))
+        $Obj = $Json | ConvertFrom-Json
+        if ($null -eq $Obj) { return @() }
+        return @($Obj)
+      } catch {
+        return @()
+      }
+    }
+
+    $Paths = Convert-Base64JsonToArray -Value $PathsJsonB64
+    $Drives = New-Object System.Collections.ArrayList
+
+    foreach ($Path in $Paths) {
+      if ([string]::IsNullOrWhiteSpace($Path)) { continue }
+      if ($Path -match '^([A-Za-z]:)') {
+        $Drive = $Matches[1].ToUpper()
+        if (-not $Drives.Contains($Drive)) {
+          [void]$Drives.Add($Drive)
+        }
+      }
+    }
+
+    foreach ($Drive in $Drives) {
+      try {
+        $Disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$Drive'" -ErrorAction Stop
+        if ($null -eq $Disk -or $null -eq $Disk.Size -or [int64]$Disk.Size -le 0) { continue }
+
+        $Size = [int64]$Disk.Size
+        $Free = [int64]$Disk.FreeSpace
+        $Used = $Size - $Free
+        $Pct = [int][Math]::Round(($Used / $Size) * 100, 0)
+
+        Write-Output "DPM_DISK=$Drive|$Size|$Used|$Free|$Pct"
+      } catch {
+        Write-Output "DPM_DISK_ERROR=$Drive|$($_.Exception.Message)"
+      }
+    }
+  register: _windows_disk_after_result
+  changed_when: false
+  failed_when: false
+  when:
+    - purge_disk_usage_enabled | default(true) | bool
+    - purge_apply_enabled | bool
+    - _windows_disk_paths | length > 0
+
+- name: Windows | Interpretar uso de disco depois da execução
+  ansible.builtin.set_fact:
+    _windows_disk_usage_after_json: >-
+      {%- set out = [] -%}
+      {%- for line in (_windows_disk_after_result.stdout_lines | default([])) -%}
+        {%- if line.startswith('DPM_DISK=') -%}
+          {%- set parts = (line | regex_replace('^DPM_DISK=', '')).split('|') -%}
+          {%- if parts | length >= 5 -%}
+            {%- set _ = out.append({
+              'filesystem': parts[0],
+              'mount': parts[0],
+              'size_bytes': parts[1] | int,
+              'used_bytes': parts[2] | int,
+              'free_bytes': parts[3] | int,
+              'used_pct': parts[4] | int
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Windows | Publicar uso de disco depois da execução
+  ansible.builtin.set_fact:
+    _windows_disk_usage_after: "{{ _windows_disk_usage_after_json | from_json }}"
+
+- name: Windows | Atualizar relatório do host com uso de disco
+  ansible.builtin.set_fact:
+    purge_host_report: >-
+      {{
+        purge_host_report
+        | combine({
+            'disk_usage_before': _windows_disk_usage_before | default([]),
+            'disk_usage_after': _windows_disk_usage_after | default([])
+          }, recursive=True)
+      }}
+
+- name: Windows | Consolidar paths ausentes para auditoria
+  ansible.builtin.set_fact:
+    _purge_host_missing_path_lines_json: >-
+      {%- set out = [] -%}
+      {%- if purge_missing_paths_audit_enabled | default(true) | bool -%}
+        {%- for row in purge_host_report.rows | default([]) -%}
+          {%- for missing in row.missing_paths | default([]) -%}
+            {%- if missing is mapping -%}
+              {%- set missing_path = missing.get('path', '') | string | trim -%}
+              {%- set missing_reason = missing.get('reason', 'path ausente') | string | trim -%}
+            {%- else -%}
+              {%- set missing_path = missing | string | trim -%}
+              {%- set missing_reason = 'path ausente' -%}
+            {%- endif -%}
+
+            {%- if missing_path | length > 0 -%}
+              {%- set line =
+                'regra='
+                ~ (row.rule | default('—') | string)
+                ~ ' | motivo='
+                ~ missing_reason
+                ~ ' | path='
+                ~ missing_path
+              -%}
+              {%- if line not in out -%}
+                {%- set _ = out.append(line) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endif -%}
+      {{ out | to_json }}
+
+- name: Windows | Publicar paths ausentes consolidados
+  ansible.builtin.set_fact:
+    _purge_host_missing_path_lines: "{{ _purge_host_missing_path_lines_json | from_json }}"
+    _purge_host_missing_paths_count: >-
+      {{ (_purge_host_missing_path_lines_json | from_json) | length }}
+
+- name: Windows | Preencher paths ausentes no TXT de auditoria
+  ansible.windows.win_shell: |
+    $AuditFile = [System.Text.Encoding]::UTF8.GetString(
+      [System.Convert]::FromBase64String(
+        "{{ (_purge_audit_remote_file | default('')) | b64encode }}"
+      )
+    )
+
+    $MissingLinesJson = [System.Text.Encoding]::UTF8.GetString(
+      [System.Convert]::FromBase64String(
+        "{{ (_purge_host_missing_path_lines | default([]) | to_json) | b64encode }}"
+      )
+    )
+
+    $MissingLines = @(
+      ConvertFrom-Json -InputObject $MissingLinesJson
+    )
+
+    if ($MissingLines.Count -gt 0) {
+      $MissingText = [string]::Join(
+        [System.Environment]::NewLine,
+        [string[]]$MissingLines
+      )
+    }
+    else {
+      $MissingText = "(nenhum)"
+    }
+
+    $Content = [System.IO.File]::ReadAllText($AuditFile)
+
+    $Content = $Content.Replace(
+      "__DPM_MISSING_PATHS__",
+      $MissingText
+    )
+
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+    [System.IO.File]::WriteAllText(
+      $AuditFile,
+      $Content,
+      $Utf8NoBom
+    )
+  changed_when: false
+  when:
+    - _purge_host_audit_enabled | bool
+    - _purge_audit_remote_file is defined
+
+- name: Windows | Calcular total de arquivos removidos no host
+  ansible.builtin.set_fact:
+    _purge_host_deleted_files_count: >-
+      {{
+        purge_host_report.rows | default([])
+        | map(attribute='deleted_files')
+        | map('default', 0)
+        | map('int')
+        | sum
+      }}
+
+- name: Windows | Calcular total de registros da auditoria
+  ansible.builtin.set_fact:
+    _purge_host_audit_entries_count: >-
+      {{
+        (_purge_host_deleted_files_count | default(0) | int)
+        +
+        (_purge_host_missing_paths_count | default(0) | int)
+      }}
+
+- name: Windows | Verificar arquivo remoto de auditoria
+  ansible.windows.win_stat:
+    path: "{{ _purge_audit_remote_file }}"
+  register: _purge_audit_remote_stat
+  changed_when: false
+  failed_when: false
+  when:
+    - _purge_host_audit_enabled | bool
+    - _purge_audit_remote_file is defined
+    - (_purge_host_audit_entries_count | default(0) | int) > 0
+
+- name: Windows | Buscar arquivo de auditoria para o controller
+  ansible.builtin.fetch:
+    src: "{{ _purge_audit_remote_file }}"
+    dest: "{{ _purge_audit_controller_dir }}/"
+    flat: true
+    fail_on_missing: false
+  register: _purge_audit_fetch
+  failed_when: false
+  when:
+    - _purge_host_audit_enabled | bool
+    - _purge_audit_remote_file is defined
+    - (_purge_host_audit_entries_count | default(0) | int) > 0
+    - _purge_audit_remote_stat.stat.exists | default(false) | bool
+
+- name: Windows | Verificar arquivo local de auditoria no controller
+  ansible.builtin.stat:
+    path: "{{ _purge_audit_controller_dir }}/{{ _purge_audit_file_name }}"
+  register: _purge_audit_local_stat
+  changed_when: false
+  failed_when: false
+  become: false
+  delegate_to: localhost
+  when:
+    - _purge_host_audit_enabled | bool
+    - (_purge_host_audit_entries_count | default(0) | int) > 0
+
+- name: Windows | Registrar ausência de arquivo de auditoria
+  ansible.builtin.debug:
+    msg: >-
+      Arquivo de auditoria não foi localizado para o host {{ inventory_hostname }}.
+      O processamento continuará normalmente sem anexo TXT deste host.
+  when:
+    - _purge_host_audit_enabled | bool
+    - (_purge_host_audit_entries_count | default(0) | int) > 0
+    - not (_purge_audit_local_stat.stat.exists | default(false) | bool)
+
+- name: Windows | Registrar anexo local de auditoria
+  ansible.builtin.set_fact:
+    purge_deleted_files_attachments:
+      - "{{ _purge_audit_controller_dir }}/{{ _purge_audit_file_name }}"
+  when:
+    - _purge_host_audit_enabled | bool
+    - (_purge_host_audit_entries_count | default(0) | int) > 0
+    - _purge_audit_local_stat.stat.exists | default(false) | bool
+
+- name: Windows | Remover arquivo remoto temporário de auditoria
+  ansible.windows.win_file:
+    path: "{{ _purge_audit_remote_file }}"
+    state: absent
+  failed_when: false
+  when:
+    - _purge_host_audit_enabled | bool
+    - _purge_audit_remote_file is defined
+
+- name: Teste | Windows | Simular falha depois do processamento
+  ansible.builtin.include_tasks: 92_test_force_runtime_failure.yml
+  vars:
+    purge_test_current_os: "Windows"
+    purge_test_current_stage: "after_role"
+  when:
+    - purge_test_fault_injection_enabled | default(false) | bool
+    - purge_test_runtime_fail_stage | default('before_role') == 'after_role'
+    - inventory_hostname in (purge_test_runtime_fail_hosts | default([]))

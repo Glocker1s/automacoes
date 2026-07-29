@@ -1,0 +1,118 @@
+---
+- name: Inicializar listas de classificação
+  ansible.builtin.set_fact:
+    linux_list: []
+    windows_list: []
+    unreachable_hosts: []
+    purge_detected_linux_hosts: []
+    purge_detected_windows_hosts: []
+    purge_unreachable_or_unknown_hosts: []
+
+- name: Detectar SSH Linux na porta {{ purge_linux_port | default(22) }}
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: "{{ purge_linux_port | default(22) }}"
+    timeout: "{{ purge_wait_timeout | default(3) }}"
+    state: started
+  register: ssh_probe
+  failed_when: false
+  changed_when: false
+  loop: "{{ target_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}:{{ purge_linux_port | default(22) }}"
+  delegate_to: localhost
+
+- name: Detectar WinRM Windows na porta {{ purge_windows_port | default(5985) }}
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: "{{ purge_windows_port | default(5985) }}"
+    timeout: "{{ purge_wait_timeout | default(3) }}"
+    state: started
+  register: winrm_probe
+  failed_when: false
+  changed_when: false
+  loop: "{{ target_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}:{{ purge_windows_port | default(5985) }}"
+  delegate_to: localhost
+
+- name: Montar listas brutas Linux e Windows
+  ansible.builtin.set_fact:
+    _linux_list_raw: >-
+      {{
+        ssh_probe.results
+        | default([])
+        | selectattr('elapsed', '<', purge_wait_timeout | default(3) | int)
+        | map(attribute='item')
+        | unique
+        | list
+      }}
+    windows_list: >-
+      {{
+        winrm_probe.results
+        | default([])
+        | selectattr('elapsed', '<', purge_wait_timeout | default(3) | int)
+        | map(attribute='item')
+        | unique
+        | list
+      }}
+
+- name: Remover da lista Linux hosts classificados como Windows
+  ansible.builtin.set_fact:
+    linux_list: "{{ _linux_list_raw | difference(windows_list) | unique | list }}"
+
+- name: Montar lista de hosts inalcançáveis ou sem porta conhecida
+  ansible.builtin.set_fact:
+    unreachable_hosts: "{{ target_hosts | default([]) | difference((linux_list | default([])) + (windows_list | default([]))) | unique | list }}"
+
+- name: Publicar listas finais de classificação
+  ansible.builtin.set_fact:
+    purge_detected_linux_hosts: "{{ linux_list | default([]) }}"
+    purge_detected_windows_hosts: "{{ windows_list | default([]) }}"
+    purge_unreachable_or_unknown_hosts: "{{ unreachable_hosts | default([]) }}"
+
+- name: Adicionar hosts Linux
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups:
+      - linux_targets
+      - purge_targets
+    ansible_host: "{{ item }}"
+    ansible_user: "{{ ansible_user | default(omit) }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ linux_key | default(omit) }}"
+    ansible_connection: ssh
+    ansible_port: "{{ purge_linux_port | default(22) }}"
+  loop: "{{ linux_list }}"
+  loop_control:
+    label: "{{ item }}"
+  when: linux_list | length > 0
+
+- name: Adicionar hosts Windows
+  ansible.builtin.add_host:
+    name: "{{ item }}"
+    groups:
+      - windows_targets
+      - purge_targets
+    ansible_host: "{{ item }}"
+    ansible_user: "{{ ansible_user | default(omit) }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_connection: winrm
+    ansible_winrm_transport: "{{ purge_windows_winrm_transport | default('ntlm') }}"
+    ansible_port: "{{ purge_windows_port | default(5985) }}"
+    ansible_winrm_scheme: "{{ purge_windows_winrm_scheme | default('http') }}"
+    ansible_winrm_server_cert_validation: "{{ purge_windows_winrm_server_cert_validation | default('ignore') }}"
+    ansible_winrm_operation_timeout_sec: "{{ purge_windows_operation_timeout_sec | default(60) }}"
+    ansible_winrm_read_timeout_sec: "{{ purge_windows_read_timeout_sec | default(90) }}"
+  loop: "{{ windows_list }}"
+  loop_control:
+    label: "{{ item }}"
+  when: windows_list | length > 0
+  no_log: true
+
+- name: Exibir classificação dos hosts
+  ansible.builtin.debug:
+    msg:
+      linux_targets: "{{ linux_list | default([]) }}"
+      windows_targets: "{{ windows_list | default([]) }}"
+      unreachable_or_unknown: "{{ unreachable_hosts | default([]) }}"

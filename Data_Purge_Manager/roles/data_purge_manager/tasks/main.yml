@@ -1,0 +1,29 @@
+---
+- name: Definir fase efetiva da role
+  ansible.builtin.set_fact:
+    data_purge_effective_phase: "{{ data_purge_phase | default('controller') | string | lower }}"
+
+- name: Validar fase solicitada
+  ansible.builtin.assert:
+    that:
+      - data_purge_effective_phase in ['controller', 'linux_purge', 'windows_purge', 'report']
+    fail_msg: >-
+      Fase inválida para a role data_purge_manager: {{ data_purge_effective_phase }}.
+      Valores aceitos: controller, linux_purge, windows_purge, report.
+    success_msg: "Fase da role data_purge_manager: {{ data_purge_effective_phase }}."
+
+- name: Executar fase controller
+  ansible.builtin.include_tasks: controller.yml
+  when: data_purge_effective_phase == 'controller'
+
+- name: Executar fase linux_purge
+  ansible.builtin.include_tasks: linux_purge.yml
+  when: data_purge_effective_phase == 'linux_purge'
+
+- name: Executar fase windows_purge
+  ansible.builtin.include_tasks: windows_purge.yml
+  when: data_purge_effective_phase == 'windows_purge'
+
+- name: Executar fase report
+  ansible.builtin.include_tasks: report.yml
+  when: data_purge_effective_phase == 'report'

@@ -1,0 +1,495 @@
+---
+- name: Linux | Executar regra por módulos
+  block:
+    - name: Linux | Inicializar variáveis da regra
+      ansible.builtin.set_fact:
+        _rule_name: "{{ purge_rule.name | default('regra_sem_nome') }}"
+        _rule_description: "{{ purge_rule.description | default('') }}"
+        _rule_application: "{{ purge_rule.application | default('global') }}"
+        _rule_environment: "{{ purge_rule.environment | default('global') }}"
+        _rule_source: "{{ purge_rule.source | default('application') }}"
+        _rule_paths: []
+        _rule_patterns: []
+        _rule_exclude_patterns: []
+        _rule_allowed_prefixes: []
+        _rule_age_days: 0
+        _rule_recursive: false
+        _rule_delete_empty_dirs: false
+        _rule_apply_enabled: "{{ purge_apply_enabled | default(false) | bool }}"
+        _rule_fatal_errors: []
+        _path_validation: {}
+        _linux_allowed_paths: []
+        _linux_blocked_paths: []
+        _linux_existing_paths: []
+        _linux_missing_paths: []
+        _linux_find_result:
+          files: []
+        _candidate_files_raw: []
+        _candidate_files: []
+        _linux_delete_result:
+          results: []
+        _linux_empty_dir_result:
+          results: []
+        _deleted_files_count: 0
+        _failed_files_count: 0
+        _matched_bytes_count: 0
+        _deleted_bytes_count: 0
+        _removed_empty_dirs_count: 0
+        _failed_empty_dirs_count: 0
+        _rule_status: "ok"
+
+    - name: Linux | Normalizar regra
+      ansible.builtin.set_fact:
+        _rule_paths: >-
+          {{
+            (
+              [purge_rule.paths]
+              if (purge_rule.paths is defined and purge_rule.paths is string)
+              else (purge_rule.paths | default([]))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_patterns: >-
+          {{
+            (
+              [purge_rule.patterns]
+              if (purge_rule.patterns is defined and purge_rule.patterns is string)
+              else (purge_rule.patterns | default(['*']))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_exclude_patterns: >-
+          {{
+            (
+              [purge_rule.exclude_patterns]
+              if (purge_rule.exclude_patterns is defined and purge_rule.exclude_patterns is string)
+              else (purge_rule.exclude_patterns | default([]))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_allowed_prefixes: >-
+          {{
+            (
+              [purge_rule.allowed_prefixes]
+              if (purge_rule.allowed_prefixes is defined and purge_rule.allowed_prefixes is string)
+              else (purge_rule.allowed_prefixes | default([]))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_age_days: "{{ purge_rule.age_days | default(0) | int }}"
+        _rule_recursive: "{{ purge_rule.recursive | default(false) | bool }}"
+        _rule_delete_empty_dirs: "{{ purge_rule.delete_empty_dirs | default(purge_delete_empty_dirs_default | default(false)) | bool }}"
+
+    - name: Linux | Validar campos obrigatórios da regra
+      ansible.builtin.set_fact:
+        _rule_fatal_errors: >-
+          {%- set errors = [] -%}
+          {%- if _rule_paths | length == 0 -%}
+            {%- set _ = errors.append('Regra sem paths definidos.') -%}
+          {%- endif -%}
+          {%- if _rule_patterns | length == 0 -%}
+            {%- set _ = errors.append('Regra sem patterns definidos.') -%}
+          {%- endif -%}
+          {%- if (_rule_age_days | int) <= 0 -%}
+            {%- set _ = errors.append('age_days precisa ser maior que zero.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: Linux | Validar paths permitidos
+      ansible.builtin.set_fact:
+        _path_validation_json: >-
+          {%- set allowed = [] -%}
+          {%- set blocked = [] -%}
+          {%- set forbidden = purge_forbidden_paths_linux | default([]) | map('string') | list -%}
+          {%- set prefixes = _rule_allowed_prefixes | default([]) -%}
+          {%- set enforce_prefixes = purge_enforce_allowed_prefixes | default(true) | bool -%}
+          {%- set prefixes_required = purge_allowed_prefixes_required | default(false) | bool -%}
+          {%- for raw_path in _rule_paths | default([]) -%}
+            {%- set p = raw_path | string | trim -%}
+            {%- if p | length > 1 and p.endswith('/') -%}
+              {%- set p = p | regex_replace('/+$', '') -%}
+            {%- endif -%}
+            {%- set ns = namespace(is_allowed=true, reason='') -%}
+
+            {%- if p == '' -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path vazio.' -%}
+            {%- elif (p | length) < (purge_min_path_length_linux | default(4) | int) -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path menor que o tamanho mínimo permitido.' -%}
+            {%- elif p in forbidden -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path proibido por forbidden_paths.' -%}
+            {%- elif enforce_prefixes and prefixes_required and (prefixes | length == 0) -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'allowed_prefixes obrigatório, mas não definido para a aplicação/regra.' -%}
+            {%- elif enforce_prefixes and (prefixes | length > 0) -%}
+              {%- set pfx = namespace(match=false) -%}
+              {%- for pref_raw in prefixes -%}
+                {%- set pref = pref_raw | string | trim -%}
+                {%- if pref | length > 1 and pref.endswith('/') -%}
+                  {%- set pref = pref | regex_replace('/+$', '') -%}
+                {%- endif -%}
+                {%- if p == pref or p.startswith(pref ~ '/') -%}
+                  {%- set pfx.match = true -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- if not pfx.match -%}
+                {%- set ns.is_allowed = false -%}
+                {%- set ns.reason = 'Path fora dos allowed_prefixes permitidos.' -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- if ns.is_allowed -%}
+              {%- set _ = allowed.append(p) -%}
+            {%- else -%}
+              {%- set _ = blocked.append({'path': p, 'reason': ns.reason}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'allowed': allowed | unique | list, 'blocked': blocked} | to_json }}
+
+    - name: Linux | Publicar paths permitidos/bloqueados
+      ansible.builtin.set_fact:
+        _path_validation: "{{ _path_validation_json | from_json }}"
+        _linux_allowed_paths: "{{ (_path_validation_json | from_json).allowed | default([]) }}"
+        _linux_blocked_paths: "{{ (_path_validation_json | from_json).blocked | default([]) }}"
+
+    - name: Linux | Verificar existência dos paths permitidos
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ _linux_allowed_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _linux_stat_result
+      failed_when: false
+      changed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _linux_allowed_paths | length > 0
+
+    - name: Linux | Definir paths existentes e ausentes
+      ansible.builtin.set_fact:
+        _linux_paths_state_json: >-
+          {%- set existing = [] -%}
+          {%- set missing = [] -%}
+          {%- for r in _linux_stat_result.results | default([]) -%}
+            {%- if r.stat.exists | default(false) and r.stat.isdir | default(false) -%}
+              {%- set _ = existing.append(r.item) -%}
+            {%- elif not (r.stat.exists | default(false)) -%}
+              {%- set _ = missing.append({'path': r.item, 'reason': 'Path não encontrado.'}) -%}
+            {%- else -%}
+              {%- set _ = missing.append({'path': r.item, 'reason': 'Path existe, mas não é diretório.'}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'existing': existing, 'missing': missing} | to_json }}
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux | Publicar paths existentes e ausentes
+      ansible.builtin.set_fact:
+        _linux_existing_paths: '{{ (_linux_paths_state_json | default(''{"existing": [], "missing": []}'') | from_json).existing | default([]) }}'
+        _linux_missing_paths: '{{ (_linux_paths_state_json | default(''{"existing": [], "missing": []}'') | from_json).missing | default([]) }}'
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux | Encontrar arquivos candidatos
+      ansible.builtin.find:
+        paths: "{{ _linux_existing_paths }}"
+        patterns: "{{ _rule_patterns }}"
+        age: "{{ _rule_age_days }}d"
+        age_stamp: mtime
+        recurse: "{{ _rule_recursive | bool }}"
+        file_type: file
+        hidden: true
+      register: _linux_find_result
+      changed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _linux_existing_paths | length > 0
+
+    - name: Linux | Definir candidatos brutos
+      ansible.builtin.set_fact:
+        _candidate_files_raw: "{{ _linux_find_result.files | default([]) }}"
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux | Filtrar exclusões por glob simples
+      ansible.builtin.set_fact:
+        _candidate_files_json: >-
+          {%- set out = [] -%}
+          {%- set excludes = _rule_exclude_patterns | default([]) -%}
+          {%- for f in _candidate_files_raw | default([]) -%}
+            {%- set name = f.path | basename -%}
+            {%- set ns = namespace(excluded=false) -%}
+            {%- for pat_raw in excludes -%}
+              {%- set pat = pat_raw | string -%}
+              {%- if pat == '*' -%}
+                {%- set ns.excluded = true -%}
+              {%- elif pat.startswith('*') and pat.endswith('*') and (pat | length > 2) -%}
+                {%- if pat[1:-1] in name -%}
+                  {%- set ns.excluded = true -%}
+                {%- endif -%}
+              {%- elif pat.startswith('*') and (pat | length > 1) -%}
+                {%- if name.endswith(pat[1:]) -%}
+                  {%- set ns.excluded = true -%}
+                {%- endif -%}
+              {%- elif pat.endswith('*') and (pat | length > 1) -%}
+                {%- if name.startswith(pat[:-1]) -%}
+                  {%- set ns.excluded = true -%}
+                {%- endif -%}
+              {%- elif name == pat -%}
+                {%- set ns.excluded = true -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {%- if not ns.excluded -%}
+              {%- set _ = out.append(f) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux | Publicar candidatos filtrados
+      ansible.builtin.set_fact:
+        _candidate_files: "{{ _candidate_files_json | default('[]') | from_json }}"
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux | Remover arquivos candidatos
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _candidate_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: _linux_delete_result
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _rule_apply_enabled | bool
+        - _candidate_files | length > 0
+
+    - name: Linux | Remover somente diretórios vazios quando solicitado
+      ansible.builtin.command:
+        argv:
+          - find
+          - "{{ item }}"
+          - "-depth"
+          - "-mindepth"
+          - "1"
+          - "-type"
+          - "d"
+          - "-empty"
+          - "-print"
+          - "-delete"
+      loop: "{{ _linux_existing_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _linux_empty_dir_result
+      changed_when: (_linux_empty_dir_result.stdout_lines | default([]) | length) > 0
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _rule_apply_enabled | bool
+        - _rule_recursive | bool
+        - _rule_delete_empty_dirs | bool
+        - _linux_existing_paths | length > 0
+
+    - name: Linux | Calcular contadores
+      ansible.builtin.set_fact:
+        _deleted_files_count: >-
+          {{
+            _linux_delete_result.results
+            | default([])
+            | selectattr('changed', 'defined')
+            | selectattr('changed')
+            | list
+            | length
+          }}
+        _failed_files_count: >-
+          {{
+            _linux_delete_result.results
+            | default([])
+            | selectattr('failed', 'defined')
+            | selectattr('failed')
+            | list
+            | length
+          }}
+        _removed_empty_dirs_count: >-
+          {{
+            _linux_empty_dir_result.results
+            | default([])
+            | map(attribute='stdout_lines')
+            | map('default', [])
+            | map('length')
+            | sum
+          }}
+        _failed_empty_dirs_count: >-
+          {{
+            _linux_empty_dir_result.results
+            | default([])
+            | selectattr('failed', 'defined')
+            | selectattr('failed')
+            | list
+            | length
+          }}
+        _matched_bytes_count: >-
+          {{
+            _candidate_files
+            | default([])
+            | map(attribute='size')
+            | map('default', 0)
+            | map('int')
+            | sum
+          }}
+        _deleted_bytes_count: >-
+          {%- set ns = namespace(total=0) -%}
+          {%- for r in _linux_delete_result.results | default([]) -%}
+            {%- if r.changed | default(false) -%}
+              {%- set ns.total = ns.total + (r.item.size | default(0) | int) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.total }}
+
+    - name: Linux | Anexar arquivos removidos no TXT de auditoria
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+
+          DPM_AUDIT_FILE={{ _purge_audit_remote_file | quote }}
+          DPM_AUDIT_HOST={{ inventory_hostname | quote }}
+          DPM_AUDIT_RULE={{ _rule_name | quote }}
+          DPM_FILE_PATH={{ item.item.path | default('') | quote }}
+          DPM_FILE_BYTES="{{ item.item.size | default(0) | int }}"
+          DPM_NOW="$(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M:%S America/Sao_Paulo')"
+
+          printf '%s | host=%s | sistema=linux | regra=%s | bytes=%s | arquivo=%s\n' \
+            "$DPM_NOW" \
+            "$DPM_AUDIT_HOST" \
+            "$DPM_AUDIT_RULE" \
+            "$DPM_FILE_BYTES" \
+            "$DPM_FILE_PATH" >> "$DPM_AUDIT_FILE"
+        executable: /bin/bash
+      loop: "{{ _linux_delete_result.results | default([]) }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_apply_enabled | bool
+        - item.changed | default(false)
+        - _purge_audit_remote_file is defined
+        - purge_deleted_files_audit_enabled | default(true) | bool
+
+    - name: Linux | Definir status da regra
+      ansible.builtin.set_fact:
+        _rule_status: >-
+          {%- if _rule_fatal_errors | length > 0 -%}
+          blocked
+          {%- elif (_linux_allowed_paths | length == 0) and (_linux_blocked_paths | length > 0) -%}
+          blocked
+          {%- elif (_failed_files_count | int > 0) or (_failed_empty_dirs_count | int > 0) -%}
+          failed
+          {%- elif (_linux_blocked_paths | length > 0) -%}
+          warning
+          {%- else -%}
+          ok
+          {%- endif -%}
+
+    - name: Linux | Adicionar linha ao relatório
+      ansible.builtin.set_fact:
+        purge_host_report: >-
+          {{
+            purge_host_report | combine(
+              {
+                'rows': (purge_host_report.rows | default([])) + [
+                  {
+                    'rule': _rule_name,
+                    'description': _rule_description,
+                    'application': _rule_application,
+                    'environment': _rule_environment,
+                    'source': _rule_source,
+                    'os': 'linux',
+                    'status': _rule_status | trim,
+                    'fatal_errors': _rule_fatal_errors,
+                    'age_days': _rule_age_days,
+                    'recursive': _rule_recursive,
+                    'delete_empty_dirs': _rule_delete_empty_dirs,
+                    'apply': _rule_apply_enabled,
+                    'patterns': _rule_patterns,
+                    'exclude_patterns': _rule_exclude_patterns,
+                    'paths_total': _rule_paths | length,
+                    'paths_allowed': _linux_allowed_paths | length,
+                    'paths_existing': _linux_existing_paths | length,
+                    'blocked_paths': _linux_blocked_paths,
+                    'missing_paths': _linux_missing_paths,
+                    'matched_files': _candidate_files | length,
+                    'deleted_files': _deleted_files_count | int,
+                    'failed_files': _failed_files_count | int,
+                    'matched_bytes': _matched_bytes_count | int,
+                    'deleted_bytes': _deleted_bytes_count | int,
+                    'removed_empty_dirs': _removed_empty_dirs_count | int,
+                    'failed_empty_dirs': _failed_empty_dirs_count | int,
+                    'samples': (_candidate_files | map(attribute='path') | list)[:(purge_report_sample_limit | default(10) | int)]
+                  }
+                ]
+              },
+              recursive=True
+            )
+          }}
+
+  rescue:
+    - name: Linux | Registrar falha técnica da regra
+      ansible.builtin.set_fact:
+        purge_host_report: >-
+          {{
+            purge_host_report | combine(
+              {
+                'rows': (purge_host_report.rows | default([])) + [
+                  {
+                    'rule': purge_rule.name | default('regra_sem_nome'),
+                    'description': purge_rule.description | default(''),
+                    'application': purge_rule.application | default('global'),
+                    'environment': purge_rule.environment | default('global'),
+                    'source': purge_rule.source | default('application'),
+                    'os': 'linux',
+                    'status': 'failed',
+                    'fatal_errors': [
+                      ansible_failed_result.msg
+                      | default(ansible_failed_result.stderr | default(ansible_failed_result.stdout | default('Erro técnico não mapeado.')))
+                    ],
+                    'age_days': purge_rule.age_days | default(0),
+                    'recursive': purge_rule.recursive | default(false),
+                    'delete_empty_dirs': purge_rule.delete_empty_dirs | default(false),
+                    'apply': purge_apply_enabled | default(false),
+                    'patterns': purge_rule.patterns | default([]),
+                    'exclude_patterns': purge_rule.exclude_patterns | default([]),
+                    'paths_total': (purge_rule.paths | default([])) | length,
+                    'paths_allowed': 0,
+                    'paths_existing': 0,
+                    'blocked_paths': [],
+                    'missing_paths': [],
+                    'matched_files': 0,
+                    'deleted_files': 0,
+                    'failed_files': 1,
+                    'matched_bytes': 0,
+                    'deleted_bytes': 0,
+                    'removed_empty_dirs': 0,
+                    'failed_empty_dirs': 0,
+                    'samples': []
+                  }
+                ]
+              },
+              recursive=True
+            )
+          }}

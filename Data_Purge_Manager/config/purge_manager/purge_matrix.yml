@@ -1,0 +1,66 @@
+---
+cm:
+  purge_manager:
+    global_rules:
+      linux:
+        rules:
+          - name: "global_linux_tmp_older_15d"
+            description: "Exemplo global Linux para temporários controlados"
+            paths:
+              - "/tmp"
+            patterns:
+              - "*"
+            exclude_patterns:
+              - ".keep"
+            age_days: 15
+            recursive: false
+            delete_empty_dirs: false
+            enabled: true
+            engine: "modules"
+      windows:
+        rules:
+          - name: "global_windows_temp_older_15d"
+            description: "Exemplo global Windows para temporários controlados"
+            paths:
+              - "C:\\PURGE_LAB\\global_cache"
+            patterns:
+              - "*.tmp"
+              - "*.cache"
+            exclude_patterns:
+              - "keep-*"
+            age_days: 15
+            recursive: false
+            delete_empty_dirs: false
+            enabled: true
+            engine: "shell"
+
+    envs:
+      hml:
+        applications:
+          sinacor:
+            members: "win-hml-01,win-hml-02"
+          exemplo_linux:
+            members:
+              - "linux-hml-01"
+          lab_linux:
+            members:
+              - "192.168.122.35"
+
+      prd:
+        applications:
+          sinacor:
+            members: "win-prd-01,win-prd-02"
+          exemplo_linux:
+            members:
+              - "linux-prd-01"
+          lab_windows:
+            members:
+              - "192.168.122.224"
+          lab_linux:
+            members: "192.168.122.165,192.168.122.34,192.168.122.70,192.168.122.33"
+
+      dr:
+        applications:
+          sinacor:
+            members:
+              - "win-dr-01"

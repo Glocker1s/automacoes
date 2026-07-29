@@ -1,0 +1,262 @@
+---
+- name: Failure report | Capturar contexto bruto da falha
+  ansible.builtin.set_fact:
+    purge_failure_phase: "{{ data_purge_failure_phase | default(data_purge_effective_phase | default(data_purge_phase | default('—'))) }}"
+    purge_failure_host: "{{ data_purge_failure_host | default(inventory_hostname | default('—')) }}"
+    purge_failure_os: "{{ data_purge_failure_os | default('—') }}"
+    purge_failure_task: "{{ ansible_failed_task.name | default('—') }}"
+    purge_failure_action: "{{ ansible_failed_task.action | default('—') }}"
+    purge_failure_raw: "{{ ansible_failed_result | default({}) }}"
+    purge_failure_results_all: "{{ ansible_failed_result.results | default([]) }}"
+    purge_failure_msg: >-
+      {{
+        ansible_failed_result.msg
+        | default(ansible_failed_result.stderr
+        | default(ansible_failed_result.stdout
+        | default(ansible_failed_result.exception
+        | default('Erro não mapeado'))))
+      }}
+    purge_failure_date_br: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (purge_report_timezone | default('America/Sao_Paulo')) ~ "' date '+%d/%m/%Y %H:%M:%S " ~ (purge_report_timezone | default('America/Sao_Paulo')) ~ "'"
+        )
+      }}
+
+- name: Failure report | Capturar itens com falha quando a task tinha loop
+  ansible.builtin.set_fact:
+    purge_failure_failed_results: >-
+      {{
+        (
+          ansible_failed_result.results
+          | default([])
+          | selectattr('failed', 'defined')
+          | selectattr('failed', 'equalto', true)
+          | list
+        )
+        if (ansible_failed_result.results is defined)
+        else ([ansible_failed_result | default({})])
+      }}
+
+- name: Failure report | Garantir pelo menos um item de falha para renderização
+  ansible.builtin.set_fact:
+    purge_failure_failed_results: "{{ purge_failure_failed_results if (purge_failure_failed_results | length > 0) else [purge_failure_raw] }}"
+
+- name: Failure report | Normalizar texto da falha para classificação
+  ansible.builtin.set_fact:
+    purge_failure_raw_lower: >-
+      {{
+        (
+          (purge_failure_raw | default({}) | to_json)
+          ~ ' '
+          ~ (purge_failure_msg | default(''))
+          ~ ' '
+          ~ (purge_failure_task | default(''))
+          ~ ' '
+          ~ (purge_failure_action | default(''))
+          ~ ' '
+          ~ (purge_failure_phase | default(''))
+          ~ ' '
+          ~ (purge_failure_host | default(''))
+        ) | lower
+      }}
+
+- name: Failure report | Classificar categoria da falha
+  ansible.builtin.set_fact:
+    purge_failure_category: >-
+      {% if
+        'unexpected templating' in purge_failure_raw_lower
+        or 'template' in purge_failure_raw_lower
+        or 'jinja' in purge_failure_raw_lower
+        or 'undefined variable' in purge_failure_raw_lower
+        or 'is undefined' in purge_failure_raw_lower
+        or 'has no attribute' in purge_failure_raw_lower
+        or 'dict object' in purge_failure_raw_lower
+      %}
+      Falha de template/Jinja ou variável indefinida
+      {% elif
+        'from_json' in purge_failure_raw_lower
+        or 'to_nice_json' in purge_failure_raw_lower
+        or 'json object must be str' in purge_failure_raw_lower
+        or 'expecting value' in purge_failure_raw_lower
+        or 'no json object could be decoded' in purge_failure_raw_lower
+      %}
+      Falha ao processar JSON/métrica
+      {% elif
+        'savings_metric' in purge_failure_raw_lower
+        or 'data_purge_metric' in purge_failure_raw_lower
+        or 'métrica mensal' in purge_failure_raw_lower
+        or 'metric' in purge_failure_raw_lower
+      %}
+      Falha na métrica mensal de economia
+      {% elif
+        'smbclient' in purge_failure_raw_lower
+        or 'cifs' in purge_failure_raw_lower
+        or 'nt_status' in purge_failure_raw_lower
+        or 'failed to connect' in purge_failure_raw_lower
+        or 'tree connect failed' in purge_failure_raw_lower
+        or 'mount error' in purge_failure_raw_lower
+        or 'não foi possível publicar' in purge_failure_raw_lower
+      %}
+      Falha no CIFS/anexos
+      {% elif
+        'send_mail' in purge_failure_raw_lower
+        or 'set_stats' in purge_failure_raw_lower
+        or 'mail_attachments' in purge_failure_raw_lower
+      %}
+      Falha ao publicar artefatos para e-mail
+      {% elif
+        'permission denied' in purge_failure_raw_lower
+        or 'access is denied' in purge_failure_raw_lower
+        or 'acesso negado' in purge_failure_raw_lower
+        or 'unauthorized' in purge_failure_raw_lower
+        or 'forbidden' in purge_failure_raw_lower
+        or 'errno 13' in purge_failure_raw_lower
+      %}
+      Permissão insuficiente
+      {% elif
+        'timed out' in purge_failure_raw_lower
+        or 'timeout' in purge_failure_raw_lower
+        or 'operation timeout' in purge_failure_raw_lower
+        or 'read timed out' in purge_failure_raw_lower
+      %}
+      Timeout
+      {% elif
+        'unreachable' in purge_failure_raw_lower
+        or 'connection' in purge_failure_raw_lower
+        or 'no route to host' in purge_failure_raw_lower
+        or 'name or service not known' in purge_failure_raw_lower
+        or 'could not resolve' in purge_failure_raw_lower
+        or 'winrm' in purge_failure_raw_lower
+        or 'ssh' in purge_failure_raw_lower
+      %}
+      Falha de conectividade
+      {% elif
+        'path proibido' in purge_failure_raw_lower
+        or 'allowed_prefix' in purge_failure_raw_lower
+        or 'fora dos allowed_prefixes' in purge_failure_raw_lower
+        or 'forbidden_paths' in purge_failure_raw_lower
+      %}
+      Path bloqueado por segurança
+      {% elif
+        'aplicação/perfil de expurgo inexistente' in purge_failure_raw_lower
+        or ('aplicação' in purge_failure_raw_lower and 'inexistente' in purge_failure_raw_lower)
+        or ('grupo' in purge_failure_raw_lower and 'inexistente' in purge_failure_raw_lower)
+      %}
+      Grupo de expurgo inexistente
+      {% elif
+        'ambiente inexistente' in purge_failure_raw_lower
+        or ('environment' in purge_failure_raw_lower and 'not found' in purge_failure_raw_lower)
+      %}
+      Ambiente inexistente na matriz
+      {% elif
+        'nenhum host' in purge_failure_raw_lower
+        or 'no hosts' in purge_failure_raw_lower
+        or 'empty host list' in purge_failure_raw_lower
+      %}
+      Nenhum host resolvido
+      {% elif
+        'matriz não encontrado' in purge_failure_raw_lower
+        or 'arquivo de matriz' in purge_failure_raw_lower
+        or 'purge_matrix' in purge_failure_raw_lower
+        or 'purge_matrix_file' in purge_failure_raw_lower
+      %}
+      Arquivo de matriz/configuração não encontrado
+      {% elif
+        'report_success' in purge_failure_raw_lower
+        or 'report_failure' in purge_failure_raw_lower
+        or 'relatório consolidado' in purge_failure_raw_lower
+      %}
+      Falha ao montar relatório
+      {% else %}
+      Erro não classificado automaticamente
+      {% endif %}
+
+- name: Failure report | Definir orientação da falha
+  ansible.builtin.set_fact:
+    purge_failure_guidance: >-
+      {% set cat = purge_failure_category | trim %}
+      {% if cat == 'Falha de template/Jinja ou variável indefinida' %}
+      Validar a task indicada, o template Jinja e as variáveis usadas no ponto da falha. Esse cenário costuma ocorrer quando um campo esperado não existe, quando uma lista vem vazia ou quando um filtro recebe tipo incorreto.
+      {% elif cat == 'Falha ao processar JSON/métrica' %}
+      Validar o template savings_metric.json.j2 e a task que gera o JSON. Conferir se o conteúdo gerado é JSON válido e se filtros como from_json/to_nice_json estão recebendo o tipo esperado.
+      {% elif cat == 'Falha na métrica mensal de economia' %}
+      Validar a geração da métrica mensal, o diretório temporário local e o upload para o CIFS de métricas. Se a métrica for obrigatória, manter a falha; se for opcional, tratar como alerta controlado.
+      {% elif cat == 'Falha no CIFS/anexos' %}
+      Validar share CIFS, caminho remoto, credenciais, workgroup/domínio, permissão de escrita e se o host delegate possui smbclient e conectividade até o servidor de arquivos.
+      {% elif cat == 'Falha ao publicar artefatos para e-mail' %}
+      Validar se send_mail_subject, send_mail_body, send_mail_attachments e send_mail_cifs_remote_files foram publicados corretamente via set_stats.
+      {% elif cat == 'Permissão insuficiente' %}
+      Validar permissões do usuário Ansible no host alvo, no diretório de expurgo, no diretório temporário e no CIFS.
+      {% elif cat == 'Timeout' %}
+      Validar tempo de resposta do host, timeout WinRM/SSH, timeout de comandos shell/PowerShell e tempo de resposta do CIFS.
+      {% elif cat == 'Falha de conectividade' %}
+      Validar DNS, rota, firewall, porta SSH/WinRM, credenciais e conectividade entre AAP/Execution Environment e o host alvo.
+      {% elif cat == 'Path bloqueado por segurança' %}
+      Validar allowed_prefixes, forbidden_paths e o path configurado na regra. O path precisa estar dentro do escopo permitido.
+      {% elif cat == 'Grupo de expurgo inexistente' %}
+      Validar purge_applications e confirmar se existe arquivo correspondente em config/purge_manager/apps/.
+      {% elif cat == 'Ambiente inexistente na matriz' %}
+      Validar purge_env e confirmar se o ambiente existe em config/purge_manager/purge_matrix.yml.
+      {% elif cat == 'Nenhum host resolvido' %}
+      Validar members da matriz, filtros de survey_hosts e as opções purge_fail_on_no_hosts e purge_allow_survey_hosts_outside_matrix.
+      {% elif cat == 'Arquivo de matriz/configuração não encontrado' %}
+      Validar purge_config_root, purge_matrix_file, purge_apps_dir e o empacotamento do projeto no AAP.
+      {% elif cat == 'Falha ao montar relatório' %}
+      Validar report_success.html.j2, report_failure.html.j2 e as variáveis consolidadas no report.yml.
+      {% else %}
+      Usar a seção "Detalhes técnicos da falha" para identificar a task, o módulo e a mensagem retornada.
+      {% endif %}
+
+- name: Failure report | Definir badge da falha
+  ansible.builtin.set_fact:
+    purge_failure_badge_kind: >-
+      {% if purge_failure_category | trim in ['Timeout', 'Falha de conectividade', 'Falha no CIFS/anexos'] %}
+      warn
+      {% elif purge_failure_category | trim == 'Erro não classificado automaticamente' %}
+      warn
+      {% else %}
+      crit
+      {% endif %}
+
+- name: Failure report | Montar assunto e HTML
+  ansible.builtin.set_fact:
+    send_mail_subject: >-
+      {{ purge_report_subject_prefix | default('Ansible-Report') }} (FALHA) -
+      {{ purge_report_title | default('Data Purge Manager') }} -
+      {{ purge_failure_phase | trim }} -
+      Job #{{ tower_job_id | default(awx_job_id | default('local')) }}
+    send_mail_body: "{{ lookup('ansible.builtin.template', 'report_failure.html.j2') }}"
+
+- name: Failure report | Publicar set_stats de falha
+  ansible.builtin.set_stats:
+    aggregate: false
+    per_host: false
+    data:
+      send_mail_subject: "{{ send_mail_subject }}"
+      send_mail_body: "{{ send_mail_body }}"
+
+      send_mail_cifs: "{{ send_mail_cifs | default('') }}"
+      send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+      send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+      cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+
+      send_mail_cifs_remote_files: []
+      send_mail_attachments: []
+
+      purge_failure_phase: "{{ purge_failure_phase }}"
+      purge_failure_host: "{{ purge_failure_host }}"
+      purge_failure_os: "{{ purge_failure_os }}"
+      purge_failure_task: "{{ purge_failure_task }}"
+      purge_failure_action: "{{ purge_failure_action }}"
+      purge_failure_category: "{{ purge_failure_category | trim }}"
+
+- name: Failure report | Debug da falha tratada
+  ansible.builtin.debug:
+    msg: >-
+      Falha tratada para e-mail:
+      fase={{ purge_failure_phase }},
+      host={{ purge_failure_host }},
+      task={{ purge_failure_task }},
+      categoria={{ purge_failure_category | trim }}.

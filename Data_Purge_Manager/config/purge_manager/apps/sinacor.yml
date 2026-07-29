@@ -1,0 +1,59 @@
+---
+cm:
+  purge_manager:
+    applications:
+      sinacor:
+        description: "Expurgo da aplicação SINACOR / Secure Client"
+        allowed_prefixes:
+          windows:
+            - "D:\\SECURECLIENT"
+            - "\\\\asint008.agorasenior.corp\\g\\SINACOR"
+            - "\\\\asint008.agorasenior.corp\\G\\Sinacor"
+          linux: []
+        windows:
+          rules:
+            - name: "sinacor_secureclient_10d"
+              description: "Arquivos antigos em diretórios principais do Secure Client"
+              paths:
+                - "D:\\SECURECLIENT\\39_SINACOR"
+                - "D:\\SECURECLIENT\\39_BACKUP"
+                - "\\\\asint008.agorasenior.corp\\g\\SINACOR\\BOVESPA"
+                - "\\\\asint008.agorasenior.corp\\g\\SINACOR\\B3\\RECEBIDOS"
+                - "\\\\asint008.agorasenior.corp\\G\\Sinacor\\B3-CERTIFICACAO\\AGORA\\RECEBIDOS_NOVA_AGORA"
+              patterns:
+                - "*"
+              age_days: 10
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "modules"
+
+            - name: "sinacor_historico_bkp_45d"
+              description: "Arquivos antigos em histórico/BKP"
+              paths:
+                - "\\\\asint008.agorasenior.corp\\g\\SINACOR\\BOVESPA\\HISTORICO\\BKP"
+              patterns:
+                - "*"
+              age_days: 45
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "modules"
+
+            - name: "sinacor_recursivo_logs_30d"
+              description: "Equivalente ao expurgo recursivo, preservando o path raiz"
+              paths:
+                - "D:\\SECURECLIENT\\39_SINACOR\\LOGS"
+              patterns:
+                - "*.log"
+                - "*.txt"
+                - "*.tmp"
+              exclude_patterns:
+                - "keep-*"
+              age_days: 30
+              recursive: true
+              delete_empty_dirs: true
+              enabled: false
+              engine: "modules"
+        linux:
+          rules: []

@@ -1,0 +1,45 @@
+---
+- name: Validar existência do arquivo de matriz
+  ansible.builtin.stat:
+    path: "{{ purge_matrix_file }}"
+  register: _purge_matrix_stat
+  delegate_to: localhost
+
+- name: Falhar quando matriz não existir
+  ansible.builtin.fail:
+    msg: "Arquivo de matriz não encontrado: {{ purge_matrix_file }}"
+  when: not (_purge_matrix_stat.stat.exists | default(false))
+
+- name: Carregar matriz de expurgo
+  ansible.builtin.include_vars:
+    file: "{{ purge_matrix_file }}"
+    name: _purge_matrix_raw
+
+- name: Inicializar configurações carregadas
+  ansible.builtin.set_fact:
+    purge_base_cfg: "{{ _purge_matrix_raw.cm.purge_manager | default({}) }}"
+    purge_loaded_applications: "{{ _purge_matrix_raw.cm.purge_manager.applications | default({}) }}"
+
+- name: Procurar arquivos de aplicações
+  ansible.builtin.set_fact:
+    _purge_app_files: "{{ lookup('ansible.builtin.fileglob', purge_apps_dir ~ '/*.yml', wantlist=True) | sort }}"
+
+- name: Carregar aplicações individuais
+  ansible.builtin.include_tasks: 11_load_one_app.yml
+  loop: "{{ _purge_app_files }}"
+  loop_control:
+    loop_var: purge_app_file
+    label: "{{ purge_app_file | basename }}"
+
+- name: Consolidar configuração final
+  ansible.builtin.set_fact:
+    purge_manager_cfg: "{{ purge_base_cfg | combine({'applications': purge_loaded_applications | default({})}, recursive=True) }}"
+
+- name: Exibir resumo da configuração carregada
+  ansible.builtin.debug:
+    msg:
+      matrix_file: "{{ purge_matrix_file }}"
+      apps_dir: "{{ purge_apps_dir }}"
+      applications_loaded: "{{ purge_manager_cfg.applications.keys() | list | sort }}"
+      envs_loaded: "{{ purge_manager_cfg.envs.keys() | list | sort }}"
+      global_rules_enabled: "{{ purge_global_rules_enabled }}"

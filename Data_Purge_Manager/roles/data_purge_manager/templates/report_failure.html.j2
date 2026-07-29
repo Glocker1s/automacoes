@@ -1,0 +1,314 @@
+{% macro code(v) -%}
+  <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f3f3f3;color:#222222;padding:2px 5px;border-radius:2px;word-break:break-all;">{{ v | default('—') }}</span>
+{%- endmacro %}
+
+{% macro th(v) -%}
+  <th bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">{{ v }}</th>
+{%- endmacro %}
+
+{% macro td_open() -%}
+  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+{%- endmacro %}
+
+{% macro badge(text, kind='gray') -%}
+  {%- if kind == 'crit' -%}
+    <span style="display:inline-block;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#ffebee;color:#b00020;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- elif kind == 'warn' -%}
+    <span style="display:inline-block;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#fff3e0;color:#b26a00;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- elif kind == 'ok' -%}
+    <span style="display:inline-block;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#e8f5e9;color:#1b5e20;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- else -%}
+    <span style="display:inline-block;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#eeeeee;color:#333333;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% set job_id = tower_job_id | default(awx_job_id | default('local')) %}
+{% set executor = tower_user_name | default(awx_user_name | default(ansible_user_id | default('N/A'))) %}
+{% set badge_kind = purge_failure_badge_kind | default('crit') | trim %}
+{% set failed_results = purge_failure_failed_results | default([]) %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td align="left" style="padding:8px 8px 12px 8px;">
+      <table role="presentation" width="1080" cellspacing="0" cellpadding="0" border="0" style="width:1080px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+        <tr>
+          <td bgcolor="#263238" style="background-color:#263238;padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                  <div style="font-size:18px;font-weight:bold;color:#ffffff;margin:0;padding:0;">
+                    {{ purge_report_title | default('Data Purge Manager') }} - Falha na automação
+                  </div>
+                  <div style="font-size:13px;color:#dbe3e6;margin-top:4px;line-height:18px;">
+                    Fase: <b>{{ purge_failure_phase | default('—') }}</b>
+                    &nbsp;|&nbsp; Host: <b>{{ purge_failure_host | default('—') }}</b>
+                    &nbsp;|&nbsp; Job: <b>#{{ job_id }}</b><br/>
+                    Executor: <b>{{ executor }}</b>
+                    &nbsp;|&nbsp; Data: <b>{{ purge_failure_date_br | default('—') }}</b>
+                  </div>
+                </td>
+                <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;padding-left:10px;">
+                  <span style="display:inline-block;background-color:#b00020;color:#ffffff;font-size:12px;font-weight:bold;padding:4px 10px;border-radius:2px;">FALHA</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Resumo da falha
+            </div>
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+              <tr>
+                {{ th('Campo') }}
+                {{ th('Valor') }}
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Diagnóstico provável</b></td>
+                {{ td_open() }}
+                  {{ badge(purge_failure_category | default('Erro não classificado automaticamente') | trim, badge_kind) }}
+                  <div style="font-size:12px;color:#666666;margin-top:6px;line-height:17px;">
+                    {{ purge_failure_guidance | default('Consultar os detalhes técnicos para identificar a origem da falha.') | trim }}
+                  </div>
+                </td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Fase</b></td>
+                {{ td_open() }}{{ code(purge_failure_phase | default('—')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Host afetado</b></td>
+                {{ td_open() }}{{ code(purge_failure_host | default('—')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Sistema/Fase</b></td>
+                {{ td_open() }}{{ code(purge_failure_os | default('—')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Task que falhou</b></td>
+                {{ td_open() }}{{ code(purge_failure_task | default('—')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Ação / módulo</b></td>
+                {{ td_open() }}{{ code(purge_failure_action | default('—')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}<b>Mensagem resumida</b></td>
+                {{ td_open() }}
+                  <span style="color:#666666;white-space:pre-wrap;">{{ purge_failure_msg | default('Erro não mapeado') | string | e }}</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding-top:8px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Parâmetros principais da execução
+            </div>
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+              <tr>
+                {{ th('Parâmetro') }}
+                {{ th('Valor') }}
+              </tr>
+
+              <tr>
+                {{ td_open() }}motivo</td>
+                {{ td_open() }}{{ code(motivo | default('')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_applications</td>
+                {{ td_open() }}{{ code(purge_applications | default('')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_env</td>
+                {{ td_open() }}{{ code(purge_env | default('')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}survey_hosts</td>
+                {{ td_open() }}{{ code(survey_hosts | default('')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_mode</td>
+                {{ td_open() }}{{ code(purge_mode | default('check')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_confirm_delete</td>
+                {{ td_open() }}{{ code(purge_confirm_delete | default('nao')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_include_global_rules</td>
+                {{ td_open() }}{{ code(purge_include_global_rules | default('sim')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_matrix_file</td>
+                {{ td_open() }}{{ code(purge_matrix_file | default('')) }}</td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}purge_apps_dir</td>
+                {{ td_open() }}{{ code(purge_apps_dir | default('')) }}</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        {% if selected_purge_applications is defined or selected_purge_envs is defined or target_hosts is defined or purge_target_hosts is defined or purge_unknown_hosts is defined or purge_hosts_without_rules is defined %}
+        <tr>
+          <td style="padding-top:8px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Contexto resolvido antes da falha
+            </div>
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+              <tr>
+                {{ th('Item') }}
+                {{ th('Valor') }}
+              </tr>
+
+              <tr>
+                {{ td_open() }}Grupos selecionados</td>
+                {{ td_open() }}
+                  {% if selected_purge_applications is defined and (selected_purge_applications | length) > 0 %}
+                    {{ selected_purge_applications | join(', ') }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}Ambientes selecionados</td>
+                {{ td_open() }}
+                  {% if selected_purge_envs is defined and (selected_purge_envs | length) > 0 %}
+                    {{ selected_purge_envs | join(', ') }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}Hosts alvo</td>
+                {{ td_open() }}
+                  {% set resolved_hosts = target_hosts | default(purge_target_hosts | default([])) %}
+                  {% if resolved_hosts | length > 0 %}
+                    {{ resolved_hosts | join(', ') }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}Hosts desconhecidos/inalcançáveis</td>
+                {{ td_open() }}
+                  {% if purge_unknown_hosts is defined and (purge_unknown_hosts | length) > 0 %}
+                    {{ purge_unknown_hosts | join(', ') }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+
+              <tr>
+                {{ td_open() }}Hosts sem regra</td>
+                {{ td_open() }}
+                  {% if purge_hosts_without_rules is defined and (purge_hosts_without_rules | length) > 0 %}
+                    {{ purge_hosts_without_rules | join(', ') }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        {% endif %}
+
+        <tr>
+          <td style="padding-top:8px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Detalhes técnicos da falha
+            </div>
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:10px;table-layout:fixed;">
+              <tr>
+                {{ th('Item') }}
+                {{ th('Mensagem') }}
+                {{ th('Detalhe técnico') }}
+              </tr>
+
+              {% for r in failed_results %}
+                {% set failed_item = r.item | default('—') %}
+                {% set err_msg = r.msg | default(r.stderr | default(r.stdout | default(r.exception | default('Erro não mapeado')))) %}
+                {% set err_detail = r.exception | default(r.stderr | default(r.stdout | default(r | to_nice_json))) %}
+                <tr>
+                  {{ td_open() }}{{ code(failed_item | string) }}</td>
+                  {{ td_open() }}
+                    <span style="color:#666666;white-space:pre-wrap;">{{ err_msg | string | e }}</span>
+                  </td>
+                  {{ td_open() }}
+                    <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;color:#666666;white-space:pre-wrap;">{{ err_detail | string | e }}</span>
+                  </td>
+                </tr>
+              {% endfor %}
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding-top:8px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Orientação para correção
+            </div>
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+              <tr>
+                {{ th('Cenário detectado') }}
+                {{ th('Ação recomendada') }}
+              </tr>
+              <tr>
+                {{ td_open() }}
+                  {{ purge_failure_category | default('Erro não classificado automaticamente') | trim }}
+                </td>
+                {{ td_open() }}
+                  <span style="color:#666666;line-height:18px;">
+                    {{ purge_failure_guidance | default('Usar a seção de detalhes técnicos para identificar a task, o módulo e a mensagem retornada.') | trim }}
+                  </span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="font-family:Arial,sans-serif;font-size:12px;color:#666666;padding-top:10px;line-height:17px;">
+            Este e-mail foi gerado pelo bloco de tratamento de falha da automação. Ele cobre falhas fatais de planejamento, expurgo Linux, expurgo Windows e relatório consolidado. Erros controlados por regra podem aparecer no relatório normal como alerta ou falha de regra, sem interromper todo o job.
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

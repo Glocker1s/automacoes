@@ -1,0 +1,668 @@
+---
+- name: Report | Consolidar relatórios dos hosts executados e interrompidos
+  ansible.builtin.set_fact:
+    _purge_reports_json: >-
+      {%- set out = [] -%}
+      {%- for h in (groups['purge_targets'] | default([])) -%}
+        {%- set plan = hostvars['localhost'].purge_plan_by_host[h] | default({}) -%}
+        {%- set started = hostvars[h].purge_host_execution_started | default(false) | bool -%}
+        {%- set completed = hostvars[h].purge_host_execution_completed | default(false) | bool -%}
+        {%- set failure_recorded = hostvars[h].purge_host_execution_failure_recorded | default(false) | bool -%}
+        {%- set host_os = hostvars[h].purge_host_execution_os
+          | default('linux' if h in (groups['linux_targets'] | default([])) else ('windows' if h in (groups['windows_targets'] | default([])) else 'unknown')) -%}
+
+        {%- if hostvars[h].purge_host_report is defined -%}
+          {%- set rep = hostvars[h].purge_host_report -%}
+        {%- else -%}
+          {%- set rep = {
+            'host': h,
+            'os': host_os,
+            'applications': plan.get('applications', []),
+            'envs': plan.get('envs', []),
+            'mode': 'apply' if (hostvars['localhost'].purge_apply_enabled | default(false) | bool) else 'check',
+            'disk_usage_before': [],
+            'disk_usage_after': [],
+            'rows': [],
+            'errors': []
+          } -%}
+        {%- endif -%}
+
+        {%- if started and not completed and not failure_recorded -%}
+          {%- set interruption_message = 'O host deixou de responder ou foi removido da execução antes da conclusão. Validar conectividade SSH/WinRM, disponibilidade do host e o output do job.' -%}
+          {%- set interrupted_row = {
+            'rule': 'Execução interrompida',
+            'description': 'Não foi possível concluir o processamento do host.',
+            'application': (rep.applications | default([]) | join(', ')) or '—',
+            'environment': (rep.envs | default([]) | join(', ')) or '—',
+            'os': host_os,
+            'engine': 'runtime',
+            'source': 'runtime',
+            'status': 'failed',
+            'status_detail': 'Host inacessível ou execução interrompida',
+            'age_days': '—',
+            'recursive': false,
+            'delete_empty_dirs': false,
+            'apply': hostvars['localhost'].purge_apply_enabled | default(false) | bool,
+            'patterns': [],
+            'exclude_patterns': [],
+            'paths_total': 0,
+            'paths_allowed': 0,
+            'paths_existing': 0,
+            'blocked_paths': [],
+            'missing_paths': [],
+            'matched_files': 0,
+            'deleted_files': 0,
+            'failed_files': 0,
+            'matched_bytes': 0,
+            'deleted_bytes': 0,
+            'removed_empty_dirs': 0,
+            'failed_empty_dirs': 0,
+            'fatal_errors': [interruption_message],
+            'samples': []
+          } -%}
+          {%- set interrupted_error = {
+            'phase': hostvars[h].purge_host_execution_phase | default('execução do host'),
+            'task': 'Execução interrompida antes da conclusão',
+            'action': 'unreachable/connection',
+            'category': 'Falha de conectividade ou indisponibilidade',
+            'details': [interruption_message]
+          } -%}
+          {%- set rep = rep | combine({
+            'rows': (rep.rows | default([])) + [interrupted_row],
+            'errors': (rep.errors | default([])) + [interrupted_error]
+          }, recursive=True) -%}
+        {%- endif -%}
+
+        {%- set _ = out.append(rep) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+    _purge_runtime_failed_hosts_json: >-
+      {%- set out = [] -%}
+      {%- for h in (groups['purge_targets'] | default([])) -%}
+        {%- set started = hostvars[h].purge_host_execution_started | default(false) | bool -%}
+        {%- set completed = hostvars[h].purge_host_execution_completed | default(false) | bool -%}
+        {%- set failure_recorded = hostvars[h].purge_host_execution_failure_recorded | default(false) | bool -%}
+        {%- if failure_recorded or (started and not completed) -%}
+          {%- set _ = out.append(h) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | list | to_json }}
+
+    purge_unknown_hosts: "{{ hostvars['localhost'].purge_unreachable_or_unknown_hosts | default([]) }}"
+    purge_hosts_without_rules: "{{ hostvars['localhost'].purge_hosts_without_rules | default([]) }}"
+    purge_target_hosts: "{{ hostvars['localhost'].target_hosts | default([]) }}"
+    purge_apply_enabled: "{{ hostvars['localhost'].purge_apply_enabled | default(false) }}"
+    purge_fail_job_on_runtime_errors_effective: "{{ purge_fail_job_on_runtime_errors | default(true) | bool }}"
+
+- name: Report | Publicar relatórios e falhas consolidadas
+  ansible.builtin.set_fact:
+    purge_reports: "{{ _purge_reports_json | from_json }}"
+    purge_runtime_failed_hosts: "{{ _purge_runtime_failed_hosts_json | from_json }}"
+    purge_runtime_failure_count: "{{ (_purge_runtime_failed_hosts_json | from_json) | length }}"
+
+- name: Report | Calcular métricas consolidadas
+  ansible.builtin.set_fact:
+    _purge_report_metrics_json: >-
+      {%- set ns = namespace(
+            total_hosts=(purge_reports | length),
+            total_rules=0,
+            total_matched=0,
+            total_deleted=0,
+            total_matched_bytes=0,
+            total_deleted_bytes=0,
+            total_failed_files=0,
+            total_removed_empty_dirs=0,
+            total_failed_empty_dirs=0,
+            total_blocked_paths=0,
+            total_missing_paths=0,
+            total_failed_rules=0,
+            total_warning_rules=0,
+            total_blocked_rules=0,
+            max_disk_used_pct=0
+          ) -%}
+
+      {%- for rep in purge_reports -%}
+        {%- for row in rep.rows | default([]) -%}
+          {%- set ns.total_rules =
+            ns.total_rules + 1
+          -%}
+
+          {%- set ns.total_matched =
+            ns.total_matched
+            + (row.matched_files | default(0) | int)
+          -%}
+
+          {%- set ns.total_deleted =
+            ns.total_deleted
+            + (row.deleted_files | default(0) | int)
+          -%}
+
+          {%- set ns.total_matched_bytes =
+            ns.total_matched_bytes
+            + (row.matched_bytes | default(0) | int)
+          -%}
+
+          {%- set ns.total_deleted_bytes =
+            ns.total_deleted_bytes
+            + (row.deleted_bytes | default(0) | int)
+          -%}
+
+          {%- set ns.total_failed_files =
+            ns.total_failed_files
+            + (row.failed_files | default(0) | int)
+          -%}
+
+          {%- set ns.total_removed_empty_dirs =
+            ns.total_removed_empty_dirs
+            + (row.removed_empty_dirs | default(0) | int)
+          -%}
+
+          {%- set ns.total_failed_empty_dirs =
+            ns.total_failed_empty_dirs
+            + (row.failed_empty_dirs | default(0) | int)
+          -%}
+
+          {%- set ns.total_blocked_paths =
+            ns.total_blocked_paths
+            + (row.blocked_paths | default([]) | length)
+          -%}
+
+          {%- set ns.total_missing_paths =
+            ns.total_missing_paths
+            + (row.missing_paths | default([]) | length)
+          -%}
+
+          {%- if row.status | default('') | trim == 'failed' -%}
+            {%- set ns.total_failed_rules =
+              ns.total_failed_rules + 1
+            -%}
+          {%- endif -%}
+
+          {%- if row.status | default('') | trim == 'warning' -%}
+            {%- set ns.total_warning_rules =
+              ns.total_warning_rules + 1
+            -%}
+          {%- endif -%}
+
+          {%- if row.status | default('') | trim == 'blocked' -%}
+            {%- set ns.total_blocked_rules =
+              ns.total_blocked_rules + 1
+            -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        {%- if
+          (purge_apply_enabled | default(false) | bool)
+          and
+          (
+            rep.disk_usage_after
+            | default([])
+            | length
+          ) > 0
+        -%}
+          {%- set effective_disks =
+            rep.disk_usage_after | default([])
+          -%}
+        {%- else -%}
+          {%- set effective_disks =
+            rep.disk_usage_before | default([])
+          -%}
+        {%- endif -%}
+
+        {%- for disk in effective_disks -%}
+          {%- set disk_used_pct =
+            disk.used_pct | default(0) | int
+          -%}
+
+          {%- if disk_used_pct > ns.max_disk_used_pct -%}
+            {%- set ns.max_disk_used_pct = disk_used_pct -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+
+      {{
+        {
+          'total_hosts': ns.total_hosts,
+          'total_rules': ns.total_rules,
+          'total_matched': ns.total_matched,
+          'total_deleted': ns.total_deleted,
+          'total_matched_bytes': ns.total_matched_bytes,
+          'total_deleted_bytes': ns.total_deleted_bytes,
+          'total_failed_files': ns.total_failed_files,
+          'total_removed_empty_dirs': ns.total_removed_empty_dirs,
+          'total_failed_empty_dirs': ns.total_failed_empty_dirs,
+          'total_blocked_paths': ns.total_blocked_paths,
+          'total_missing_paths': ns.total_missing_paths,
+          'total_failed_rules': ns.total_failed_rules,
+          'total_warning_rules': ns.total_warning_rules,
+          'total_blocked_rules': ns.total_blocked_rules,
+          'max_disk_used_pct': ns.max_disk_used_pct
+        }
+        | to_json
+      }}
+
+- name: Report | Publicar métricas como facts
+  ansible.builtin.set_fact:
+    purge_total_hosts: "{{ (_purge_report_metrics_json | from_json).total_hosts }}"
+    purge_total_rules: "{{ (_purge_report_metrics_json | from_json).total_rules }}"
+    purge_total_matched: "{{ (_purge_report_metrics_json | from_json).total_matched }}"
+    purge_total_deleted: "{{ (_purge_report_metrics_json | from_json).total_deleted }}"
+    purge_total_matched_bytes: "{{ (_purge_report_metrics_json | from_json).total_matched_bytes }}"
+    purge_total_deleted_bytes: "{{ (_purge_report_metrics_json | from_json).total_deleted_bytes }}"
+    purge_total_failed_files: "{{ (_purge_report_metrics_json | from_json).total_failed_files }}"
+    purge_total_removed_empty_dirs: "{{ (_purge_report_metrics_json | from_json).total_removed_empty_dirs }}"
+    purge_total_failed_empty_dirs: "{{ (_purge_report_metrics_json | from_json).total_failed_empty_dirs }}"
+    purge_total_blocked_paths: "{{ (_purge_report_metrics_json | from_json).total_blocked_paths }}"
+    purge_total_missing_paths: "{{ (_purge_report_metrics_json | from_json).total_missing_paths }}"
+    purge_total_failed_rules: "{{ (_purge_report_metrics_json | from_json).total_failed_rules }}"
+    purge_total_warning_rules: "{{ (_purge_report_metrics_json | from_json).total_warning_rules }}"
+    purge_total_blocked_rules: "{{ (_purge_report_metrics_json | from_json).total_blocked_rules }}"
+    purge_max_disk_used_pct: "{{ (_purge_report_metrics_json | from_json).max_disk_used_pct | default(0) | int }}"
+
+- name: Report | Definir severidade do relatório
+  ansible.builtin.set_fact:
+    purge_report_level: >-
+      {%- set disk_warning =
+        purge_disk_usage_warning_pct
+        | default(75)
+        | int
+      -%}
+
+      {%- set disk_critical =
+        purge_disk_usage_critical_pct
+        | default(90)
+        | int
+      -%}
+
+      {%- if
+        (purge_max_disk_used_pct | default(0) | int)
+        >= disk_critical
+      -%}
+      crit
+
+      {%- elif
+        (purge_runtime_failure_count | default(0) | int) > 0
+        or (purge_unknown_hosts | length) > 0
+        or (purge_total_failed_files | int) > 0
+        or (purge_total_failed_empty_dirs | int) > 0
+        or (purge_total_failed_rules | int) > 0
+        or (purge_total_blocked_paths | int) > 0
+        or (purge_total_blocked_rules | int) > 0
+      -%}
+      issue
+
+      {%- elif
+        (purge_max_disk_used_pct | default(0) | int)
+        >= disk_warning
+        or (purge_hosts_without_rules | length) > 0
+        or (purge_total_warning_rules | int) > 0
+      -%}
+      warn
+
+      {%- else -%}
+      ok
+      {%- endif -%}
+
+    purge_report_effective_timezone: >-
+      {{
+        purge_report_timezone
+        | default('America/Sao_Paulo')
+      }}
+
+    purge_report_date_br: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='"
+          ~ (
+            purge_report_timezone
+            | default('America/Sao_Paulo')
+          )
+          ~ "' date '+%d/%m/%Y %H:%M:%S "
+          ~ (
+            purge_report_timezone
+            | default('America/Sao_Paulo')
+          )
+          ~ "'"
+        )
+      }}
+
+    purge_report_sample_limit_effective: >-
+      {{
+        purge_report_sample_limit
+        | default(50)
+        | int
+      }}
+
+    purge_effective_mode_label: >-
+      {{
+        'APPLY / REMOÇÃO REAL'
+        if (purge_apply_enabled | bool)
+        else 'CHECK / SIMULAÇÃO'
+      }}
+
+- name: Report | Definir labels do relatório
+  ansible.builtin.set_fact:
+    purge_report_mode_label: >-
+      {{
+        'Apply'
+        if (purge_apply_enabled | default(false) | bool)
+        else 'Check'
+      }}
+
+    purge_report_level_label: >-
+      {%- set level =
+        purge_report_level
+        | default('ok')
+        | trim
+      -%}
+
+      {%- if level == 'crit' -%}
+      Crítico
+      {%- elif level == 'issue' -%}
+      Com ocorrências
+      {%- elif level == 'warn' -%}
+      Alerta
+      {%- else -%}
+      OK
+      {%- endif -%}
+
+# Anexos TXT de auditoria
+
+- name: Report | Coletar anexos locais de auditoria por host
+  ansible.builtin.set_fact:
+    _audit_files_raw: >-
+      {{
+        (groups['purge_targets'] | default([])
+          | map('extract', hostvars, 'purge_deleted_files_attachments')
+          | select('defined')
+          | sum(start=[]))
+        | map('string')
+        | map('trim')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Report | Verificar anexos locais de auditoria
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _audit_file_stats
+  changed_when: false
+  failed_when: false
+  loop: "{{ _audit_files_raw | default([]) }}"
+  when: (_audit_files_raw | default([]) | length) > 0
+
+- name: Report | Filtrar anexos válidos de auditoria
+  ansible.builtin.set_fact:
+    _audit_attachments_local: >-
+      {{
+        (_audit_file_stats.results | default([]))
+        | selectattr('stat.exists', 'defined')
+        | selectattr('stat.exists')
+        | selectattr('stat.size', 'defined')
+        | selectattr('stat.size', '>', 0)
+        | map(attribute='stat.path')
+        | list
+      }}
+
+- name: Report | Preparar anexos para o limite do e-mail
+  ansible.builtin.include_tasks: 79_prepare_email_attachments.yml
+
+- name: Report | Inicializar listas de arquivos do e-mail e do CIFS
+  ansible.builtin.set_fact:
+    send_mail_cifs_remote_files: []
+    send_mail_attachments: []
+    purge_audit_cifs_stored_files: []
+
+- name: Report | Publicar arquivos de auditoria preparados no CIFS
+  ansible.builtin.include_tasks: 80_cifs_upload_files.yml
+  vars:
+    cifs_upload_label: "anexos de auditoria"
+
+    cifs_upload_enabled: >-
+      {{
+        purge_audit_cifs_upload_enabled
+        | default(true)
+        | bool
+      }}
+
+    cifs_upload_local_files: >-
+      {{
+        _audit_attachments_to_upload
+        | default([])
+      }}
+
+    cifs_upload_remote_dir: >-
+      {{
+        send_mail_cifs_path
+        | default('/Ansible/mail_attachments')
+      }}
+
+    cifs_upload_delegate: >-
+      {{
+        purge_audit_cifs_delegate
+        | default('')
+      }}
+
+    cifs_upload_stage_dir: >-
+      {{
+        purge_audit_cifs_stage_dir
+        | default(
+            '/tmp/data-purge-audit-cifs-'
+            ~ (
+              tower_job_id
+              | default(awx_job_id | default('local'))
+            )
+          )
+      }}
+
+    cifs_upload_fail_on_error: true
+  when:
+    - purge_audit_cifs_upload_enabled | default(true) | bool
+    - (_audit_attachments_to_upload | default([]) | length) > 0
+
+- name: Report | Registrar todos os arquivos armazenados no CIFS
+  ansible.builtin.set_fact:
+    purge_audit_cifs_stored_files: >-
+      {{
+        cifs_upload_remote_files
+        | default([])
+      }}
+  when:
+    - purge_audit_cifs_upload_enabled | default(true) | bool
+    - (_audit_attachments_to_upload | default([]) | length) > 0
+
+- name: Report | Montar somente os anexos permitidos para o e-mail
+  ansible.builtin.set_fact:
+    # Esta variável contém apenas arquivos que podem ser anexados.
+    # Quando o pacote continua acima do limite, fica vazia.
+    send_mail_cifs_remote_files: >-
+      {{
+        _audit_attachment_email_basenames
+        | default([])
+        if (
+          purge_audit_cifs_upload_enabled
+          | default(true)
+          | bool
+        )
+        else []
+      }}
+
+    send_mail_attachments: >-
+      {{
+        _audit_attachment_email_basenames
+        | default([])
+        if (
+          purge_audit_cifs_upload_enabled
+          | default(true)
+          | bool
+        )
+        else []
+      }}
+
+- name: Report | Elevar severidade quando anexos não puderem ser enviados
+  ansible.builtin.set_fact:
+    purge_report_level: "warn"
+    purge_report_level_label: "Alerta"
+  when:
+    - >-
+      {{
+        purge_audit_attachment_action
+        | default('none')
+        in ['cifs_only', 'compression_failed']
+      }}
+    - purge_report_level | default('ok') == 'ok'
+
+- name: Report | Montar assunto e HTML após preparar anexos
+  ansible.builtin.set_fact:
+    send_mail_subject: >-
+      {{ purge_report_subject_prefix }} ({{ purge_report_level_label | trim }}) -
+      {{ purge_report_title }} - {{ purge_report_mode_label }} -
+      Job #{{ tower_job_id | default(awx_job_id | default('local')) }}
+
+    send_mail_body: >-
+      {{
+        lookup(
+          'ansible.builtin.template',
+          'report_success.html.j2'
+        )
+      }}
+
+- name: Report | Remover área local temporária de compactação
+  ansible.builtin.file:
+    path: >-
+      {{
+        _purge_audit_attachment_work_dir
+        | default(
+            '/tmp/data-purge-email-attachments-'
+            ~ (
+              tower_job_id
+              | default(awx_job_id | default('local'))
+            )
+          )
+      }}
+    state: absent
+  failed_when: false
+  when:
+    - >-
+      {{
+        purge_audit_attachment_action
+        | default('none')
+        in ['compressed', 'cifs_only', 'compression_failed']
+      }}
+
+# Métrica mensal de economia
+
+- name: Report | Definir se deve publicar métrica mensal de economia
+  ansible.builtin.set_fact:
+    _savings_should_publish: >-
+      {{
+        purge_savings_metrics_enabled | default(true) | bool
+        and purge_apply_enabled | default(false) | bool
+        and (
+          (not (purge_savings_metrics_only_when_deleted | default(true) | bool))
+          or ((purge_total_deleted_bytes | default(0) | int) > 0)
+        )
+      }}
+
+- name: Report | Preparar dados da métrica mensal
+  ansible.builtin.set_fact:
+    _savings_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    _savings_timezone: "{{ purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo')) }}"
+    _savings_generated_at: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo'))) ~ "' date '+%d/%m/%Y %H:%M:%S " ~ (purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo'))) ~ "'"
+        )
+      }}
+    _savings_month: >-
+      {{
+        lookup(
+          'ansible.builtin.pipe',
+          "TZ='" ~ (purge_savings_timezone | default(purge_report_timezone | default('America/Sao_Paulo'))) ~ "' date '+%Y%m'"
+        )
+      }}
+    _savings_metric_controller_dir: "{{ purge_savings_metrics_controller_dir }}"
+  when: _savings_should_publish | bool
+
+- name: Report | Definir nome do arquivo de métrica mensal
+  ansible.builtin.set_fact:
+    _savings_metric_filename: "data_purge_metric_{{ _savings_month }}_{{ _savings_job_id }}.json"
+    _savings_metric_file: "{{ _savings_metric_controller_dir }}/data_purge_metric_{{ _savings_month }}_{{ _savings_job_id }}.json"
+  when: _savings_should_publish | bool
+
+- name: Report | Garantir diretório local da métrica mensal
+  ansible.builtin.file:
+    path: "{{ _savings_metric_controller_dir }}"
+    state: directory
+    mode: "0750"
+  when: _savings_should_publish | bool
+
+- name: Report | Gerar arquivo JSON de métrica mensal
+  ansible.builtin.copy:
+    dest: "{{ _savings_metric_file }}"
+    mode: "0640"
+    content: |-
+      {%- set metric_rendered = lookup('ansible.builtin.template', role_path ~ '/templates/savings_metric.json.j2') -%}
+      {{ (metric_rendered if metric_rendered is mapping else (metric_rendered | from_json)) | to_nice_json(indent=2) }}
+  when: _savings_should_publish | bool
+
+- name: Report | Publicar métrica mensal no CIFS
+  ansible.builtin.include_tasks: 80_cifs_upload_files.yml
+  vars:
+    cifs_upload_label: "métrica mensal de economia"
+    cifs_upload_enabled: "{{ purge_savings_cifs_upload_enabled | default(true) | bool }}"
+    cifs_upload_local_files: "{{ [_savings_metric_file] if (_savings_metric_file | default('') | length > 0) else [] }}"
+    cifs_upload_remote_dir: "{{ purge_savings_cifs_path | default('/Ansible/data_purge_metrics') }}"
+    cifs_upload_delegate: >-
+      {{
+        purge_savings_cifs_delegate
+        if (purge_savings_cifs_delegate | default('') | string | trim | length > 0)
+        else (purge_audit_cifs_delegate | default(''))
+      }}
+    cifs_upload_stage_dir: "{{ purge_savings_cifs_stage_dir | default('/tmp/data-purge-savings-cifs-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}"
+    cifs_upload_fail_on_error: false
+  when:
+    - _savings_should_publish | default(false) | bool
+    - purge_savings_cifs_upload_enabled | default(true) | bool
+
+- name: Report | Publicar path da métrica mensal como fact
+  ansible.builtin.set_fact:
+    purge_savings_metric_file: "{{ _savings_metric_file | default('') }}"
+    purge_savings_metric_filename: "{{ _savings_metric_filename | default('') }}"
+  when: _savings_should_publish | bool
+
+# Set stats para o job de e-mail
+
+- name: Report | Publicar dados consolidados para o job de e-mail
+  ansible.builtin.set_stats:
+    aggregate: false
+    per_host: false
+    data:
+      send_mail_subject: "{{ send_mail_subject }}"
+      send_mail_body: "{{ send_mail_body }}"
+
+      send_mail_cifs: "{{ send_mail_cifs | default('') }}"
+      send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+      send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+      cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+
+      send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
+      send_mail_attachments: "{{ send_mail_attachments | default(send_mail_cifs_remote_files | default([])) }}"
+
+      purge_audit_cifs_stored_files: "{{ purge_audit_cifs_stored_files | default([]) }}"
+      purge_audit_attachment_action: "{{ purge_audit_attachment_action | default('none') }}"
+      purge_audit_attachment_notice: "{{ purge_audit_attachment_notice | default('') }}"
+      purge_audit_attachment_original_total_bytes: "{{ purge_audit_attachment_original_total_bytes | default(0) | int }}"
+      purge_audit_attachment_final_total_bytes: "{{ purge_audit_attachment_final_total_bytes | default(0) | int }}"
+      purge_audit_attachment_archive_name: "{{ purge_audit_attachment_archive_name | default('') }}"
+
+      purge_runtime_failed_hosts: "{{ purge_runtime_failed_hosts | default([]) }}"
+      purge_runtime_failure_count: "{{ purge_runtime_failure_count | default(0) | int }}"
+
+      purge_savings_metric_filename: "{{ purge_savings_metric_filename | default('') }}"
+      purge_savings_metric_file: "{{ purge_savings_metric_file | default('') }}"
+      purge_savings_cifs_path: "{{ purge_savings_cifs_path | default('/Ansible/data_purge_metrics') }}"

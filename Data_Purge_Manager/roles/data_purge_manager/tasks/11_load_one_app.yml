@@ -1,0 +1,14 @@
+---
+- name: Carregar arquivo da aplicação {{ purge_app_file | basename }}
+  ansible.builtin.include_vars:
+    file: "{{ purge_app_file }}"
+    name: _purge_app_current
+
+- name: Mesclar aplicação carregada
+  ansible.builtin.set_fact:
+    purge_loaded_applications: >-
+      {{
+        purge_loaded_applications
+        | default({})
+        | combine((_purge_app_current.cm.purge_manager.applications | default({})), recursive=True)
+      }}

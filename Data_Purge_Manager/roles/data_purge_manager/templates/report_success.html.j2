@@ -1,0 +1,540 @@
+{% macro badge(text, kind='gray') -%}
+  {%- if kind == 'ok' -%}
+    <span style="display:inline-block;background-color:#e8f5e9;color:#1b5e20;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- elif kind == 'warn' -%}
+    <span style="display:inline-block;background-color:#fff3e0;color:#b26a00;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- elif kind == 'issue' -%}
+    <span style="
+      display:inline-block;
+      background-color:#fff1e6;
+      color:#9a3412;
+      font-size:12px;
+      font-weight:bold;
+      padding:3px 7px;
+      border-radius:2px;
+      white-space:nowrap;
+    ">
+      {{ text }}
+    </span>
+  {%- elif kind == 'crit' -%}
+    <span style="display:inline-block;background-color:#ffebee;color:#b00020;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- else -%}
+    <span style="display:inline-block;background-color:#eeeeee;color:#333333;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro code(text) -%}
+  <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f5f5f5;color:#222222;padding:2px 5px;border-radius:2px;word-break:break-all;">{{ text | default('—') }}</span>
+{%- endmacro %}
+
+{% macro kv(label, value) -%}
+  <div style="line-height:18px;white-space:nowrap;">
+    <span style="color:#666666;">{{ label }}:</span>
+    <b>{{ value }}</b>
+  </div>
+{%- endmacro %}
+
+{% macro human_bytes(value) -%}
+  {%- set b = value | default(0) | int -%}
+  {%- if b >= 1099511627776 -%}
+    {{ '%.2f' | format(b / 1099511627776) }} TB
+  {%- elif b >= 1073741824 -%}
+    {{ '%.2f' | format(b / 1073741824) }} GB
+  {%- elif b >= 1048576 -%}
+    {{ '%.2f' | format(b / 1048576) }} MB
+  {%- elif b >= 1024 -%}
+    {{ '%.2f' | format(b / 1024) }} KB
+  {%- else -%}
+    {{ b }} B
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro th(text, width='') -%}
+  <th {% if width | length > 0 %}width="{{ width }}"{% endif %} bgcolor="#f4f6f8" style="background-color:#f4f6f8;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+    {{ text }}
+  </th>
+{%- endmacro %}
+
+{% macro td_open() -%}
+  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+{%- endmacro %}
+
+{% macro card(label, value, help='') -%}
+  <td valign="top" style="width:14.2%;border:1px solid #d9d9d9;padding:10px;font-family:Arial,sans-serif;color:#111111;">
+    <div style="font-size:12px;color:#666666;line-height:15px;">{{ label }}</div>
+    <div style="font-size:22px;font-weight:bold;color:#111111;margin-top:3px;line-height:26px;">{{ value }}</div>
+    {% if help | length > 0 %}
+    <div style="font-size:11px;color:#777777;margin-top:2px;line-height:14px;">{{ help }}</div>
+    {% endif %}
+  </td>
+{%- endmacro %}
+
+{% set report_level = purge_report_level | default('ok') | trim %}
+{% set report_level_label = purge_report_level_label | default('OK') | trim %}
+{% set mode_label = purge_report_mode_label | default(('Apply' if (purge_apply_enabled | default(false) | bool) else 'Check')) %}
+{% set job_id = tower_job_id | default(awx_job_id | default('local')) %}
+{% set executor = tower_user_name | default(awx_user_name | default('—')) %}
+{% set selected_groups = selected_purge_applications | default([]) %}
+{% set selected_envs = selected_purge_envs | default([]) %}
+{% set unknown_hosts = purge_unreachable_or_unknown_hosts | default([]) %}
+{% set no_rule_hosts = purge_hosts_without_rules | default([]) %}
+{% set economy_total_bytes = (purge_total_deleted_bytes if (purge_apply_enabled | default(false) | bool) else purge_total_matched_bytes) | default(0) %}
+{% set sample_limit = (purge_report_sample_limit_effective | default(purge_report_sample_limit | default(50), true) | int) %}
+{% set disk_warning_pct =
+  purge_disk_usage_warning_pct
+  | default(75)
+  | int
+%}
+
+{% set disk_critical_pct =
+  purge_disk_usage_critical_pct
+  | default(90)
+  | int
+%}
+
+{% if report_level == 'crit' %}
+  {% set banner_color = '#7f1d1d' %}
+  {% set banner_badge = 'crit' %}
+{% elif report_level == 'issue' %}
+  {% set banner_color = '#9a3412' %}
+  {% set banner_badge = 'issue' %}
+{% elif report_level == 'warn' %}
+  {% set banner_color = '#8a5a00' %}
+  {% set banner_badge = 'warn' %}
+{% else %}
+  {% set banner_color = '#1f4d2b' %}
+  {% set banner_badge = 'ok' %}
+{% endif %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td align="left" style="padding:8px 8px 12px 8px;">
+      <table role="presentation" width="1080" cellspacing="0" cellpadding="0" border="0" style="width:1080px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+        <tr>
+          <td bgcolor="{{ banner_color }}" style="background-color:{{ banner_color }};padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                  <div style="font-size:18px;font-weight:bold;color:#ffffff;margin:0;padding:0;">
+                    {{ purge_report_title | default('Data Purge Manager') }}
+                  </div>
+                  <div style="font-size:13px;color:#f2f2f2;margin-top:4px;line-height:18px;">
+                    Modo: <b>{{ mode_label }}</b>
+                    &nbsp;|&nbsp; Job: <b>{{ job_id }}</b>
+                    &nbsp;|&nbsp; Executor: <b>{{ executor }}</b>
+                    &nbsp;|&nbsp; Data: <b>{{ purge_report_date_br | default(report_date_br | default('—')) }}</b>
+                  </div>
+                </td>
+                <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                  {{ badge(report_level_label, banner_badge) }}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;padding:12px 16px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+            <b>Grupo(s):</b> {{ selected_groups | join(', ') if (selected_groups | length) > 0 else 'Todos os grupos selecionados pela matriz' }}<br/>
+            <b>Ambiente(s):</b> {{ selected_envs | join(', ') if (selected_envs | length) > 0 else 'Todos os ambientes selecionados pela matriz' }}<br/>
+            <b>Motivo:</b> {{ motivo | default('—') }}<br/>
+            <b>Confirmação de exclusão:</b> {{ purge_confirm_delete | default('nao') }}
+          </td>
+        </tr>
+
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+              <tr>
+                {{ card('Hosts', purge_total_hosts | default(0), 'com relatório') }}
+                {{ card('Regras', purge_total_rules | default(0), 'habilitadas') }}
+                {{ card('Candidatos', purge_total_matched | default(0), 'arquivos elegíveis') }}
+                {{ card('Removidos', purge_total_deleted | default(0), 'modo Apply') }}
+                {{ card(('Economia realizada' if (purge_apply_enabled | default(false) | bool) else 'Economia estimada'), human_bytes(economy_total_bytes), ('arquivos removidos' if (purge_apply_enabled | default(false) | bool) else 'arquivos candidatos')) }}
+                {{ card('Alertas', purge_total_warning_rules | default(0), 'regras com aviso') }}
+                {{ card('Bloqueios', purge_total_blocked_paths | default(0), 'paths bloqueados') }}
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        {% if unknown_hosts | length > 0 or no_rule_hosts | length > 0 %}
+        <tr>
+          <td style="border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;padding:12px 16px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+            <div style="font-size:14px;font-weight:bold;margin-bottom:6px;">Avisos de planejamento</div>
+
+            {% if unknown_hosts | length > 0 %}
+              <div style="margin-bottom:5px;">
+                {{ badge('Hosts não classificados', 'warn') }}
+                {{ unknown_hosts | join(', ') }}
+              </div>
+            {% endif %}
+
+            {% if no_rule_hosts | length > 0 %}
+              <div>
+                {{ badge('Hosts sem regra', 'warn') }}
+                {{ no_rule_hosts | join(', ') }}
+              </div>
+            {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+
+        {% set attachment_notice =
+          purge_audit_attachment_notice
+          | default('')
+          | trim
+        %}
+
+        {% set attachment_action =
+          purge_audit_attachment_action
+          | default('none')
+        %}
+
+        {% if attachment_notice | length > 0 %}
+        <tr>
+          <td style="
+            border-left:1px solid #d9d9d9;
+            border-right:1px solid #d9d9d9;
+            padding:12px 16px;
+            font-family:Arial,sans-serif;
+            font-size:13px;
+            color:#111111;
+          ">
+            <div style="
+              background-color:{{
+                '#eef8f1'
+                if attachment_action == 'compressed'
+                else '#fff8e1'
+              }};
+              border:1px solid {{
+                '#b7dfc2'
+                if attachment_action == 'compressed'
+                else '#e5c56d'
+              }};
+              padding:10px 12px;
+              line-height:18px;
+            ">
+              <div style="
+                font-weight:bold;
+                margin-bottom:4px;
+                color:{{
+                  '#1f4d2b'
+                  if attachment_action == 'compressed'
+                  else '#8a5a00'
+                }};
+              ">
+                {{
+                  'Anexos compactados'
+                  if attachment_action == 'compressed'
+                  else 'Aviso sobre os anexos'
+                }}
+              </div>
+
+              {{ attachment_notice }}
+            </div>
+          </td>
+        </tr>
+        {% endif %}
+
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Resumo por host e regra
+            </div>
+
+            {% if purge_reports | default([]) | length == 0 %}
+              <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;">
+                Nenhum relatório de host foi gerado.
+              </div>
+            {% else %}
+
+              {% for host_report in purge_reports | default([]) %}
+                {% set host_groups = host_report.applications | default([]) %}
+                {% set host_envs = host_report.envs | default([]) %}
+                {% set host_rows = host_report.rows | default([]) %}
+                {% set htot = namespace(matched_bytes=0, deleted_bytes=0) %}
+                {% for r in host_rows %}
+                  {% set htot.matched_bytes = htot.matched_bytes + (r.matched_bytes | default(0) | int) %}
+                  {% set htot.deleted_bytes = htot.deleted_bytes + (r.deleted_bytes | default(0) | int) %}
+                {% endfor %}
+                {% set host_disk_before = host_report.disk_usage_before | default([]) %}
+                {% set host_disk_after = host_report.disk_usage_after | default([]) %}
+
+                <div style="font-family:Arial,sans-serif;font-size:13px;color:#111111;margin-top:12px;margin-bottom:5px;">
+                  <b>{{ host_report.host | default('—') }}</b>
+                  &nbsp; {{ badge((host_report.os | default('unknown')) | upper, 'gray') }}
+                  &nbsp; Grupo(s): {{ code(host_groups | join(', ') if (host_groups | length) > 0 else '—') }}
+                  &nbsp; Ambiente(s): {{ code(host_envs | join(', ') if (host_envs | length) > 0 else '—') }}
+
+                  <div style="margin-top:8px;margin-bottom:14px;">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                      <tr>
+                        <td valign="top" width="26%" style="background-color:#f1f8f4;border:1px solid #b7dfc2;padding:10px;font-family:Arial,sans-serif;color:#111111;">
+                          <div style="font-size:11px;color:#2e7d32;font-weight:bold;text-transform:uppercase;line-height:15px;">
+                            {% if mode_label == 'Apply' %}
+                              Economia realizada no host
+                            {% else %}
+                              Economia estimada no host
+                            {% endif %}
+                          </div>
+
+                          <div style="font-size:24px;font-weight:bold;color:#1b5e20;margin-top:4px;line-height:28px;">
+                            {% if mode_label == 'Apply' %}
+                              {{ human_bytes(htot.deleted_bytes) }}
+                            {% else %}
+                              {{ human_bytes(htot.matched_bytes) }}
+                            {% endif %}
+                          </div>
+
+                          <div style="font-size:11px;color:#555555;margin-top:5px;line-height:15px;">
+                            {% if mode_label == 'Apply' %}
+                              Arquivos removidos com sucesso.
+                            {% else %}
+                              Arquivos candidatos encontrados.
+                            {% endif %}
+                          </div>
+                        </td>
+
+                        <td width="2%" style="font-size:1px;">&nbsp;</td>
+
+                        <td valign="top" width="72%" style="background-color:#ffffff;border:1px solid #d9d9d9;padding:10px;font-family:Arial,sans-serif;color:#111111;">
+                          <div style="font-size:12px;color:#333333;font-weight:bold;text-transform:uppercase;line-height:16px;margin-bottom:6px;">
+                            Disco em uso
+                          </div>
+
+                          <div style="font-size:11px;color:#666666;line-height:15px;margin-bottom:8px;">
+                            A porcentagem abaixo representa o <b>disco ocupado/em uso</b>, não o espaço livre.
+                          </div>
+
+                          {% if host_disk_before | length > 0 %}
+                            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                              <tr>
+                                <th style="background-color:#f4f6f8;color:#333333;font-family:Arial,sans-serif;font-size:11px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:6px;">
+                                  Filesystem / Mount
+                                </th>
+
+                                {% if mode_label == 'Apply' %}
+                                  <th style="background-color:#f4f6f8;color:#333333;font-family:Arial,sans-serif;font-size:11px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:6px;">
+                                    Uso antes
+                                  </th>
+                                  <th style="background-color:#f4f6f8;color:#333333;font-family:Arial,sans-serif;font-size:11px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:6px;">
+                                    Uso depois
+                                  </th>
+                                  <th style="background-color:#f4f6f8;color:#333333;font-family:Arial,sans-serif;font-size:11px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:6px;">
+                                    Espaço livre
+                                  </th>
+                                {% else %}
+                                  <th style="background-color:#f4f6f8;color:#333333;font-family:Arial,sans-serif;font-size:11px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:6px;">
+                                    Uso atual
+                                  </th>
+                                  <th style="background-color:#f4f6f8;color:#333333;font-family:Arial,sans-serif;font-size:11px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:6px;">
+                                    Espaço livre atual
+                                  </th>
+                                {% endif %}
+                              </tr>
+
+                              {% for d in host_disk_before %}
+                                {% set after_match = host_disk_after | selectattr('mount', 'equalto', d.mount | default('')) | list %}
+                                {% set d_after = after_match[0] if (after_match | length) > 0 else none %}
+
+                                {% set used_before_value = (d.used_pct | default('0') | string | regex_replace('[^0-9]', '') | int) %}
+                                {% if used_before_value >= disk_critical_pct %}
+                                  {% set used_before_color = '#b00020' %}
+                                {% elif used_before_value >= disk_warning_pct %}
+                                  {% set used_before_color = '#b26a00' %}
+                                {% else %}
+                                  {% set used_before_color = '#1b5e20' %}
+                                {% endif %}
+
+                                {% if d_after %}
+                                  {% set used_after_value = (d_after.used_pct | default('0') | string | regex_replace('[^0-9]', '') | int) %}
+                                  {% if used_after_value >= disk_critical_pct %}
+                                    {% set used_after_color = '#b00020' %}
+                                  {% elif used_after_value >= disk_warning_pct %}
+                                    {% set used_after_color = '#b26a00' %}
+                                  {% else %}
+                                    {% set used_after_color = '#1b5e20' %}
+                                  {% endif %}
+                                {% endif %}
+
+                                <tr>
+                                  <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
+                                    {{ code(d.mount | default(d.filesystem | default('—'))) }}
+                                  </td>
+
+                                  {% if mode_label == 'Apply' and d_after %}
+                                    <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
+                                      <b style="font-size:15px;color:{{ used_before_color }};">{{ d.used_pct | default('—') }}%</b>
+                                      <div style="font-size:10px;color:#666666;">disco em uso</div>
+                                    </td>
+
+                                    <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
+                                      <b style="font-size:15px;color:{{ used_after_color }};">{{ d_after.used_pct | default('—') }}%</b>
+                                      <div style="font-size:10px;color:#666666;">disco em uso</div>
+                                    </td>
+
+                                    <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
+                                      <b>{{ human_bytes(d.free_bytes | default(0)) }}</b>
+                                      &nbsp;&rarr;&nbsp;
+                                      <b>{{ human_bytes(d_after.free_bytes | default(0)) }}</b>
+                                    </td>
+                                  {% else %}
+                                    <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
+                                      <b style="font-size:15px;color:{{ used_before_color }};">{{ d.used_pct | default('—') }}%</b>
+                                      <div style="font-size:10px;color:#666666;">disco em uso</div>
+                                    </td>
+
+                                    <td style="font-family:Arial,sans-serif;font-size:12px;color:#111111;border:1px solid #d9d9d9;padding:6px;vertical-align:top;">
+                                      <b>{{ human_bytes(d.free_bytes | default(0)) }}</b>
+                                    </td>
+                                  {% endif %}
+                                </tr>
+                              {% endfor %}
+                            </table>
+                          {% else %}
+                            <div style="font-size:12px;color:#666666;margin-top:6px;">
+                              Informação de disco não disponível para este host.
+                            </div>
+                          {% endif %}
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+                </div>
+
+                <div style="height:14px;line-height:14px;font-size:1px;">&nbsp;</div>
+
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:12px;table-layout:fixed;">
+                  <tr>
+                    {{ th('Status', '80') }}
+                    {{ th('Regra', '250') }}
+                    {{ th('Grupo / Ambiente', '125') }}
+                    {{ th('Critério', '125') }}
+                    {{ th('Paths', '110') }}
+                    {{ th('Arquivos', '140') }}
+                    {{ th('Observações', '350') }}
+                  </tr>
+
+                  {% for row in host_rows %}
+                    {% set status = row.status | default('ok') | trim %}
+                    {% if status == 'ok' %}
+                      {% set row_badge = badge('OK', 'ok') %}
+                    {% elif status == 'warning' %}
+                      {% set row_badge = badge('Alerta', 'warn') %}
+                    {% elif status == 'blocked' %}
+                      {% set row_badge = badge('Bloqueado', 'issue') %}
+                    {% else %}
+                      {% set row_badge = badge('Falha', 'issue') %}
+                    {% endif %}
+
+                    {% set blocked_paths = row.blocked_paths | default([]) %}
+                    {% set fatal_errors = row.fatal_errors | default([]) %}
+                    {% set samples = row.samples | default([]) | list %}
+
+                    <tr>
+                      {{ td_open() }}
+                        {{ row_badge }}
+                      </td>
+
+                      {{ td_open() }}
+                        {{ code(row.rule | default('—')) }}<br/>
+                        <span style="color:#666666;">{{ row.description | default('—') }}</span>
+                        {% if row.source | default('application') == 'global' %}
+                          <br/>{{ badge('Global', 'gray') }}
+                        {% endif %}
+                      </td>
+
+                      {{ td_open() }}
+                        {{ kv('Grupo', code(row.application | default('—'))) }}
+                        {{ kv('Ambiente', code(row.environment | default('—'))) }}
+                      </td>
+
+                      {{ td_open() }}
+                        {{ kv('Idade', (row.age_days | default('—') | string) ~ ' dia(s)') }}
+                        {{ kv('Recursivo', 'sim' if row.recursive | default(false) | bool else 'não') }}
+                        {{ kv('Dirs vazios', 'sim' if row.delete_empty_dirs | default(false) | bool else 'não') }}
+                      </td>
+
+                      {{ td_open() }}
+                        {{ kv('Existentes', (row.paths_existing | default(0) | string) ~ '/' ~ (row.paths_total | default(0) | string)) }}
+
+                        {% if blocked_paths | length > 0 %}
+                          <div style="line-height:18px;white-space:nowrap;color:#b00020;">
+                            <b>{{ blocked_paths | length }}</b> bloqueado(s)
+                          </div>
+                        {% endif %}
+                      </td>
+
+                      {{ td_open() }}
+                        {{ kv('Candidatos', row.matched_files | default(0)) }}
+                        {{ kv('Tamanho cand.', human_bytes(row.matched_bytes | default(0))) }}
+                        {{ kv('Removidos', row.deleted_files | default(0)) }}
+                        {{ kv(('Economia real' if mode_label == 'Apply' else 'Economia est.'), human_bytes((row.deleted_bytes | default(0)) if mode_label == 'Apply' else (row.matched_bytes | default(0)))) }}
+                        {{ kv('Falhas', row.failed_files | default(0)) }}
+
+                        {% if row.removed_empty_dirs | default(0) | int > 0 %}
+                          {{ kv('Dirs removidos', row.removed_empty_dirs | default(0)) }}
+                        {% endif %}
+
+                        {% if row.failed_empty_dirs | default(0) | int > 0 %}
+                          {{ kv('Falhas dirs', row.failed_empty_dirs | default(0)) }}
+                        {% endif %}
+                      </td>
+
+                      {{ td_open() }}
+                        {% if fatal_errors | length > 0 %}
+                          {{ badge('Erro', 'issue') }}<br/>
+                          {% for e in fatal_errors %}
+                            <span style="color:#b00020;">{{ e }}</span><br/>
+                          {% endfor %}
+                        {% endif %}
+
+                        {% if blocked_paths | length > 0 %}
+                          {{ badge('Paths bloqueados', 'issue') }}<br/>
+                          {% for p in blocked_paths %}
+                            {{ code(p.path | default('—')) }}
+                            <span style="color:#666666;"> — {{ p.reason | default('—') }}</span><br/>
+                          {% endfor %}
+                        {% endif %}
+
+                        {% if samples | length > 0 %}
+                          <span style="color:#666666;">Amostras:</span><br/>
+                          {% for s in samples[0:(sample_limit | int)] %}
+                            {{ code(s) }}<br/>
+                          {% endfor %}
+
+                          {% if (samples | length) > (sample_limit | int) %}
+                            <span style="color:#666666;font-size:12px;">
+                              + {{ (samples | length) - (sample_limit | int) }} arquivo(s) não exibido(s)
+                            </span>
+                          {% endif %}
+                        {% else %}
+                          {% if blocked_paths | length == 0 and fatal_errors | length == 0 %}
+                            <span style="color:#666666;">—</span>
+                          {% endif %}
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </table>
+              {% endfor %}
+            {% endif %}
+          </td>
+        </tr>
+
+        <tr>
+          <td style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:14px;padding-top:8px;line-height:17px;">
+            {% if mode_label == 'Check' %}
+              Observação: em modo <b>Check</b>, nenhum arquivo é removido. A <b>economia estimada</b> considera o tamanho dos arquivos candidatos encontrados. A porcentagem de disco exibida representa o <b>disco em uso atual</b>.
+            {% else %}
+              Observação: em modo <b>Apply</b>, a <b>economia realizada</b> considera somente os arquivos removidos com sucesso. A porcentagem de disco exibida representa o <b>disco em uso</b> antes e depois da execução.
+            {% endif %}
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

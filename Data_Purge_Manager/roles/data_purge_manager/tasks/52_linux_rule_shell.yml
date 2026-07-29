@@ -1,0 +1,573 @@
+---
+- name: Linux shell rule | Executar {{ purge_rule.name | default('regra_sem_nome') }}
+  block:
+    - name: Linux shell rule | Capturar valores brutos da regra
+      ansible.builtin.set_fact:
+        _rule_name: "{{ purge_rule.get('name', 'regra_sem_nome') }}"
+        _rule_description: "{{ purge_rule.get('description', '') }}"
+        _rule_application: "{{ purge_rule.get('application', '—') }}"
+        _rule_environment: "{{ purge_rule.get('environment', '—') }}"
+        _rule_source: "{{ purge_rule.get('source', '—') }}"
+        _rule_paths_raw: "{{ purge_rule.get('paths', []) }}"
+        _rule_patterns_raw: "{{ purge_rule.get('patterns', ['*']) }}"
+        _rule_excludes_raw: "{{ purge_rule.get('exclude_patterns', []) }}"
+        _rule_allowed_prefixes_raw: "{{ purge_rule.get('allowed_prefixes', []) }}"
+        _rule_age_raw: "{{ purge_rule.get('age_days', '') }}"
+        _rule_recursive_raw: "{{ purge_rule.get('recursive', false) }}"
+        _rule_delete_empty_dirs_raw: "{{ purge_rule.get('delete_empty_dirs', purge_delete_empty_dirs_default_bool | default(false)) }}"
+
+    - name: Linux shell rule | Normalizar regra
+      ansible.builtin.set_fact:
+        _rule_age_valid: "{{ (_rule_age_raw | string) is match('^[0-9]+$') and (_rule_age_raw | int) > 0 }}"
+        _rule_paths: >-
+          {{
+            (
+              _rule_paths_raw
+              if (_rule_paths_raw is sequence and _rule_paths_raw is not string)
+              else [_rule_paths_raw]
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_patterns: >-
+          {{
+            (
+              _rule_patterns_raw
+              if (_rule_patterns_raw is sequence and _rule_patterns_raw is not string)
+              else [_rule_patterns_raw]
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_excludes: >-
+          {{
+            (
+              _rule_excludes_raw
+              if (_rule_excludes_raw is sequence and _rule_excludes_raw is not string)
+              else [_rule_excludes_raw]
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_allowed_prefixes: >-
+          {{
+            (
+              _rule_allowed_prefixes_raw
+              if (_rule_allowed_prefixes_raw is sequence and _rule_allowed_prefixes_raw is not string)
+              else [_rule_allowed_prefixes_raw]
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_delete_empty_dirs: "{{ _rule_delete_empty_dirs_raw | bool }}"
+        _rule_recursive: "{{ _rule_recursive_raw | bool }}"
+
+    - name: Linux shell rule | Validar campos obrigatórios da regra
+      ansible.builtin.set_fact:
+        _rule_fatal_errors: >-
+          {%- set errors = [] -%}
+          {%- if _rule_paths | length == 0 -%}
+            {%- set _ = errors.append('Regra sem paths definidos.') -%}
+          {%- endif -%}
+          {%- if _rule_patterns | length == 0 -%}
+            {%- set _ = errors.append('Regra sem patterns definidos.') -%}
+          {%- endif -%}
+          {%- if not (_rule_age_valid | bool) -%}
+            {%- set _ = errors.append('age_days precisa ser maior que zero.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: Linux shell rule | Validar paths permitidos
+      ansible.builtin.set_fact:
+        _linux_path_validation_payload_json: >-
+          {%- set allowed = [] -%}
+          {%- set blocked = [] -%}
+          {%- set forbidden = purge_forbidden_paths_linux | default([]) | map('string') | list -%}
+          {%- set prefixes = _rule_allowed_prefixes | default([]) -%}
+          {%- set enforce_prefixes = purge_enforce_allowed_prefixes | default(true) | bool -%}
+          {%- set prefixes_required = purge_allowed_prefixes_required | default(false) | bool -%}
+
+          {%- for raw_path in _rule_paths | default([]) -%}
+            {%- set p0 = raw_path | string | trim -%}
+            {%- set p = p0 -%}
+            {%- if p | length > 1 and p.endswith('/') -%}
+              {%- set p = p | regex_replace('/+$', '') -%}
+            {%- endif -%}
+
+            {%- set ns = namespace(is_allowed=true, reason='') -%}
+
+            {%- if p == '' -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path vazio.' -%}
+            {%- elif (p | length) < (purge_min_path_length_linux | default(4) | int) -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path menor que o tamanho mínimo permitido.' -%}
+            {%- elif p in forbidden -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path proibido por forbidden_paths.' -%}
+            {%- elif enforce_prefixes and prefixes_required and (prefixes | length == 0) -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'allowed_prefixes obrigatório, mas não definido para a aplicação/regra.' -%}
+            {%- elif enforce_prefixes and (prefixes | length > 0) -%}
+              {%- set pfx = namespace(match=false) -%}
+              {%- for pref_raw in prefixes -%}
+                {%- set pref = pref_raw | string | trim -%}
+                {%- if pref | length > 1 and pref.endswith('/') -%}
+                  {%- set pref = pref | regex_replace('/+$', '') -%}
+                {%- endif -%}
+                {%- if pref | length > 0 and (p == pref or p.startswith(pref ~ '/')) -%}
+                  {%- set pfx.match = true -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- if not pfx.match -%}
+                {%- set ns.is_allowed = false -%}
+                {%- set ns.reason = 'Path fora dos allowed_prefixes permitidos.' -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- if ns.is_allowed -%}
+              {%- set _ = allowed.append(p) -%}
+            {%- else -%}
+              {%- set _ = blocked.append({'path': p, 'reason': ns.reason}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+
+          {{ {'allowed': allowed | unique | list, 'blocked': blocked} | to_json }}
+
+    - name: Linux shell rule | Publicar paths permitidos/bloqueados
+      ansible.builtin.set_fact:
+        _linux_allowed_paths: "{{ (_linux_path_validation_payload_json | from_json).allowed | default([]) }}"
+        _linux_blocked_paths: "{{ (_linux_path_validation_payload_json | from_json).blocked | default([]) }}"
+
+    - name: Linux shell rule | Verificar existência dos paths permitidos
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ _linux_allowed_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _linux_path_stats
+      failed_when: false
+      changed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _linux_allowed_paths | length > 0
+
+    - name: Linux shell rule | Definir paths existentes e ausentes
+      ansible.builtin.set_fact:
+        _linux_path_status_json: >-
+          {%- set existing = [] -%}
+          {%- set missing = [] -%}
+          {%- for r in _linux_path_stats.results | default([]) -%}
+            {%- if (r.stat.exists | default(false)) and (r.stat.isdir | default(false)) -%}
+              {%- set _ = existing.append(r.item) -%}
+            {%- elif not (r.stat.exists | default(false)) -%}
+              {%- set _ = missing.append({'path': r.item, 'reason': 'path não encontrado'}) -%}
+            {%- else -%}
+              {%- set _ = missing.append({'path': r.item, 'reason': 'path não é diretório'}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'existing': existing, 'missing': missing} | to_json }}
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux shell rule | Publicar paths existentes e ausentes
+      ansible.builtin.set_fact:
+        _linux_existing_paths: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": []}'') | from_json).existing | default([]) }}'
+        _linux_missing_paths: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": []}'') | from_json).missing | default([]) }}'
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Linux shell rule | Inicializar variáveis da execução shell
+      ansible.builtin.set_fact:
+        _rule_apply_enabled: "{{ purge_apply_enabled | default(false) | bool }}"
+        _linux_shell_candidate_file: ""
+        _linux_shell_matched_files: 0
+        _linux_shell_matched_bytes: 0
+        _linux_shell_deleted_files: 0
+        _linux_shell_deleted_bytes: 0
+        _linux_shell_failed_files: 0
+        _linux_shell_removed_empty_dirs: 0
+        _linux_shell_failed_empty_dirs: 0
+        _linux_shell_samples: []
+        _linux_shell_scan_errors: []
+        _linux_shell_delete_errors: []
+        _linux_shell_empty_dirs_errors: []
+        _linux_shell_errors: []
+
+    - name: Linux shell rule | Buscar candidatos via find
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          set -o pipefail
+
+          DPM_RECURSIVE="{{ 'true' if (_rule_recursive | bool) else 'false' }}"
+          DPM_AGE_DAYS="{{ _rule_age_raw | int }}"
+          DPM_SAMPLE_LIMIT="{{ purge_report_sample_limit | default(10) | int }}"
+
+          readarray -t DPM_PATHS < <(printf '%s\n' {{ _linux_existing_paths | default([]) | map('quote') | join(' ') }})
+          readarray -t DPM_PATTERNS < <(printf '%s\n' {{ _rule_patterns | default([]) | map('quote') | join(' ') }})
+          readarray -t DPM_EXCLUDES < <(printf '%s\n' {{ _rule_excludes | default([]) | map('quote') | join(' ') }})
+
+          candidate_file="$(mktemp /tmp/dpm_candidates_XXXXXX.lst)"
+          errors_file="$(mktemp /tmp/dpm_scan_errors_XXXXXX.log)"
+          trap 'rm -f "$errors_file"' EXIT
+
+          : > "$candidate_file"
+
+          matched=0
+          matched_bytes=0
+          sample_count=0
+
+          DPM_CUTOFF="$(date -d "${DPM_AGE_DAYS} days ago" '+%Y-%m-%d %H:%M:%S')"
+
+          declare -A DPM_SEEN
+
+          for root in "${DPM_PATHS[@]}"; do
+            [ -n "$root" ] || continue
+
+            if [ ! -d "$root" ]; then
+              printf 'DPM_ERROR=%s|path não é diretório ou não existe\n' "$root" >> "$errors_file"
+              continue
+            fi
+
+            for pattern in "${DPM_PATTERNS[@]}"; do
+              [ -n "$pattern" ] || continue
+
+              find_args=("$root")
+
+              if [ "$DPM_RECURSIVE" != "true" ]; then
+                find_args+=("-maxdepth" "1")
+              fi
+
+              find_args+=("-type" "f")
+              find_args+=("!" "-newermt" "$DPM_CUTOFF")
+              find_args+=("-iname" "$pattern")
+
+              for ex in "${DPM_EXCLUDES[@]}"; do
+                [ -n "$ex" ] || continue
+                find_args+=("!" "-iname" "$ex")
+              done
+
+              while IFS= read -r -d '' file; do
+                [ -n "$file" ] || continue
+
+                if [ "${DPM_SEEN[$file]+_}" = "_" ]; then
+                  continue
+                fi
+
+                DPM_SEEN["$file"]=1
+                matched=$((matched + 1))
+
+                file_size="$(stat -c '%s' -- "$file" 2>/dev/null || echo 0)"
+                case "$file_size" in
+                  ''|*[!0-9]*) file_size=0 ;;
+                esac
+                matched_bytes=$((matched_bytes + file_size))
+
+                printf '%s\n' "$file" >> "$candidate_file"
+
+                if [ "$sample_count" -lt "$DPM_SAMPLE_LIMIT" ]; then
+                  printf 'DPM_SAMPLE=%s\n' "$file"
+                  sample_count=$((sample_count + 1))
+                fi
+              done < <(find "${find_args[@]}" -print0 2>>"$errors_file")
+            done
+          done
+
+          echo "DPM_CANDIDATE_FILE=$candidate_file"
+          echo "DPM_MATCHED=$matched"
+          echo "DPM_MATCHED_BYTES=$matched_bytes"
+
+          if [ -s "$errors_file" ]; then
+            while IFS= read -r err; do
+              [ -n "$err" ] || continue
+              printf 'DPM_ERROR=%s\n' "$err"
+            done < "$errors_file"
+          fi
+        executable: /bin/bash
+      register: _linux_shell_scan_result
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _linux_existing_paths | length > 0
+
+    - name: Linux shell rule | Interpretar resultado do scan
+      ansible.builtin.set_fact:
+        _linux_shell_candidate_file: "{{ (((_linux_shell_scan_result | default({})).stdout | default('') | regex_search('(?m)^DPM_CANDIDATE_FILE=(.+)$', '\\1')) | default([''], true) | first) }}"
+        _linux_shell_matched_files: "{{ (((_linux_shell_scan_result | default({})).stdout | default('') | regex_search('(?m)^DPM_MATCHED=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_matched_bytes: "{{ (((_linux_shell_scan_result | default({})).stdout | default('') | regex_search('(?m)^DPM_MATCHED_BYTES=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_samples: "{{ (_linux_shell_scan_result | default({})).stdout_lines | default([]) | select('match', '^DPM_SAMPLE=') | map('regex_replace', '^DPM_SAMPLE=', '') | list }}"
+        _linux_shell_scan_errors: "{{ (_linux_shell_scan_result | default({})).stdout_lines | default([]) | select('match', '^DPM_ERROR=') | map('regex_replace', '^DPM_ERROR=', '') | list }}"
+
+    - name: Linux shell rule | Remover arquivos candidatos em modo apply
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          set -o pipefail
+
+          DPM_CANDIDATE_FILE="{{ _linux_shell_candidate_file }}"
+          DPM_AUDIT_FILE={{ _purge_audit_remote_file | default('') | quote }}
+          DPM_AUDIT_ENABLED="{{ 'true' if (purge_deleted_files_audit_enabled | default(true) | bool and _rule_apply_enabled | bool and (_purge_audit_remote_file is defined)) else 'false' }}"
+          DPM_AUDIT_HOST={{ inventory_hostname | quote }}
+          DPM_AUDIT_RULE={{ _rule_name | quote }}
+
+          deleted=0
+          deleted_bytes=0
+          failed=0
+          errors_file="$(mktemp /tmp/dpm_delete_errors_XXXXXX.log)"
+          trap 'rm -f "$errors_file"' EXIT
+
+          if [ -z "$DPM_CANDIDATE_FILE" ]; then
+            echo "DPM_DELETED=0"
+            echo "DPM_FAILED=1"
+            echo "DPM_ERROR=arquivo temporário de candidatos não foi informado para a etapa de delete"
+            exit 0
+          fi
+
+          if [ ! -f "$DPM_CANDIDATE_FILE" ]; then
+            echo "DPM_DELETED=0"
+            echo "DPM_FAILED=1"
+            echo "DPM_ERROR=arquivo temporário de candidatos não encontrado: $DPM_CANDIDATE_FILE"
+            exit 0
+          fi
+
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+
+            if [ ! -e "$file" ]; then
+              continue
+            fi
+
+            file_size="$(stat -c '%s' -- "$file" 2>/dev/null || echo 0)"
+            case "$file_size" in
+              ''|*[!0-9]*) file_size=0 ;;
+            esac
+
+            if rm -f -- "$file" 2>>"$errors_file"; then
+              deleted=$((deleted + 1))
+              deleted_bytes=$((deleted_bytes + file_size))
+
+              if [ "$DPM_AUDIT_ENABLED" = "true" ] && [ -n "$DPM_AUDIT_FILE" ]; then
+                DPM_NOW="$(TZ='America/Sao_Paulo' date '+%d/%m/%Y %H:%M:%S America/Sao_Paulo')"
+                printf '%s | host=%s | sistema=linux | regra=%s | bytes=%s | arquivo=%s\n' "$DPM_NOW" "$DPM_AUDIT_HOST" "$DPM_AUDIT_RULE" "$file_size" "$file" >> "$DPM_AUDIT_FILE" || true
+              fi
+            else
+              failed=$((failed + 1))
+              printf 'DPM_ERROR=%s|falha ao remover arquivo\n' "$file"
+            fi
+          done < "$DPM_CANDIDATE_FILE"
+
+          echo "DPM_DELETED=$deleted"
+          echo "DPM_DELETED_BYTES=$deleted_bytes"
+          echo "DPM_FAILED=$failed"
+
+          if [ -s "$errors_file" ]; then
+            while IFS= read -r err; do
+              [ -n "$err" ] || continue
+              printf 'DPM_ERROR=%s\n' "$err"
+            done < "$errors_file"
+          fi
+        executable: /bin/bash
+      register: _linux_shell_delete_result
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _rule_apply_enabled | bool
+        - _linux_shell_candidate_file | length > 0
+        - _linux_shell_matched_files | int > 0
+
+    - name: Linux shell rule | Interpretar resultado da remoção
+      ansible.builtin.set_fact:
+        _linux_shell_deleted_files: "{{ (((_linux_shell_delete_result | default({})).stdout | default('') | regex_search('(?m)^DPM_DELETED=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_deleted_bytes: "{{ (((_linux_shell_delete_result | default({})).stdout | default('') | regex_search('(?m)^DPM_DELETED_BYTES=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_failed_files: "{{ (((_linux_shell_delete_result | default({})).stdout | default('') | regex_search('(?m)^DPM_FAILED=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_delete_errors: "{{ (_linux_shell_delete_result | default({})).stdout_lines | default([]) | select('match', '^DPM_ERROR=') | map('regex_replace', '^DPM_ERROR=', '') | list }}"
+
+    - name: Linux shell rule | Remover diretórios vazios em modo apply
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          set -o pipefail
+
+          readarray -t DPM_PATHS < <(printf '%s\n' {{ _linux_existing_paths | default([]) | map('quote') | join(' ') }})
+
+          removed_empty_dirs=0
+          failed_empty_dirs=0
+          errors_file="$(mktemp /tmp/dpm_empty_dirs_errors_XXXXXX.log)"
+          trap 'rm -f "$errors_file"' EXIT
+
+          for root in "${DPM_PATHS[@]}"; do
+            [ -n "$root" ] || continue
+            [ -d "$root" ] || continue
+
+            while IFS= read -r dir; do
+              [ -n "$dir" ] || continue
+              removed_empty_dirs=$((removed_empty_dirs + 1))
+            done < <(find "$root" -depth -mindepth 1 -type d -empty -print -delete 2>>"$errors_file")
+          done
+
+          if [ -s "$errors_file" ]; then
+            failed_empty_dirs=1
+            while IFS= read -r err; do
+              [ -n "$err" ] || continue
+              printf 'DPM_ERROR=%s\n' "$err"
+            done < "$errors_file"
+          fi
+
+          echo "DPM_REMOVED_EMPTY_DIRS=$removed_empty_dirs"
+          echo "DPM_FAILED_EMPTY_DIRS=$failed_empty_dirs"
+        executable: /bin/bash
+      register: _linux_shell_empty_dirs_result
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _rule_apply_enabled | bool
+        - _rule_recursive | bool
+        - _rule_delete_empty_dirs | bool
+        - _linux_existing_paths | length > 0
+
+    - name: Linux shell rule | Interpretar resultado dos diretórios vazios
+      ansible.builtin.set_fact:
+        _linux_shell_removed_empty_dirs: "{{ (((_linux_shell_empty_dirs_result | default({})).stdout | default('') | regex_search('(?m)^DPM_REMOVED_EMPTY_DIRS=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_failed_empty_dirs: "{{ (((_linux_shell_empty_dirs_result | default({})).stdout | default('') | regex_search('(?m)^DPM_FAILED_EMPTY_DIRS=([0-9]+)$', '\\1')) | default(['0'], true) | first) | int }}"
+        _linux_shell_empty_dirs_errors: "{{ (_linux_shell_empty_dirs_result | default({})).stdout_lines | default([]) | select('match', '^DPM_ERROR=') | map('regex_replace', '^DPM_ERROR=', '') | list }}"
+
+    - name: Linux shell rule | Consolidar erros da engine shell
+      ansible.builtin.set_fact:
+        _linux_shell_errors: >-
+          {{
+            (_linux_shell_scan_errors | default([]))
+            + (_linux_shell_delete_errors | default([]))
+            + (_linux_shell_empty_dirs_errors | default([]))
+          }}
+
+    - name: Linux shell rule | Remover arquivo temporário de candidatos
+      ansible.builtin.file:
+        path: "{{ _linux_shell_candidate_file }}"
+        state: absent
+      failed_when: false
+      when:
+        - _linux_shell_candidate_file | default('') | length > 0
+
+    - name: Linux shell rule | Definir status da regra
+      ansible.builtin.set_fact:
+        _linux_rule_status: >-
+          {%- if _rule_fatal_errors | length > 0 -%}
+          blocked
+          {%- elif (_linux_allowed_paths | length == 0) and (_linux_blocked_paths | length > 0) -%}
+          blocked
+          {%- elif (_linux_shell_failed_files | int) > 0 or (_linux_shell_failed_empty_dirs | int) > 0 or (_linux_shell_errors | length) > 0 -%}
+          failed
+          {%- elif (_rule_apply_enabled | bool) and (_linux_shell_matched_files | int > 0) and (_linux_shell_deleted_files | int == 0) and (_linux_shell_failed_files | int == 0) -%}
+          warning
+          {%- elif (_linux_blocked_paths | length > 0) -%}
+          warning
+          {%- else -%}
+          ok
+          {%- endif -%}
+        _linux_rule_status_detail: >-
+          {%- if _rule_fatal_errors | length > 0 -%}
+          {{ _rule_fatal_errors | join(' ') }}
+          {%- elif (_linux_allowed_paths | length == 0) and (_linux_blocked_paths | length > 0) -%}
+          todos os paths da regra foram bloqueados por segurança
+          {%- elif (_linux_shell_failed_files | int) > 0 or (_linux_shell_failed_empty_dirs | int) > 0 or (_linux_shell_errors | length) > 0 -%}
+          uma ou mais operações shell falharam
+          {%- elif (_rule_apply_enabled | bool) and (_linux_shell_matched_files | int > 0) and (_linux_shell_deleted_files | int == 0) and (_linux_shell_failed_files | int == 0) -%}
+          candidatos encontrados em modo apply, mas nenhum arquivo foi removido; validar se a task de delete foi executada
+          {%- elif (_linux_blocked_paths | length) > 0 -%}
+          um ou mais paths foram bloqueados por segurança
+          {%- else -%}
+          ok
+          {%- endif -%}
+
+    - name: Linux shell rule | Adicionar linha ao relatório
+      ansible.builtin.set_fact:
+        purge_host_report: >-
+          {{
+            purge_host_report
+            | combine({'rows': (purge_host_report.rows | default([])) + [
+              {
+                'rule': _rule_name,
+                'description': _rule_description,
+                'application': _rule_application,
+                'environment': _rule_environment,
+                'os': 'linux',
+                'engine': 'shell',
+                'source': _rule_source,
+                'status': _linux_rule_status | trim,
+                'status_detail': _linux_rule_status_detail | trim,
+                'age_days': _rule_age_raw,
+                'recursive': _rule_recursive | bool,
+                'delete_empty_dirs': _rule_delete_empty_dirs | bool,
+                'apply': _rule_apply_enabled | bool,
+                'patterns': _rule_patterns,
+                'exclude_patterns': _rule_excludes,
+                'paths_total': _rule_paths | length,
+                'paths_allowed': _linux_allowed_paths | length,
+                'paths_existing': _linux_existing_paths | default([]) | length,
+                'blocked_paths': _linux_blocked_paths | default([]),
+                'missing_paths': _linux_missing_paths | default([]),
+                'matched_files': _linux_shell_matched_files | default(0) | int,
+                'deleted_files': _linux_shell_deleted_files | default(0) | int,
+                'failed_files': _linux_shell_failed_files | default(0) | int,
+                'matched_bytes': _linux_shell_matched_bytes | default(0) | int,
+                'deleted_bytes': _linux_shell_deleted_bytes | default(0) | int,
+                'removed_empty_dirs': _linux_shell_removed_empty_dirs | default(0) | int,
+                'failed_empty_dirs': _linux_shell_failed_empty_dirs | default(0) | int,
+                'fatal_errors': (_rule_fatal_errors | default([])) + (_linux_shell_errors | default([])),
+                'samples': _linux_shell_samples | default([])
+              }
+            ]}, recursive=True)
+          }}
+
+  rescue:
+    - name: Linux shell rule | Registrar falha técnica da regra
+      ansible.builtin.set_fact:
+        purge_host_report: >-
+          {{
+            purge_host_report
+            | combine({'rows': (purge_host_report.rows | default([])) + [
+              {
+                'rule': purge_rule.get('name', 'regra_sem_nome'),
+                'description': purge_rule.get('description', ''),
+                'application': purge_rule.get('application', '—'),
+                'environment': purge_rule.get('environment', '—'),
+                'os': 'linux',
+                'engine': 'shell',
+                'source': purge_rule.get('source', '—'),
+                'status': 'failed',
+                'status_detail': ansible_failed_result.msg | default('Falha técnica não classificada'),
+                'age_days': purge_rule.get('age_days', ''),
+                'recursive': purge_rule.get('recursive', false) | bool,
+                'delete_empty_dirs': purge_rule.get('delete_empty_dirs', false) | bool,
+                'apply': purge_apply_enabled | default(false) | bool,
+                'patterns': purge_rule.get('patterns', []),
+                'exclude_patterns': purge_rule.get('exclude_patterns', []),
+                'paths_total': purge_rule.get('paths', []) | length,
+                'paths_allowed': 0,
+                'paths_existing': 0,
+                'blocked_paths': [],
+                'missing_paths': [],
+                'matched_files': 0,
+                'deleted_files': 0,
+                'failed_files': 1,
+                'matched_bytes': 0,
+                'deleted_bytes': 0,
+                'removed_empty_dirs': 0,
+                'failed_empty_dirs': 0,
+                'fatal_errors': [ansible_failed_result.msg | default('Falha técnica não classificada')],
+                'samples': []
+              }
+            ]}, recursive=True)
+          }}

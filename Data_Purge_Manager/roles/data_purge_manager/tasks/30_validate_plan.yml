@@ -1,0 +1,25 @@
+---
+- name: Falhar quando nenhum host alvo foi resolvido
+  ansible.builtin.fail:
+    msg: >-
+      Nenhum host foi resolvido para os filtros informados. Valide purge_applications={{ selected_purge_applications_effective }},
+      purge_env={{ selected_purge_envs_effective }} e survey_hosts={{ survey_target_hosts }}.
+  when:
+    - purge_fail_on_no_hosts | bool
+    - target_hosts | length == 0
+
+- name: Alertar hosts sem regras resolvidas
+  ansible.builtin.debug:
+    msg: >-
+      Os hosts a seguir foram informados/resolvidos, mas não receberam regras por aplicação/ambiente:
+      {{ purge_hosts_without_rules | join(', ') }}.
+      Para permitir host ad-hoc fora da matriz, use purge_allow_survey_hosts_outside_matrix=true.
+  when: purge_hosts_without_rules | length > 0
+
+- name: Avisar quando apply foi solicitado sem confirmação
+  ansible.builtin.debug:
+    msg: >-
+      purge_mode=apply foi informado, mas purge_confirm_delete não está como sim. A execução ficará em modo CHECK efetivo.
+  when:
+    - (purge_mode | string | lower) == 'apply'
+    - not (purge_apply_enabled | bool)

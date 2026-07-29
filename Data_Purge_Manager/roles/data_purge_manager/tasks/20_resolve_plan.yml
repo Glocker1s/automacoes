@@ -1,0 +1,231 @@
+---
+- name: Definir aplicações e ambientes efetivos
+  ansible.builtin.set_fact:
+    _purge_available_apps: "{{ purge_manager_cfg.applications.keys() | map('string') | map('lower') | list | sort }}"
+    _purge_available_envs: "{{ purge_manager_cfg.envs.keys() | map('string') | map('lower') | list | sort }}"
+
+- name: Resolver seleção efetiva
+  ansible.builtin.set_fact:
+    selected_purge_applications_effective: >-
+      {{ selected_purge_applications if (selected_purge_applications | length > 0) else _purge_available_apps }}
+    selected_purge_envs_effective: >-
+      {{ selected_purge_envs if (selected_purge_envs | length > 0) else _purge_available_envs }}
+
+- name: Identificar aplicações/ambientes inexistentes
+  ansible.builtin.set_fact:
+    purge_missing_applications: "{{ selected_purge_applications_effective | difference(_purge_available_apps) }}"
+    purge_missing_envs: "{{ selected_purge_envs_effective | difference(_purge_available_envs) }}"
+
+- name: Falhar quando aplicação não existir na configuração
+  ansible.builtin.fail:
+    msg: >-
+      Aplicação/perfil de expurgo inexistente na configuração: {{ purge_missing_applications | join(', ') }}.
+      Aplicações disponíveis: {{ _purge_available_apps | join(', ') }}.
+  when: purge_missing_applications | length > 0
+
+- name: Falhar quando ambiente não existir na matriz
+  ansible.builtin.fail:
+    msg: >-
+      Ambiente inexistente na matriz: {{ purge_missing_envs | join(', ') }}.
+      Ambientes disponíveis: {{ _purge_available_envs | join(', ') }}.
+  when: purge_missing_envs | length > 0
+
+- name: Construir hosts derivados da matriz
+  ansible.builtin.set_fact:
+    _purge_matrix_hosts_json: >-
+      {%- set out = [] -%}
+      {%- set envs = purge_manager_cfg.envs | default({}) -%}
+      {%- for env_name, env_cfg in envs.items() -%}
+        {%- set env_l = env_name | string | lower -%}
+        {%- if env_l in selected_purge_envs_effective -%}
+          {%- for app_name, app_env in (env_cfg.applications | default({})).items() -%}
+            {%- set app_l = app_name | string | lower -%}
+            {%- if app_l in selected_purge_applications_effective -%}
+              {%- set raw = app_env.get('members', app_env.get('hosts', app_env.get('maquinas', []))) -%}
+              {%- set members = raw if (raw is sequence and raw is not string) else (raw | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+              {%- for h in members -%}
+                {%- set hh = h | string | trim -%}
+                {%- if hh | length > 0 and hh not in out -%}
+                  {%- set _ = out.append(hh) -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Definir hosts alvo
+  ansible.builtin.set_fact:
+    target_hosts: >-
+      {{ survey_target_hosts if (survey_target_hosts | length > 0) else (_purge_matrix_hosts_json | from_json) }}
+
+- name: Construir plano por host
+  ansible.builtin.set_fact:
+    _purge_plan_payload_json: >-
+      {%- set plan = {} -%}
+      {%- set hosts_without_rules = [] -%}
+      {%- set envs = purge_manager_cfg.envs | default({}) -%}
+      {%- set apps_cfg = purge_manager_cfg.applications | default({}) -%}
+      {%- set global_rules = purge_manager_cfg.global_rules | default({}) -%}
+
+      {%- for host in target_hosts -%}
+        {%- set host_l = host | string | lower | trim -%}
+        {%- set hplan = {'applications': [], 'envs': [], 'windows': {'rules': []}, 'linux': {'rules': []}} -%}
+
+        {# Regras globais com suporte opcional a hosts/exclude_hosts #}
+        {%- if purge_global_rules_enabled | bool -%}
+          {%- for os_name in ['windows', 'linux'] -%}
+            {%- set def_allowed = purge_default_allowed_prefixes_windows if os_name == 'windows' else purge_default_allowed_prefixes_linux -%}
+            {%- for rule in (global_rules.get(os_name, {}).get('rules', [])) -%}
+              {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+              {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+              {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+              {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+              {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+              {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+              {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+              {%- if rule_applies_to_host -%}
+                {%- set allowed = rule.get('allowed_prefixes', def_allowed) -%}
+                {%- set rr = rule | combine({
+                      'application': '_global',
+                      'environment': 'global',
+                      'os': os_name,
+                      'source': 'global',
+                      'engine': rule.get('engine', purge_engine_default),
+                      'allowed_prefixes': allowed
+                    }, recursive=True) -%}
+                {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+        {%- endif -%}
+
+        {# Regras por aplicação/ambiente #}
+        {%- for env_name, env_cfg in envs.items() -%}
+          {%- set env_l = env_name | string | lower -%}
+          {%- if env_l in selected_purge_envs_effective -%}
+            {%- for app_name, app_env in (env_cfg.applications | default({})).items() -%}
+              {%- set app_l = app_name | string | lower -%}
+              {%- if app_l in selected_purge_applications_effective -%}
+                {%- set raw = app_env.get('members', app_env.get('hosts', app_env.get('maquinas', []))) -%}
+                {%- set members = raw if (raw is sequence and raw is not string) else (raw | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                {%- set members_l = members | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+
+                {%- if host_l in members_l -%}
+                  {%- if app_l not in hplan.applications -%}{%- set _ = hplan.applications.append(app_l) -%}{%- endif -%}
+                  {%- if env_l not in hplan.envs -%}{%- set _ = hplan.envs.append(env_l) -%}{%- endif -%}
+                  {%- set app_cfg = apps_cfg.get(app_l, {}) -%}
+
+                  {%- for os_name in ['windows', 'linux'] -%}
+                    {%- set app_allowed = app_cfg.get('allowed_prefixes', {}).get(os_name, []) -%}
+                    {%- set env_allowed = app_env.get('allowed_prefixes', {}).get(os_name, []) -%}
+                    {%- set def_allowed = purge_default_allowed_prefixes_windows if os_name == 'windows' else purge_default_allowed_prefixes_linux -%}
+                    {%- set allowed = (app_allowed + env_allowed) if ((app_allowed + env_allowed) | length > 0) else def_allowed -%}
+                    {%- set merge_mode = app_env.get('merge', {}).get(os_name ~ '_rules', 'merge') -%}
+                    {%- set base_rules = [] if merge_mode == 'replace' else app_cfg.get(os_name, {}).get('rules', []) -%}
+                    {%- set env_rules = app_env.get(os_name, {}).get('rules', []) -%}
+
+                    {%- for rule in base_rules -%}
+                      {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+                      {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+                      {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+                      {%- if rule_applies_to_host -%}
+                        {%- set rr = rule | combine({
+                              'application': app_l,
+                              'environment': env_l,
+                              'os': os_name,
+                              'source': 'application',
+                              'engine': rule.get('engine', purge_engine_default),
+                              'allowed_prefixes': allowed
+                            }, recursive=True) -%}
+                        {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+
+                    {%- for rule in env_rules -%}
+                      {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+                      {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+                      {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                      {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                      {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+                      {%- if rule_applies_to_host -%}
+                        {%- set rr = rule | combine({
+                              'application': app_l,
+                              'environment': env_l,
+                              'os': os_name,
+                              'source': 'environment_overlay',
+                              'engine': rule.get('engine', purge_engine_default),
+                              'allowed_prefixes': allowed
+                            }, recursive=True) -%}
+                        {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                  {%- endfor -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        {# Modo ad-hoc opcional: permite survey_hosts fora da matriz. Seguro por padrão: false. #}
+        {%- if (hplan.applications | length == 0) and (survey_target_hosts | length > 0) and (purge_allow_survey_hosts_outside_matrix | bool) -%}
+          {%- for app_l in selected_purge_applications_effective -%}
+            {%- set app_cfg = apps_cfg.get(app_l, {}) -%}
+            {%- if app_l not in hplan.applications -%}{%- set _ = hplan.applications.append(app_l) -%}{%- endif -%}
+            {%- if 'adhoc' not in hplan.envs -%}{%- set _ = hplan.envs.append('adhoc') -%}{%- endif -%}
+            {%- for os_name in ['windows', 'linux'] -%}
+              {%- set def_allowed = purge_default_allowed_prefixes_windows if os_name == 'windows' else purge_default_allowed_prefixes_linux -%}
+              {%- set allowed = app_cfg.get('allowed_prefixes', {}).get(os_name, def_allowed) -%}
+              {%- for rule in app_cfg.get(os_name, {}).get('rules', []) -%}
+                {%- set raw_rule_hosts = rule.get('hosts', rule.get('include_hosts', rule.get('target_hosts', []))) -%}
+                {%- set raw_exclude_hosts = rule.get('exclude_hosts', []) -%}
+                {%- set rule_hosts = raw_rule_hosts if (raw_rule_hosts is sequence and raw_rule_hosts is not string) else (raw_rule_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                {%- set exclude_hosts = raw_exclude_hosts if (raw_exclude_hosts is sequence and raw_exclude_hosts is not string) else (raw_exclude_hosts | default('') | string | regex_replace('\s+', '') | split(',')) -%}
+                {%- set rule_hosts_l = rule_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                {%- set exclude_hosts_l = exclude_hosts | map('string') | map('lower') | map('trim') | reject('equalto', '') | list -%}
+                {%- set rule_applies_to_host = ((rule_hosts_l | length == 0) or (host_l in rule_hosts_l)) and (host_l not in exclude_hosts_l) -%}
+
+                {%- if rule_applies_to_host -%}
+                  {%- set rr = rule | combine({
+                        'application': app_l,
+                        'environment': 'adhoc',
+                        'os': os_name,
+                        'source': 'application_adhoc',
+                        'engine': rule.get('engine', purge_engine_default),
+                        'allowed_prefixes': allowed
+                      }, recursive=True) -%}
+                  {%- set _ = hplan[os_name]['rules'].append(rr) -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endfor -%}
+          {%- endfor -%}
+        {%- endif -%}
+
+        {%- if (hplan.applications | length == 0) and ((hplan.windows.rules | length) + (hplan.linux.rules | length) == 0) -%}
+          {%- set _ = hosts_without_rules.append(host) -%}
+        {%- endif -%}
+        {%- set _ = plan.update({host: hplan}) -%}
+      {%- endfor -%}
+      {{ {'plan': plan, 'hosts_without_rules': hosts_without_rules} | to_json }}
+
+- name: Publicar plano de expurgo
+  ansible.builtin.set_fact:
+    purge_plan_by_host: "{{ (_purge_plan_payload_json | from_json).plan }}"
+    purge_hosts_without_rules: "{{ (_purge_plan_payload_json | from_json).hosts_without_rules }}"
+
+- name: Exibir resumo do plano
+  ansible.builtin.debug:
+    msg:
+      target_hosts: "{{ target_hosts }}"
+      hosts_without_rules: "{{ purge_hosts_without_rules }}"
+      plan_hosts: "{{ purge_plan_by_host.keys() | list }}"

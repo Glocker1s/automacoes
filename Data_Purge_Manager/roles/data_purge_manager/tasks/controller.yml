@@ -1,0 +1,15 @@
+---
+- name: Normalizar entradas
+  ansible.builtin.import_tasks: 00_normalize_inputs.yml
+
+- name: Carregar matriz e aplicações
+  ansible.builtin.import_tasks: 10_load_config.yml
+
+- name: Resolver plano de expurgo
+  ansible.builtin.import_tasks: 20_resolve_plan.yml
+
+- name: Validar plano de expurgo
+  ansible.builtin.import_tasks: 30_validate_plan.yml
+
+- name: Criar inventário dinâmico
+  ansible.builtin.import_tasks: 35_create_dynamic_hosts.yml

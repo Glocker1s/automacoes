@@ -1,0 +1,41 @@
+---
+cm:
+  purge_manager:
+    applications:
+      exemplo_linux:
+        description: "Exemplo de aplicação Linux"
+        allowed_prefixes:
+          linux:
+            - "/opt/minha-app"
+          windows: []
+        linux:
+          rules:
+            - name: "app_linux_logs_30d"
+              description: "Remove logs antigos da aplicação"
+              paths:
+                - "/opt/minha-app/logs"
+              patterns:
+                - "*.log"
+                - "*.gz"
+              exclude_patterns:
+                - ".keep"
+              age_days: 30
+              recursive: true
+              delete_empty_dirs: false
+              enabled: true
+              engine: "modules"
+
+            - name: "app_linux_exports_7d"
+              description: "Remove exports temporários antigos"
+              paths:
+                - "/opt/minha-app/exports/tmp"
+              patterns:
+                - "*.csv"
+                - "*.zip"
+              age_days: 7
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "modules"
+        windows:
+          rules: []

@@ -1,0 +1,137 @@
+---
+- name: CIFS | Inicializar resultado
+  ansible.builtin.set_fact:
+    cifs_upload_remote_files: []
+    _cifs_upload_local_files_effective: >-
+      {{
+        cifs_upload_local_files | default([])
+        | map('string')
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+
+- name: CIFS | Publicar arquivos no CIFS
+  when:
+    - cifs_upload_enabled | default(true) | bool
+    - (_cifs_upload_local_files_effective | length) > 0
+  block:
+    - name: CIFS | Normalizar configuração
+      ansible.builtin.set_fact:
+        _cifs_upload_server: "{{ (send_mail_cifs_address | default({}))[send_mail_cifs | default('') | lower] | default('') }}"
+        _cifs_upload_dir: "{{ cifs_upload_remote_dir | default(send_mail_cifs_path | default('/Ansible/mail_attachments')) }}"
+        _cifs_upload_user: "{{ ansible_user | default('') }}"
+        _cifs_upload_pass: "{{ ansible_password | default('') }}"
+        _cifs_upload_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
+        _cifs_upload_delegate: >-
+          {{
+            cifs_upload_delegate
+            if (cifs_upload_delegate | default('') | string | trim | length > 0)
+            else 'localhost'
+          }}
+        _cifs_upload_stage_dir: "{{ cifs_upload_stage_dir | default('/tmp/data-purge-cifs-upload-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}"
+        _cifs_upload_password_file: "{{ cifs_upload_stage_dir | default('/tmp/data-purge-cifs-upload-' ~ (tower_job_id | default(awx_job_id | default('local')))) }}/.cifs-pass"
+      no_log: true
+
+    - name: CIFS | Falhar se CIFS não estiver mapeado
+      ansible.builtin.fail:
+        msg: >-
+          CIFS não mapeado para {{ cifs_upload_label | default('upload') }}:
+          send_mail_cifs='{{ send_mail_cifs | default('') }}' não existe em send_mail_cifs_address.
+      when: (_cifs_upload_server | default('') | length) == 0
+
+    - name: CIFS | Garantir diretório temporário no host do smbclient
+      ansible.builtin.file:
+        path: "{{ _cifs_upload_stage_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: "{{ _cifs_upload_delegate }}"
+      become: false
+
+    - name: CIFS | Copiar arquivos para o host do smbclient
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ _cifs_upload_stage_dir }}/{{ item | basename }}"
+        mode: "0640"
+      loop: "{{ _cifs_upload_local_files_effective }}"
+      delegate_to: "{{ _cifs_upload_delegate }}"
+      become: false
+
+    - name: CIFS | Criar arquivo temporário de senha
+      ansible.builtin.copy:
+        dest: "{{ _cifs_upload_password_file }}"
+        content: "{{ _cifs_upload_pass }}"
+        mode: "0600"
+      delegate_to: "{{ _cifs_upload_delegate }}"
+      become: false
+      no_log: true
+
+    - name: CIFS | Testar acesso ao diretório remoto
+      ansible.builtin.shell: >
+        smbclient "{{ _cifs_upload_server }}"
+        -U "{{ _cifs_upload_user }}%$(cat {{ _cifs_upload_password_file }})"
+        -W "{{ _cifs_upload_workgroup }}"
+        -c "cd {{ _cifs_upload_dir }} ; ls"
+      register: _cifs_upload_probe
+      retries: 5
+      delay: 10
+      until: _cifs_upload_probe.rc == 0
+      changed_when: false
+      delegate_to: "{{ _cifs_upload_delegate }}"
+      become: false
+
+    - name: CIFS | Enviar arquivos para o CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _cifs_upload_server }}"
+        -U "{{ _cifs_upload_user }}%$(cat {{ _cifs_upload_password_file }})"
+        -W "{{ _cifs_upload_workgroup }}"
+        -c 'cd {{ _cifs_upload_dir }} ; put {{ _cifs_upload_stage_dir }}/{{ item | basename }} {{ item | basename }}'
+      loop: "{{ _cifs_upload_local_files_effective }}"
+      register: _cifs_upload_put
+      changed_when: true
+      delegate_to: "{{ _cifs_upload_delegate }}"
+      become: false
+
+    - name: CIFS | Publicar lista de arquivos remotos enviados
+      ansible.builtin.set_fact:
+        cifs_upload_remote_files: >-
+          {{
+            _cifs_upload_local_files_effective
+            | map('basename')
+            | list
+          }}
+
+  rescue:
+    - name: CIFS | Falhar upload CIFS
+      ansible.builtin.fail:
+        msg: >-
+          Falha ao publicar arquivos no CIFS para {{ cifs_upload_label | default('upload') }}.
+          Erro: {{ ansible_failed_result.msg | default(ansible_failed_result | to_json) }}
+      when: cifs_upload_fail_on_error | default(true) | bool
+
+    - name: CIFS | Avisar falha sem interromper execução
+      ansible.builtin.debug:
+        msg: >-
+          Não foi possível publicar arquivos no CIFS para {{ cifs_upload_label | default('upload') }}.
+          A execução principal continuará.
+          Erro: {{ ansible_failed_result.msg | default(ansible_failed_result | to_json) }}
+      when: not (cifs_upload_fail_on_error | default(true) | bool)
+
+  always:
+    - name: CIFS | Remover arquivo temporário de senha
+      ansible.builtin.file:
+        path: "{{ _cifs_upload_password_file | default('/tmp/.cifs-pass') }}"
+        state: absent
+      failed_when: false
+      no_log: true
+      delegate_to: "{{ _cifs_upload_delegate | default('localhost') }}"
+      become: false
+
+    - name: CIFS | Remover arquivos temporários do host do smbclient
+      ansible.builtin.file:
+        path: "{{ _cifs_upload_stage_dir | default('/tmp') }}/{{ item | basename }}"
+        state: absent
+      loop: "{{ _cifs_upload_local_files_effective | default([]) }}"
+      failed_when: false
+      delegate_to: "{{ _cifs_upload_delegate | default('localhost') }}"
+      become: false

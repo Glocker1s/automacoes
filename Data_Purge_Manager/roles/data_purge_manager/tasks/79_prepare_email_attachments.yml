@@ -1,0 +1,391 @@
+---
+- name: Anexos | Calcular limite e tamanho total dos arquivos de auditoria
+  ansible.builtin.set_fact:
+    _purge_audit_attachment_files: >-
+      {{
+        _audit_attachments_local
+        | default([])
+        | map('string')
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+
+    _purge_audit_attachment_limit_bytes: >-
+      {{
+        (
+          (purge_audit_attachment_safe_limit_mb | default(14) | float)
+          * 1024
+          * 1024
+        ) | int
+      }}
+
+    _purge_audit_attachment_original_total_bytes: >-
+      {{
+        (
+          (_audit_file_stats.results | default([]))
+          | selectattr('stat.exists', 'defined')
+          | selectattr('stat.exists')
+          | selectattr('stat.size', 'defined')
+          | map(attribute='stat.size')
+          | map('int')
+          | sum
+        ) | int
+      }}
+
+    _purge_audit_attachment_work_dir: >-
+      {{
+        purge_audit_attachment_work_dir
+        | default(
+            '/tmp/data-purge-email-attachments-'
+            ~ (tower_job_id | default(awx_job_id | default('local')))
+          )
+      }}
+
+    _purge_audit_attachment_archive_name: >-
+      {{
+        purge_audit_attachment_archive_filename
+        | default(
+            'data_purge_audit_'
+            ~ (tower_job_id | default(awx_job_id | default('local')))
+            ~ '.tar.gz'
+          )
+      }}
+
+- name: Anexos | Inicializar estratégia padrão de envio
+  ansible.builtin.set_fact:
+    _purge_audit_attachment_stage_dir: >-
+      {{ _purge_audit_attachment_work_dir }}/files
+
+    _purge_audit_attachment_archive_file: >-
+      {{
+        _purge_audit_attachment_work_dir
+        ~ '/'
+        ~ _purge_audit_attachment_archive_name
+      }}
+
+    _purge_audit_attachment_should_compress: >-
+      {{
+        (_purge_audit_attachment_files | length) > 0
+        and
+        (_purge_audit_attachment_original_total_bytes | int)
+        >
+        (_purge_audit_attachment_limit_bytes | int)
+      }}
+
+    # Comportamento padrão:
+    # arquivos separados são enviados ao CIFS e anexados ao e-mail.
+    _audit_attachments_to_upload: >-
+      {{ _purge_audit_attachment_files }}
+
+    _audit_attachment_email_basenames: >-
+      {{
+        _purge_audit_attachment_files
+        | map('basename')
+        | list
+      }}
+
+    purge_audit_attachment_action: >-
+      {{
+        'individual'
+        if (_purge_audit_attachment_files | length) > 0
+        else 'none'
+      }}
+
+    purge_audit_attachment_notice: ""
+
+    purge_audit_attachment_original_total_bytes: >-
+      {{ _purge_audit_attachment_original_total_bytes | int }}
+
+    purge_audit_attachment_final_total_bytes: >-
+      {{ _purge_audit_attachment_original_total_bytes | int }}
+
+    purge_audit_attachment_archive_name: ""
+
+    purge_audit_attachment_compacted: false
+
+    purge_audit_attachment_attached: >-
+      {{ (_purge_audit_attachment_files | length) > 0 }}
+
+    purge_audit_attachment_oversize: false
+
+- name: Anexos | Compactar arquivos acima do limite seguro
+  when:
+    - _purge_audit_attachment_should_compress | bool
+    - purge_audit_attachment_compress_enabled | default(true) | bool
+  block:
+    - name: Anexos | Remover área temporária de compactação anterior
+      ansible.builtin.file:
+        path: "{{ _purge_audit_attachment_work_dir }}"
+        state: absent
+
+    - name: Anexos | Criar diretório temporário para compactação
+      ansible.builtin.file:
+        path: "{{ _purge_audit_attachment_stage_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Anexos | Validar nomes únicos dos arquivos
+      ansible.builtin.assert:
+        that:
+          - >-
+            {{
+              (
+                _purge_audit_attachment_files
+                | map('basename')
+                | list
+                | length
+              )
+              ==
+              (
+                _purge_audit_attachment_files
+                | map('basename')
+                | list
+                | unique
+                | length
+              )
+            }}
+        fail_msg: >-
+          Existem arquivos de auditoria com o mesmo nome base.
+          A compactação foi cancelada para evitar sobrescrita de conteúdo.
+
+    - name: Anexos | Copiar arquivos para área temporária
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: >-
+          {{
+            _purge_audit_attachment_stage_dir
+            ~ '/'
+            ~ (item | basename)
+          }}
+        remote_src: true
+        mode: "0640"
+      loop: "{{ _purge_audit_attachment_files }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Anexos | Gerar pacote TAR.GZ
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -czf
+          - "{{ _purge_audit_attachment_archive_file }}"
+          - -C
+          - "{{ _purge_audit_attachment_stage_dir }}"
+          - .
+      register: _purge_audit_attachment_archive_cmd
+      changed_when: true
+
+    - name: Anexos | Verificar pacote gerado
+      ansible.builtin.stat:
+        path: "{{ _purge_audit_attachment_archive_file }}"
+      register: _purge_audit_attachment_archive_stat
+      changed_when: false
+
+    - name: Anexos | Validar pacote gerado
+      ansible.builtin.assert:
+        that:
+          - >-
+            {{
+              _purge_audit_attachment_archive_stat.stat.exists
+              | default(false)
+              | bool
+            }}
+          - >-
+            {{
+              (
+                _purge_audit_attachment_archive_stat.stat.size
+                | default(0)
+                | int
+              ) > 0
+            }}
+        fail_msg: >-
+          O pacote compactado não foi criado ou ficou vazio.
+
+    - name: Anexos | Definir uso do pacote compactado
+      ansible.builtin.set_fact:
+        # O pacote sempre será enviado para o CIFS.
+        _audit_attachments_to_upload:
+          - "{{ _purge_audit_attachment_archive_file }}"
+
+        # Somente será anexado ao e-mail se ficar dentro do limite.
+        _audit_attachment_email_basenames: >-
+          {{
+            [_purge_audit_attachment_archive_name]
+            if
+              (
+                _purge_audit_attachment_archive_stat.stat.size
+                | int
+              )
+              <=
+              (_purge_audit_attachment_limit_bytes | int)
+            else
+              []
+          }}
+
+        purge_audit_attachment_action: >-
+          {{
+            'compressed'
+            if
+              (
+                _purge_audit_attachment_archive_stat.stat.size
+                | int
+              )
+              <=
+              (_purge_audit_attachment_limit_bytes | int)
+            else
+              'cifs_only'
+          }}
+
+        purge_audit_attachment_notice: >-
+          {%- set original_mb =
+            (
+              (_purge_audit_attachment_original_total_bytes | float)
+              / 1048576
+            ) | round(2)
+          -%}
+          {%- set archive_mb =
+            (
+              (
+                _purge_audit_attachment_archive_stat.stat.size
+                | float
+              )
+              / 1048576
+            ) | round(2)
+          -%}
+          {%- set limit_mb =
+            purge_audit_attachment_safe_limit_mb
+            | default(14)
+          -%}
+          {%- if
+            (
+              _purge_audit_attachment_archive_stat.stat.size
+              | int
+            )
+            <=
+            (_purge_audit_attachment_limit_bytes | int)
+          -%}
+          Os arquivos de auditoria foram compactados automaticamente
+          de {{ original_mb }} MB para {{ archive_mb }} MB no pacote
+          {{ _purge_audit_attachment_archive_name }}.
+          {%- else -%}
+          O pacote compactado
+          {{ _purge_audit_attachment_archive_name }}
+          possui {{ archive_mb }} MB e ultrapassa o limite seguro de
+          {{ limit_mb }} MB. O e-mail será enviado sem anexos e o pacote
+          ficará disponível no CIFS em
+          {{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}.
+          {%- endif -%}
+
+        purge_audit_attachment_original_total_bytes: >-
+          {{ _purge_audit_attachment_original_total_bytes | int }}
+
+        purge_audit_attachment_final_total_bytes: >-
+          {{
+            _purge_audit_attachment_archive_stat.stat.size
+            | int
+          }}
+
+        purge_audit_attachment_archive_name: >-
+          {{ _purge_audit_attachment_archive_name }}
+
+        purge_audit_attachment_compacted: true
+
+        purge_audit_attachment_attached: >-
+          {{
+            (
+              _purge_audit_attachment_archive_stat.stat.size
+              | int
+            )
+            <=
+            (_purge_audit_attachment_limit_bytes | int)
+          }}
+
+        purge_audit_attachment_oversize: >-
+          {{
+            (
+              _purge_audit_attachment_archive_stat.stat.size
+              | int
+            )
+            >
+            (_purge_audit_attachment_limit_bytes | int)
+          }}
+
+  rescue:
+    - name: Anexos | Usar somente CIFS quando a compactação falhar
+      ansible.builtin.set_fact:
+        # Mantém os arquivos originais no CIFS.
+        _audit_attachments_to_upload: >-
+          {{ _purge_audit_attachment_files }}
+
+        # Não envia arquivos acima do limite por e-mail.
+        _audit_attachment_email_basenames: []
+
+        purge_audit_attachment_action: "compression_failed"
+
+        purge_audit_attachment_notice: >-
+          Não foi possível compactar os arquivos de auditoria acima do
+          limite seguro. O e-mail será enviado sem anexos e os arquivos
+          individuais ficarão disponíveis no CIFS em
+          {{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}.
+          Erro da compactação:
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result | to_json)
+          }}
+
+        purge_audit_attachment_original_total_bytes: >-
+          {{ _purge_audit_attachment_original_total_bytes | int }}
+
+        purge_audit_attachment_final_total_bytes: >-
+          {{ _purge_audit_attachment_original_total_bytes | int }}
+
+        purge_audit_attachment_archive_name: ""
+
+        purge_audit_attachment_compacted: false
+        purge_audit_attachment_attached: false
+        purge_audit_attachment_oversize: true
+
+  always:
+    - name: Anexos | Remover arquivos temporários usados na compactação
+      ansible.builtin.file:
+        path: "{{ _purge_audit_attachment_stage_dir }}"
+        state: absent
+      failed_when: false
+
+- name: Anexos | Usar somente CIFS quando compactação estiver desabilitada
+  ansible.builtin.set_fact:
+    _audit_attachments_to_upload: >-
+      {{ _purge_audit_attachment_files }}
+
+    _audit_attachment_email_basenames: []
+
+    purge_audit_attachment_action: "cifs_only"
+
+    purge_audit_attachment_notice: >-
+      Os arquivos de auditoria totalizam
+      {{
+        (
+          (_purge_audit_attachment_original_total_bytes | float)
+          / 1048576
+        ) | round(2)
+      }} MB e ultrapassam o limite seguro de
+      {{ purge_audit_attachment_safe_limit_mb | default(14) }} MB.
+      Como a compactação está desabilitada, o e-mail será enviado
+      sem anexos e os arquivos ficarão disponíveis no CIFS em
+      {{ send_mail_cifs_path | default('/Ansible/mail_attachments') }}.
+
+    purge_audit_attachment_original_total_bytes: >-
+      {{ _purge_audit_attachment_original_total_bytes | int }}
+
+    purge_audit_attachment_final_total_bytes: >-
+      {{ _purge_audit_attachment_original_total_bytes | int }}
+
+    purge_audit_attachment_archive_name: ""
+
+    purge_audit_attachment_compacted: false
+    purge_audit_attachment_attached: false
+    purge_audit_attachment_oversize: true
+  when:
+    - _purge_audit_attachment_should_compress | bool
+    - not (purge_audit_attachment_compress_enabled | default(true) | bool)

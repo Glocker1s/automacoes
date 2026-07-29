@@ -1,0 +1,94 @@
+---
+cm:
+  purge_manager:
+    applications:
+      lab_windows:
+        description: "Aplicação de teste Windows para Data Purge Manager"
+        allowed_prefixes:
+          windows:
+            - "C:\\PURGE_LAB"
+          linux: []
+
+        windows:
+          rules:
+            - name: "lab_windows_logs_30d"
+              description: "Teste Windows não recursivo com logs antigos"
+              paths:
+                - "C:\\PURGE_LAB\\app_windows_a\\logs"
+              patterns:
+                - "*.log"
+                - "*.txt"
+              exclude_patterns:
+                - "keep-*"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_windows_tmp_30d_non_recursive"
+              description: "Teste Windows não recursivo em tmp"
+              paths:
+                - "C:\\PURGE_LAB\\app_windows_a\\tmp"
+              patterns:
+                - "*.tmp"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_windows_recursive_30d"
+              description: "Teste Windows recursivo com remoção de diretórios vazios"
+              paths:
+                - "C:\\PURGE_LAB\\app_windows_b\\logs"
+              patterns:
+                - "*.log"
+                - "*.txt"
+              exclude_patterns:
+                - "keep-*"
+              age_days: 30
+              recursive: true
+              delete_empty_dirs: true
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_windows_exports_30d"
+              description: "Teste Windows exports CSV/ZIP antigos"
+              paths:
+                - "C:\\PURGE_LAB\\app_windows_b\\exports"
+              patterns:
+                - "*.csv"
+                - "*.zip"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_windows_missing_path"
+              description: "Teste Windows com path inexistente para validar warning"
+              paths:
+                - "C:\\PURGE_LAB\\path_que_nao_existe"
+              patterns:
+                - "*.log"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_windows_blocked_by_allowed_prefix"
+              description: "Teste Windows bloqueado por allowed_prefixes"
+              paths:
+                - "C:\\PURGE_LAB_BLOCKED"
+              patterns:
+                - "*.log"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+        linux:
+          rules: []

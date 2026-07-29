@@ -1,0 +1,272 @@
+{% macro human_bytes(value) -%}
+  {%- set b = value | default(0) | int -%}
+  {%- if b >= 1099511627776 -%}
+    {{ '%.2f' | format(b / 1099511627776) }} TB
+  {%- elif b >= 1073741824 -%}
+    {{ '%.2f' | format(b / 1073741824) }} GB
+  {%- elif b >= 1048576 -%}
+    {{ '%.2f' | format(b / 1048576) }} MB
+  {%- elif b >= 1024 -%}
+    {{ '%.2f' | format(b / 1024) }} KB
+  {%- else -%}
+    {{ b }} B
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro code(text) -%}
+  <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f5f5f5;color:#222222;padding:2px 5px;border-radius:2px;word-break:break-all;">{{ text | default('—') }}</span>
+{%- endmacro %}
+
+{% macro badge(text, kind='gray') -%}
+  {%- if kind == 'ok' -%}
+    <span style="display:inline-block;background-color:#e8f5e9;color:#1b5e20;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- elif kind == 'warn' -%}
+    <span style="display:inline-block;background-color:#fff3e0;color:#b26a00;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- elif kind == 'crit' -%}
+    <span style="display:inline-block;background-color:#ffebee;color:#b00020;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- else -%}
+    <span style="display:inline-block;background-color:#eeeeee;color:#333333;font-size:12px;font-weight:bold;padding:3px 7px;border-radius:2px;">{{ text }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro card(label, value, help='') -%}
+  <td valign="top" style="width:25%;border:1px solid #d9d9d9;padding:12px;font-family:Arial,sans-serif;color:#111111;">
+    <div style="font-size:12px;color:#666666;line-height:15px;">{{ label }}</div>
+    <div style="font-size:24px;font-weight:bold;color:#111111;margin-top:4px;line-height:28px;">{{ value }}</div>
+    {% if help | length > 0 %}
+      <div style="font-size:11px;color:#777777;margin-top:3px;line-height:14px;">{{ help }}</div>
+    {% endif %}
+  </td>
+{%- endmacro %}
+
+{% macro th(text, width='') -%}
+  <th {% if width | length > 0 %}width="{{ width }}"{% endif %} bgcolor="#f4f6f8" style="background-color:#f4f6f8;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+    {{ text }}
+  </th>
+{%- endmacro %}
+
+{% macro td_open() -%}
+  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+{%- endmacro %}
+
+{% set records = _savings_report_records | default([]) %}
+{% set total_bytes = _savings_total_deleted_bytes | default(0) | int %}
+{% set total_files = _savings_total_deleted_files | default(0) | int %}
+{% set total_failed = _savings_total_failed_files | default(0) | int %}
+{% set period_type = _savings_report_period | default('monthly') %}
+{% set period_label = _savings_report_period_label | default('—') %}
+
+{% set ns = namespace(hosts=[], envs=[], groups=[], months=[]) %}
+{% for r in records %}
+  {% if r.month | default('') | length > 0 and r.month not in ns.months %}
+    {% set _ = ns.months.append(r.month) %}
+  {% endif %}
+
+  {% for e in r.envs | default([]) %}
+    {% if e not in ns.envs %}
+      {% set _ = ns.envs.append(e) %}
+    {% endif %}
+  {% endfor %}
+
+  {% for g in r.groups | default([]) %}
+    {% if g not in ns.groups %}
+      {% set _ = ns.groups.append(g) %}
+    {% endif %}
+  {% endfor %}
+
+  {% for h in r.hosts | default([]) %}
+    {% if h.host | default('') | length > 0 and h.host not in ns.hosts %}
+      {% set _ = ns.hosts.append(h.host) %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td align="left" style="padding:8px 8px 12px 8px;">
+      <table role="presentation" width="1080" cellspacing="0" cellpadding="0" border="0" style="width:1080px;border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+        <tr>
+          <td bgcolor="#1f4d2b" style="background-color:#1f4d2b;padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                  <div style="font-size:18px;font-weight:bold;color:#ffffff;">
+                    {{ savings_report_title }}
+                  </div>
+                  <div style="font-size:13px;color:#f2f2f2;margin-top:4px;line-height:18px;">
+                    Período: <b>{{ 'Mensal' if period_type == 'monthly' else 'Anual' }}</b>
+                    &nbsp;|&nbsp; Referência: <b>{{ period_label }}</b>
+                    &nbsp;|&nbsp; Gerado em: <b>{{ _savings_report_generated_at }}</b>
+                  </div>
+                </td>
+                <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;padding-left:10px;">
+                  {{ badge('OK', 'ok') }}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+              <tr>
+                {{ card('Economia realizada', human_bytes(total_bytes), 'soma dos arquivos removidos com sucesso') }}
+                {{ card('Execuções contabilizadas', records | length, 'jobs apply com métrica') }}
+                {{ card('Arquivos removidos', total_files, 'total do período') }}
+                {{ card('Hosts impactados', ns.hosts | length, 'hosts únicos') }}
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;padding:12px 16px;font-family:Arial,sans-serif;color:#111111;">
+            <b>Ambiente(s):</b> {{ ns.envs | join(', ') if (ns.envs | length) > 0 else '—' }}<br/>
+            <b>Grupo(s):</b> {{ ns.groups | join(', ') if (ns.groups | length) > 0 else '—' }}<br/>
+            <b>Falhas de remoção registradas:</b> {{ total_failed }}<br/>
+
+            {% if period_type == 'monthly' %}
+              <b>Arquivo consolidado mensal:</b>
+              {% if _savings_monthly_consolidated_file | default('') | length > 0 %}
+                {{ code(_savings_monthly_consolidated_file) }}
+              {% else %}
+                —
+              {% endif %}
+              <br/>
+              <b>Fonte dos dados:</b>
+              {% if _savings_report_source_type | default('raw') == 'monthly_consolidated' %}
+                consolidado mensal existente
+              {% else %}
+                métricas brutas do mês
+              {% endif %}
+            {% else %}
+              <b>Arquivo consolidado anual:</b>
+              {% if _savings_yearly_consolidated_file | default('') | length > 0 %}
+                {{ code(_savings_yearly_consolidated_file) }}
+              {% else %}
+                —
+              {% endif %}
+              <br/>
+              <b>Fonte dos dados:</b>
+              {% if _savings_report_source_type | default('') == 'yearly_consolidated' %}
+                consolidado anual existente
+              {% else %}
+                consolidados mensais / fallback bruto
+              {% endif %}
+              <br/>
+              <b>Consolidados mensais encontrados:</b> {{ _savings_monthly_files | default([]) | length }}<br/>
+              <b>Métricas brutas usadas como fallback:</b> {{ _savings_raw_fallback_files | default([]) | length }}<br/>
+              <b>Meses sem consolidado mensal:</b>
+              {% if _savings_missing_months | default([]) | length > 0 %}
+                {{ _savings_missing_months | join(', ') }}
+              {% else %}
+                —
+              {% endif %}
+            {% endif %}
+          </td>
+        </tr>
+
+        {% if records | length == 0 %}
+          <tr>
+            <td style="padding:16px;border:1px solid #d9d9d9;font-family:Arial,sans-serif;color:#666666;">
+              Nenhuma métrica de expurgo foi encontrada para o período {{ period_label }}.
+            </td>
+          </tr>
+        {% else %}
+
+          {% if period_type == 'annual' %}
+            <tr>
+              <td style="padding-top:16px;">
+                <div style="font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+                  Resumo por mês
+                </div>
+
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                  <tr>
+                    {{ th('Mês', '130') }}
+                    {{ th('Execuções', '130') }}
+                    {{ th('Arquivos removidos', '180') }}
+                    {{ th('Economia realizada') }}
+                  </tr>
+
+                  {% for month in _savings_report_year_months | default([]) %}
+                    {% set m = namespace(bytes=0, files=0, executions=0) %}
+
+                    {% for r in records %}
+                      {% if r.month | default('') == month %}
+                        {% set m.bytes = m.bytes + (r.total_deleted_bytes | default(0) | int) %}
+                        {% set m.files = m.files + (r.total_deleted_files | default(0) | int) %}
+                        {% set m.executions = m.executions + 1 %}
+                      {% endif %}
+                    {% endfor %}
+
+                    <tr>
+                      {{ td_open() }}
+                        {{ month[4:6] }}/{{ month[0:4] }}
+                      </td>
+                      {{ td_open() }}
+                        <b>{{ m.executions }}</b>
+                      </td>
+                      {{ td_open() }}
+                        <b>{{ m.files }}</b>
+                      </td>
+                      {{ td_open() }}
+                        <b style="color:#1b5e20;">{{ human_bytes(m.bytes) }}</b>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </table>
+              </td>
+            </tr>
+          {% endif %}
+
+          {% if period_type == 'monthly' %}
+            <tr>
+              <td style="padding-top:16px;">
+                <div style="font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+                  Resumo por execução
+                </div>
+
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                  <tr>
+                    {{ th('Job', '90') }}
+                    {{ th('Data', '190') }}
+                    {{ th('Ambiente', '130') }}
+                    {{ th('Grupo', '180') }}
+                    {{ th('Arquivos', '100') }}
+                    {{ th('Economia', '130') }}
+                    {{ th('Status') }}
+                  </tr>
+
+                  {% for r in records %}
+                    <tr>
+                      {{ td_open() }}{{ code(r.job_id | default('—')) }}</td>
+                      {{ td_open() }}{{ r.generated_at | default('—') }}</td>
+                      {{ td_open() }}{{ r.envs | default([]) | join(', ') }}</td>
+                      {{ td_open() }}{{ r.groups | default([]) | join(', ') }}</td>
+                      {{ td_open() }}<b>{{ r.total_deleted_files | default(0) }}</b></td>
+                      {{ td_open() }}<b style="color:#1b5e20;">{{ human_bytes(r.total_deleted_bytes | default(0)) }}</b></td>
+                      {{ td_open() }}
+                        {% if r.status | default('success') == 'success' %}
+                          {{ badge('success', 'ok') }}
+                        {% elif r.status | default('') == 'partial' %}
+                          {{ badge('partial', 'warn') }}
+                        {% else %}
+                          {{ badge(r.status | default('—'), 'gray') }}
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </table>
+              </td>
+            </tr>
+          {% endif %}
+
+        {% endif %}
+
+      </table>
+    </td>
+  </tr>
+</table>

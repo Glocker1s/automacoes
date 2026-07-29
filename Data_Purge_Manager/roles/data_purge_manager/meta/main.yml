@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: data_purge_manager
+  author: Alex Cardoso
+  description: Gerenciamento de expurgo de dados em servidores Windows e Linux.
+  min_ansible_version: "2.14"
+  license: internal
+
+dependencies: []

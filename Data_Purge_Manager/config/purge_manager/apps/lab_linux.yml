@@ -1,0 +1,98 @@
+---
+cm:
+  purge_manager:
+    applications:
+      lab_linux:
+        description: "Aplicação de teste Linux para Data Purge Manager"
+        allowed_prefixes:
+          linux:
+            - "/opt/purge-lab"
+          windows: []
+
+        linux:
+          rules:
+            - name: "lab_linux_logs_30d"
+              description: "Teste Linux não recursivo com logs antigos"
+              hosts:
+                - 192.168.122.165
+              paths:
+                - "/opt/purge-lab/app_linux_a/logs"
+              patterns:
+                - "*.log"
+                - "*.txt"
+              exclude_patterns:
+                - "keep-*"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_linux_tmp_30d_non_recursive"
+              description: "Teste Linux não recursivo em tmp"
+              hosts:
+                - 192.168.122.34
+              paths:
+                - "/opt/purge-lab/app_linux_a/tmp"
+              patterns:
+                - "*.tmp"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "modules"
+
+            - name: "lab_linux_recursive_30d"
+              description: "Teste Linux recursivo com remoção de diretórios vazios"
+              paths:
+                - "/opt/purge-lab/app_linux_b/logs"
+              patterns:
+                - "*.log"
+                - "*.txt"
+              exclude_patterns:
+                - "keep-*"
+              age_days: 30
+              recursive: true
+              delete_empty_dirs: true
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_linux_exports_30d"
+              description: "Teste Linux exports CSV/ZIP antigos"
+              paths:
+                - "/opt/purge-lab/app_linux_b/exports"
+              patterns:
+                - "*.csv"
+                - "*.zip"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "modules"
+
+            - name: "lab_linux_missing_path"
+              description: "Teste Linux com path inexistente para validar warning"
+              paths:
+                - "/opt/purge-lab/path_que_nao_existe"
+              patterns:
+                - "*.log"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+            - name: "lab_linux_blocked_by_allowed_prefix"
+              description: "Teste Linux bloqueado por allowed_prefixes"
+              paths:
+                - "/tmp/purge-lab-blocked"
+              patterns:
+                - "*.log"
+              age_days: 30
+              recursive: false
+              delete_empty_dirs: false
+              enabled: true
+              engine: "shell"
+
+        windows:
+          rules: []

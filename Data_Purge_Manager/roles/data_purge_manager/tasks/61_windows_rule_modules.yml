@@ -1,0 +1,511 @@
+---
+- name: Windows | Executar regra por módulos
+  block:
+    - name: Windows | Inicializar variáveis da regra
+      ansible.builtin.set_fact:
+        _rule_name: "{{ purge_rule.name | default('regra_sem_nome') }}"
+        _rule_description: "{{ purge_rule.description | default('') }}"
+        _rule_application: "{{ purge_rule.application | default('global') }}"
+        _rule_environment: "{{ purge_rule.environment | default('global') }}"
+        _rule_source: "{{ purge_rule.source | default('application') }}"
+        _rule_paths: []
+        _rule_patterns: []
+        _rule_exclude_patterns: []
+        _rule_allowed_prefixes: []
+        _rule_age_days: 0
+        _rule_recursive: false
+        _rule_delete_empty_dirs: false
+        _rule_apply_enabled: "{{ purge_apply_enabled | default(false) | bool }}"
+        _rule_fatal_errors: []
+        _path_validation: {}
+        _windows_allowed_paths: []
+        _windows_blocked_paths: []
+        _windows_existing_paths: []
+        _windows_missing_paths: []
+        _windows_find_result:
+          files: []
+        _candidate_files_raw: []
+        _candidate_files: []
+        _windows_delete_result:
+          results: []
+        _windows_empty_dir_result:
+          results: []
+        _deleted_files_count: 0
+        _failed_files_count: 0
+        _matched_bytes_count: 0
+        _deleted_bytes_count: 0
+        _removed_empty_dirs_count: 0
+        _failed_empty_dirs_count: 0
+        _rule_status: "ok"
+
+    - name: Windows | Normalizar regra
+      ansible.builtin.set_fact:
+        _rule_paths: >-
+          {{
+            (
+              [purge_rule.paths]
+              if (purge_rule.paths is defined and purge_rule.paths is string)
+              else (purge_rule.paths | default([]))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_patterns: >-
+          {{
+            (
+              [purge_rule.patterns]
+              if (purge_rule.patterns is defined and purge_rule.patterns is string)
+              else (purge_rule.patterns | default(['*']))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_exclude_patterns: >-
+          {{
+            (
+              [purge_rule.exclude_patterns]
+              if (purge_rule.exclude_patterns is defined and purge_rule.exclude_patterns is string)
+              else (purge_rule.exclude_patterns | default([]))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_allowed_prefixes: >-
+          {{
+            (
+              [purge_rule.allowed_prefixes]
+              if (purge_rule.allowed_prefixes is defined and purge_rule.allowed_prefixes is string)
+              else (purge_rule.allowed_prefixes | default([]))
+            )
+            | map('string')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+        _rule_age_days: "{{ purge_rule.age_days | default(0) | int }}"
+        _rule_recursive: "{{ purge_rule.recursive | default(false) | bool }}"
+        _rule_delete_empty_dirs: "{{ purge_rule.delete_empty_dirs | default(purge_delete_empty_dirs_default | default(false)) | bool }}"
+
+    - name: Windows | Validar campos obrigatórios da regra
+      ansible.builtin.set_fact:
+        _rule_fatal_errors: >-
+          {%- set errors = [] -%}
+          {%- if _rule_paths | length == 0 -%}
+            {%- set _ = errors.append('Regra sem paths definidos.') -%}
+          {%- endif -%}
+          {%- if _rule_patterns | length == 0 -%}
+            {%- set _ = errors.append('Regra sem patterns definidos.') -%}
+          {%- endif -%}
+          {%- if (_rule_age_days | int) <= 0 -%}
+            {%- set _ = errors.append('age_days precisa ser maior que zero.') -%}
+          {%- endif -%}
+          {{ errors }}
+
+    - name: Windows | Validar paths permitidos
+      ansible.builtin.set_fact:
+        _path_validation_json: >-
+          {%- set allowed = [] -%}
+          {%- set blocked = [] -%}
+          {%- set forbidden_raw = purge_forbidden_paths_windows | default([]) | map('string') | list -%}
+          {%- set forbidden = [] -%}
+          {%- for fp in forbidden_raw -%}
+            {%- set fpn = fp | trim -%}
+            {%- if fpn | length > 3 and (fpn.endswith('\\') or fpn.endswith('/')) -%}
+              {%- set fpn = fpn | regex_replace('[\\\\/]+$', '') -%}
+            {%- endif -%}
+            {%- set _ = forbidden.append(fpn | lower) -%}
+          {%- endfor -%}
+          {%- set prefixes = _rule_allowed_prefixes | default([]) -%}
+          {%- set enforce_prefixes = purge_enforce_allowed_prefixes | default(true) | bool -%}
+          {%- set prefixes_required = purge_allowed_prefixes_required | default(false) | bool -%}
+
+          {%- for raw_path in _rule_paths | default([]) -%}
+            {%- set p = raw_path | string | trim -%}
+            {%- if p | length > 3 and (p.endswith('\\') or p.endswith('/')) -%}
+              {%- set p = p | regex_replace('[\\\\/]+$', '') -%}
+            {%- endif -%}
+            {%- set pl = p | lower -%}
+            {%- set ns = namespace(is_allowed=true, reason='') -%}
+
+            {%- if p == '' -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path vazio.' -%}
+            {%- elif (p | length) < (purge_min_path_length_windows | default(6) | int) -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path menor que o tamanho mínimo permitido.' -%}
+            {%- elif pl in forbidden -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'Path proibido por forbidden_paths.' -%}
+            {%- elif enforce_prefixes and prefixes_required and (prefixes | length == 0) -%}
+              {%- set ns.is_allowed = false -%}
+              {%- set ns.reason = 'allowed_prefixes obrigatório, mas não definido para a aplicação/regra.' -%}
+            {%- elif enforce_prefixes and (prefixes | length > 0) -%}
+              {%- set pfx = namespace(match=false) -%}
+              {%- for pref_raw in prefixes -%}
+                {%- set pref = pref_raw | string | trim -%}
+                {%- if pref | length > 3 and (pref.endswith('\\') or pref.endswith('/')) -%}
+                  {%- set pref = pref | regex_replace('[\\\\/]+$', '') -%}
+                {%- endif -%}
+                {%- set prefl = pref | lower -%}
+                {%- if pl == prefl or pl.startswith(prefl ~ '\\') or pl.startswith(prefl ~ '/') -%}
+                  {%- set pfx.match = true -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- if not pfx.match -%}
+                {%- set ns.is_allowed = false -%}
+                {%- set ns.reason = 'Path fora dos allowed_prefixes permitidos.' -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- if ns.is_allowed -%}
+              {%- set _ = allowed.append(p) -%}
+            {%- else -%}
+              {%- set _ = blocked.append({'path': p, 'reason': ns.reason}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'allowed': allowed | unique | list, 'blocked': blocked} | to_json }}
+
+    - name: Windows | Publicar paths permitidos/bloqueados
+      ansible.builtin.set_fact:
+        _path_validation: "{{ _path_validation_json | from_json }}"
+        _windows_allowed_paths: "{{ (_path_validation_json | from_json).allowed | default([]) }}"
+        _windows_blocked_paths: "{{ (_path_validation_json | from_json).blocked | default([]) }}"
+
+    - name: Windows | Verificar existência dos paths permitidos
+      ansible.windows.win_stat:
+        path: "{{ item }}"
+      loop: "{{ _windows_allowed_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _windows_stat_result
+      failed_when: false
+      changed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _windows_allowed_paths | length > 0
+
+    - name: Windows | Definir paths existentes e ausentes
+      ansible.builtin.set_fact:
+        _windows_paths_state_json: >-
+          {%- set existing = [] -%}
+          {%- set missing = [] -%}
+          {%- for r in _windows_stat_result.results | default([]) -%}
+            {%- if r.stat.exists | default(false) and r.stat.isdir | default(false) -%}
+              {%- set _ = existing.append(r.item) -%}
+            {%- elif not (r.stat.exists | default(false)) -%}
+              {%- set _ = missing.append({'path': r.item, 'reason': 'Path não encontrado.'}) -%}
+            {%- else -%}
+              {%- set _ = missing.append({'path': r.item, 'reason': 'Path existe, mas não é diretório.'}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'existing': existing, 'missing': missing} | to_json }}
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Windows | Publicar paths existentes e ausentes
+      ansible.builtin.set_fact:
+        _windows_existing_paths: '{{ (_windows_paths_state_json | default(''{"existing": [], "missing": []}'') | from_json).existing | default([]) }}'
+        _windows_missing_paths: '{{ (_windows_paths_state_json | default(''{"existing": [], "missing": []}'') | from_json).missing | default([]) }}'
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Windows | Encontrar arquivos candidatos
+      ansible.windows.win_find:
+        paths: "{{ _windows_existing_paths }}"
+        patterns: "{{ _rule_patterns }}"
+        age: "{{ _rule_age_days }}d"
+        age_stamp: mtime
+        recurse: "{{ _rule_recursive | bool }}"
+        file_type: file
+        get_checksum: false
+      register: _windows_find_result
+      changed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _windows_existing_paths | length > 0
+
+    - name: Windows | Definir candidatos brutos
+      ansible.builtin.set_fact:
+        _candidate_files_raw: "{{ _windows_find_result.files | default([]) }}"
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Windows | Filtrar exclusões por glob simples
+      ansible.builtin.set_fact:
+        _candidate_files_json: >-
+          {%- set out = [] -%}
+          {%- set excludes = _rule_exclude_patterns | default([]) -%}
+          {%- for f in _candidate_files_raw | default([]) -%}
+            {%- set name = f.filename | default(f.path | regex_replace('^.*[\\\\/]', '')) -%}
+            {%- set ns = namespace(excluded=false) -%}
+            {%- for pat_raw in excludes -%}
+              {%- set pat = pat_raw | string -%}
+              {%- if pat == '*' -%}
+                {%- set ns.excluded = true -%}
+              {%- elif pat.startswith('*') and pat.endswith('*') and (pat | length > 2) -%}
+                {%- if pat[1:-1] in name -%}
+                  {%- set ns.excluded = true -%}
+                {%- endif -%}
+              {%- elif pat.startswith('*') and (pat | length > 1) -%}
+                {%- if name.endswith(pat[1:]) -%}
+                  {%- set ns.excluded = true -%}
+                {%- endif -%}
+              {%- elif pat.endswith('*') and (pat | length > 1) -%}
+                {%- if name.startswith(pat[:-1]) -%}
+                  {%- set ns.excluded = true -%}
+                {%- endif -%}
+              {%- elif name == pat -%}
+                {%- set ns.excluded = true -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {%- if not ns.excluded -%}
+              {%- set _ = out.append(f) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Windows | Publicar candidatos filtrados
+      ansible.builtin.set_fact:
+        _candidate_files: "{{ _candidate_files_json | default('[]') | from_json }}"
+      when:
+        - _rule_fatal_errors | length == 0
+
+    - name: Windows | Remover arquivos candidatos
+      ansible.windows.win_file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ _candidate_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: _windows_delete_result
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _rule_apply_enabled | bool
+        - _candidate_files | length > 0
+
+    - name: Windows | Remover somente diretórios vazios quando solicitado
+      ansible.windows.win_powershell:
+        script: |
+          param(
+            [string]$Root
+          )
+
+          if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+            return
+          }
+
+          Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            ForEach-Object {
+              $children = @(Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue)
+              if ($children.Count -eq 0) {
+                $path = $_.FullName
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path -LiteralPath $path)) {
+                  Write-Output $path
+                }
+              }
+            }
+        parameters:
+          Root: "{{ item }}"
+      loop: "{{ _windows_existing_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _windows_empty_dir_result
+      changed_when: (_windows_empty_dir_result.output | default([]) | length) > 0
+      failed_when: false
+      when:
+        - _rule_fatal_errors | length == 0
+        - _rule_apply_enabled | bool
+        - _rule_recursive | bool
+        - _rule_delete_empty_dirs | bool
+        - _windows_existing_paths | length > 0
+
+    - name: Windows | Calcular contadores
+      ansible.builtin.set_fact:
+        _deleted_files_count: >-
+          {{
+            _windows_delete_result.results
+            | default([])
+            | selectattr('changed', 'defined')
+            | selectattr('changed')
+            | list
+            | length
+          }}
+        _failed_files_count: >-
+          {{
+            _windows_delete_result.results
+            | default([])
+            | selectattr('failed', 'defined')
+            | selectattr('failed')
+            | list
+            | length
+          }}
+        _removed_empty_dirs_count: >-
+          {{
+            _windows_empty_dir_result.results
+            | default([])
+            | map(attribute='output')
+            | map('default', [])
+            | map('length')
+            | sum
+          }}
+        _failed_empty_dirs_count: >-
+          {{
+            _windows_empty_dir_result.results
+            | default([])
+            | selectattr('failed', 'defined')
+            | selectattr('failed')
+            | list
+            | length
+          }}
+        _matched_bytes_count: >-
+          {{
+            _candidate_files
+            | default([])
+            | map(attribute='size')
+            | map('default', 0)
+            | map('int')
+            | sum
+          }}
+        _deleted_bytes_count: >-
+          {%- set ns = namespace(total=0) -%}
+          {%- for r in _windows_delete_result.results | default([]) -%}
+            {%- if r.changed | default(false) -%}
+              {%- set ns.total = ns.total + (r.item.size | default(0) | int) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.total }}
+
+    - name: Windows | Anexar arquivos removidos no TXT de auditoria
+      ansible.windows.win_shell: |
+        $AuditFile = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ (_purge_audit_remote_file | default('')) | b64encode }}"))
+        $AuditHost = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ inventory_hostname | b64encode }}"))
+        $AuditRule = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ _rule_name | b64encode }}"))
+        $FilePath = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{{ (item.item.path | default('')) | b64encode }}"))
+        $FileBytes = "{{ item.item.size | default(0) | int }}"
+        $Tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("E. South America Standard Time")
+        $Now = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $Tz).ToString("dd/MM/yyyy HH:mm:ss") + " America/Sao_Paulo"
+
+        $Line = "{0} | host={1} | sistema=windows | regra={2} | bytes={3} | arquivo={4}" -f $Now, $AuditHost, $AuditRule, $FileBytes, $FilePath
+        Add-Content -LiteralPath $AuditFile -Value $Line -Encoding UTF8
+      loop: "{{ _windows_delete_result.results | default([]) }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - _rule_apply_enabled | bool
+        - item.changed | default(false)
+        - _purge_audit_remote_file is defined
+        - purge_deleted_files_audit_enabled | default(true) | bool
+
+    - name: Windows | Definir status da regra
+      ansible.builtin.set_fact:
+        _rule_status: >-
+          {%- if _rule_fatal_errors | length > 0 -%}
+          blocked
+          {%- elif (_windows_allowed_paths | length == 0) and (_windows_blocked_paths | length > 0) -%}
+          blocked
+          {%- elif (_failed_files_count | int > 0) or (_failed_empty_dirs_count | int > 0) -%}
+          failed
+          {%- elif (_windows_blocked_paths | length > 0) -%}
+          warning
+          {%- else -%}
+          ok
+          {%- endif -%}
+
+    - name: Windows | Adicionar linha ao relatório
+      ansible.builtin.set_fact:
+        purge_host_report: >-
+          {{
+            purge_host_report | combine(
+              {
+                'rows': (purge_host_report.rows | default([])) + [
+                  {
+                    'rule': _rule_name,
+                    'description': _rule_description,
+                    'application': _rule_application,
+                    'environment': _rule_environment,
+                    'source': _rule_source,
+                    'os': 'windows',
+                    'status': _rule_status | trim,
+                    'fatal_errors': _rule_fatal_errors,
+                    'age_days': _rule_age_days,
+                    'recursive': _rule_recursive,
+                    'delete_empty_dirs': _rule_delete_empty_dirs,
+                    'apply': _rule_apply_enabled,
+                    'patterns': _rule_patterns,
+                    'exclude_patterns': _rule_exclude_patterns,
+                    'paths_total': _rule_paths | length,
+                    'paths_allowed': _windows_allowed_paths | length,
+                    'paths_existing': _windows_existing_paths | length,
+                    'blocked_paths': _windows_blocked_paths,
+                    'missing_paths': _windows_missing_paths,
+                    'matched_files': _candidate_files | length,
+                    'deleted_files': _deleted_files_count | int,
+                    'failed_files': _failed_files_count | int,
+                    'matched_bytes': _matched_bytes_count | int,
+                    'deleted_bytes': _deleted_bytes_count | int,
+                    'removed_empty_dirs': _removed_empty_dirs_count | int,
+                    'failed_empty_dirs': _failed_empty_dirs_count | int,
+                    'samples': (_candidate_files | map(attribute='path') | list)[:(purge_report_sample_limit | default(10) | int)]
+                  }
+                ]
+              },
+              recursive=True
+            )
+          }}
+
+  rescue:
+    - name: Windows | Registrar falha técnica da regra
+      ansible.builtin.set_fact:
+        purge_host_report: >-
+          {{
+            purge_host_report | combine(
+              {
+                'rows': (purge_host_report.rows | default([])) + [
+                  {
+                    'rule': purge_rule.name | default('regra_sem_nome'),
+                    'description': purge_rule.description | default(''),
+                    'application': purge_rule.application | default('global'),
+                    'environment': purge_rule.environment | default('global'),
+                    'source': purge_rule.source | default('application'),
+                    'os': 'windows',
+                    'status': 'failed',
+                    'fatal_errors': [
+                      ansible_failed_result.msg
+                      | default(ansible_failed_result.stderr | default(ansible_failed_result.stdout | default('Erro técnico não mapeado.')))
+                    ],
+                    'age_days': purge_rule.age_days | default(0),
+                    'recursive': purge_rule.recursive | default(false),
+                    'delete_empty_dirs': purge_rule.delete_empty_dirs | default(false),
+                    'apply': purge_apply_enabled | default(false),
+                    'patterns': purge_rule.patterns | default([]),
+                    'exclude_patterns': purge_rule.exclude_patterns | default([]),
+                    'paths_total': (purge_rule.paths | default([])) | length,
+                    'paths_allowed': 0,
+                    'paths_existing': 0,
+                    'blocked_paths': [],
+                    'missing_paths': [],
+                    'matched_files': 0,
+                    'deleted_files': 0,
+                    'failed_files': 1,
+                    'matched_bytes': 0,
+                    'deleted_bytes': 0,
+                    'removed_empty_dirs': 0,
+                    'failed_empty_dirs': 0,
+                    'samples': []
+                  }
+                ]
+              },
+              recursive=True
+            )
+          }}
