@@ -160,28 +160,36 @@
         - _rule_fatal_errors | length == 0
         - _linux_allowed_paths | length > 0
 
-    - name: Linux shell rule | Definir paths existentes e ausentes
+    - name: Linux shell rule | Definir paths existentes, ausentes e com erro
       ansible.builtin.set_fact:
         _linux_path_status_json: >-
           {%- set existing = [] -%}
           {%- set missing = [] -%}
+          {%- set path_errors = [] -%}
           {%- for r in _linux_path_stats.results | default([]) -%}
-            {%- if (r.stat.exists | default(false)) and (r.stat.isdir | default(false)) -%}
+            {%- set raw_message = ((r.msg | default('') | string) ~ ' ' ~ (r.stderr | default('') | string) ~ ' ' ~ (r.module_stderr | default('') | string)) | trim -%}
+            {%- set result_message = raw_message | lower -%}
+            {%- if 'permission denied' in result_message or 'operation not permitted' in result_message or 'access denied' in result_message or 'acesso negado' in result_message -%}
+              {%- set _ = path_errors.append('path: ' ~ (r.item | string) ~ ' - acesso negado durante a validação') -%}
+            {%- elif (r.stat.exists | default(false)) and (r.stat.isdir | default(false)) -%}
               {%- set _ = existing.append(r.item) -%}
+            {%- elif (r.failed | default(false)) or (raw_message | length > 0) -%}
+              {%- set _ = path_errors.append('path: ' ~ (r.item | string) ~ ' - falha ao validar o path: ' ~ (raw_message if raw_message | length > 0 else 'erro não identificado')) -%}
             {%- elif not (r.stat.exists | default(false)) -%}
               {%- set _ = missing.append({'path': r.item, 'reason': 'path não encontrado'}) -%}
             {%- else -%}
               {%- set _ = missing.append({'path': r.item, 'reason': 'path não é diretório'}) -%}
             {%- endif -%}
           {%- endfor -%}
-          {{ {'existing': existing, 'missing': missing} | to_json }}
+          {{ {'existing': existing, 'missing': missing, 'path_errors': path_errors} | to_json }}
       when:
         - _rule_fatal_errors | length == 0
 
-    - name: Linux shell rule | Publicar paths existentes e ausentes
+    - name: Linux shell rule | Publicar paths existentes, ausentes e com erro
       ansible.builtin.set_fact:
-        _linux_existing_paths: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": []}'') | from_json).existing | default([]) }}'
-        _linux_missing_paths: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": []}'') | from_json).missing | default([]) }}'
+        _linux_existing_paths: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": [], "path_errors": []}'') | from_json).existing | default([]) }}'
+        _linux_missing_paths: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": [], "path_errors": []}'') | from_json).missing | default([]) }}'
+        _linux_path_errors: '{{ (_linux_path_status_json | default(''{"existing": [], "missing": [], "path_errors": []}'') | from_json).path_errors | default([]) }}'
       when:
         - _rule_fatal_errors | length == 0
 
@@ -447,7 +455,8 @@
       ansible.builtin.set_fact:
         _linux_shell_errors: >-
           {{
-            (_linux_shell_scan_errors | default([]))
+            (_linux_path_errors | default([]))
+            + (_linux_shell_scan_errors | default([]))
             + (_linux_shell_delete_errors | default([]))
             + (_linux_shell_empty_dirs_errors | default([]))
           }}
@@ -467,6 +476,8 @@
           blocked
           {%- elif (_linux_allowed_paths | length == 0) and (_linux_blocked_paths | length > 0) -%}
           blocked
+          {%- elif (_linux_path_errors | default([]) | length) > 0 -%}
+          failed
           {%- elif (_linux_shell_failed_files | int) > 0 or (_linux_shell_failed_empty_dirs | int) > 0 or (_linux_shell_errors | length) > 0 -%}
           failed
           {%- elif (_rule_apply_enabled | bool) and (_linux_shell_matched_files | int > 0) and (_linux_shell_deleted_files | int == 0) and (_linux_shell_failed_files | int == 0) -%}
@@ -481,6 +492,8 @@
           {{ _rule_fatal_errors | join(' ') }}
           {%- elif (_linux_allowed_paths | length == 0) and (_linux_blocked_paths | length > 0) -%}
           todos os paths da regra foram bloqueados por segurança
+          {%- elif (_linux_path_errors | default([]) | length) > 0 -%}
+          falha ao validar um ou mais paths
           {%- elif (_linux_shell_failed_files | int) > 0 or (_linux_shell_failed_empty_dirs | int) > 0 or (_linux_shell_errors | length) > 0 -%}
           uma ou mais operações shell falharam
           {%- elif (_rule_apply_enabled | bool) and (_linux_shell_matched_files | int > 0) and (_linux_shell_deleted_files | int == 0) and (_linux_shell_failed_files | int == 0) -%}
