@@ -1,0 +1,10 @@
+---
+- name: Failure Policy | Falhar quando houver divergência e política estiver habilitada
+  ansible.builtin.fail:
+    msg: >-
+      Foram encontradas divergências críticas no Quay Sync Manager.
+      Status final: {{ quay_final_summary.status_counts | default({}) }}.
+      Verifique o relatório
+  when:
+    - quay_fail_job_on_divergence | default(false) | bool
+    - (quay_final_summary.has_divergence | default(false)) | bool

@@ -1,0 +1,92 @@
+---
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Definir contexto da API
+  ansible.builtin.set_fact:
+    _quay_repo_base_url: "{{ quay_source_url if _quay_repo_side == 'source' else quay_target_url }}"
+    _quay_repo_token: "{{ quay_source.token if _quay_repo_side == 'source' else quay_target.token }}"
+    _quay_repo_validate_certs: "{{ quay_source_validate_certs if _quay_repo_side == 'source' else quay_target_validate_certs }}"
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Montar URL da página
+  ansible.builtin.set_fact:
+    _quay_repo_page_url: >-
+      {{ _quay_repo_base_url }}/api/v1/repository?public=true&starred=false&namespace={{ _quay_repo_namespace | urlencode }}&last_modified=true{% if (_quay_repo_next_page | default('') | string | length) > 0 %}&next_page={{ _quay_repo_next_page | urlencode }}{% endif %}
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Consultar página {{ _quay_repo_current_page_index }}
+  ansible.builtin.uri:
+    url: "{{ _quay_repo_page_url }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _quay_repo_token }}"
+      Accept: "application/json"
+    validate_certs: "{{ _quay_repo_validate_certs }}"
+    return_content: true
+    status_code:
+      - 200
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  register: _quay_repo_page_response
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Acumular página no PRD
+  ansible.builtin.set_fact:
+    _quay_source_repository_page_results: >-
+      {{
+        (_quay_source_repository_page_results | default([])) +
+        [
+          _quay_repo_page_response | combine({
+            'side': _quay_repo_side,
+            'namespace': _quay_repo_namespace,
+            'page_index': _quay_repo_current_page_index
+          })
+        ]
+      }}
+  when:
+    - _quay_repo_side == 'source'
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Acumular página no DR
+  ansible.builtin.set_fact:
+    _quay_target_repository_page_results: >-
+      {{
+        (_quay_target_repository_page_results | default([])) +
+        [
+          _quay_repo_page_response | combine({
+            'side': _quay_repo_side,
+            'namespace': _quay_repo_namespace,
+            'page_index': _quay_repo_current_page_index
+          })
+        ]
+      }}
+  when:
+    - _quay_repo_side == 'target'
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Atualizar next_page
+  ansible.builtin.set_fact:
+    _quay_repo_next_page: "{{ _quay_repo_page_response.json.next_page | default('', true) }}"
+    _quay_repo_current_page_index: "{{ (_quay_repo_current_page_index | int) + 1 }}"
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Exibir paginação
+  ansible.builtin.debug:
+    msg:
+      - "Side: {{ _quay_repo_side }}"
+      - "Namespace: {{ _quay_repo_namespace }}"
+      - "Página consultada: {{ (_quay_repo_current_page_index | int) - 1 }}"
+      - "Repositories retornados: {{ _quay_repo_page_response.json.repositories | default([]) | length }}"
+      - "Possui próxima página: {{ (_quay_repo_next_page | string | length) > 0 }}"
+  when:
+    - quay_debug_enabled | bool
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Falhar se limite de paginação for atingido
+  ansible.builtin.fail:
+    msg: >-
+      O discovery de repositories atingiu quay_repository_max_pages={{ quay_repository_max_pages }}
+      para o namespace {{ _quay_repo_namespace }} no lado {{ _quay_repo_side }},
+      mas a API ainda retornou next_page.
+      Isso indica que a listagem pode estar incompleta. Aumente quay_repository_max_pages.
+  when:
+    - quay_fail_on_repository_pagination_limit_reached | bool
+    - (_quay_repo_next_page | string | length) > 0
+    - (_quay_repo_current_page_index | int) > (quay_repository_max_pages | int)
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Coletar próxima página
+  ansible.builtin.include_tasks: 22_collect_repository_page.yml
+  when:
+    - (_quay_repo_next_page | string | length) > 0
+    - (_quay_repo_current_page_index | int) <= (quay_repository_max_pages | int)

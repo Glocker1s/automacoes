@@ -1,0 +1,115 @@
+---
+- name: Tags {{ quay_compare_stage }} | Inicializar estruturas de coleta
+  ansible.builtin.set_fact:
+    _quay_source_tag_results: []
+    _quay_target_tag_results: []
+    _quay_source_next_page_repositories: "{{ quay_mirror_configs | default([]) }}"
+    _quay_target_next_page_repositories: "{{ quay_mirror_configs | default([]) }}"
+    _quay_tag_current_page: 1
+
+- name: Tags {{ quay_compare_stage }} | Coletar tags com paginação
+  ansible.builtin.include_tasks: 41_collect_tags_page.yml
+  when:
+    - (quay_mirror_configs | default([]) | length) > 0
+
+- name: Tags {{ quay_compare_stage }} | Normalizar tags coletadas
+  ansible.builtin.set_fact:
+    _quay_source_tag_records_json: >-
+      {%- set out = [] -%}
+      {%- set seen = [] -%}
+      {%- for r in (_quay_source_tag_results | default([])) -%}
+        {%- set repo = r.item.repository -%}
+        {%- if (r.status | default(0) | int) == 200 -%}
+          {%- for t in (r.json.tags | default([])) -%}
+            {%- set tag_name = t.name | default('') -%}
+            {%- set key = repo ~ '::' ~ tag_name -%}
+            {%- if tag_name | length > 0 and key not in seen -%}
+              {%- set _ = seen.append(key) -%}
+              {%- set _ = out.append({
+                'side': 'source',
+                'repository': repo,
+                'namespace': r.item.namespace,
+                'repo_name': r.item.name,
+                'tag': tag_name,
+                'manifest_digest': t.manifest_digest | default(t.digest | default(t.image_id | default(''))),
+                'last_modified': t.last_modified | default(''),
+                'start_ts': t.start_ts | default(''),
+                'end_ts': t.end_ts | default('')
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    _quay_target_tag_records_json: >-
+      {%- set out = [] -%}
+      {%- set seen = [] -%}
+      {%- for r in (_quay_target_tag_results | default([])) -%}
+        {%- set repo = r.item.repository -%}
+        {%- if (r.status | default(0) | int) == 200 -%}
+          {%- for t in (r.json.tags | default([])) -%}
+            {%- set tag_name = t.name | default('') -%}
+            {%- set key = repo ~ '::' ~ tag_name -%}
+            {%- if tag_name | length > 0 and key not in seen -%}
+              {%- set _ = seen.append(key) -%}
+              {%- set _ = out.append({
+                'side': 'target',
+                'repository': repo,
+                'namespace': r.item.namespace,
+                'repo_name': r.item.name,
+                'tag': tag_name,
+                'manifest_digest': t.manifest_digest | default(t.digest | default(t.image_id | default(''))),
+                'last_modified': t.last_modified | default(''),
+                'start_ts': t.start_ts | default(''),
+                'end_ts': t.end_ts | default('')
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Tags {{ quay_compare_stage }} | Publicar tags normalizadas atuais
+  ansible.builtin.set_fact:
+    quay_current_source_tag_records: "{{ _quay_source_tag_records_json | from_json }}"
+    quay_current_target_tag_records: "{{ _quay_target_tag_records_json | from_json }}"
+
+- name: Tags {{ quay_compare_stage }} | Registrar erros de coleta
+  ansible.builtin.set_fact:
+    quay_current_tag_collection_errors_json: >-
+      {%- set out = [] -%}
+      {%- for r in (_quay_source_tag_results | default([])) -%}
+        {%- if (r.status | default(0) | int) not in [200] -%}
+          {%- set _ = out.append({
+            'side': 'source',
+            'repository': r.item.repository,
+            'http_status': r.status | default(0),
+            'message': r.json.detail | default(r.json.error_message | default(r.msg | default('Falha ao coletar tags no PRD')))
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for r in (_quay_target_tag_results | default([])) -%}
+        {%- if (r.status | default(0) | int) not in [200] -%}
+          {%- set _ = out.append({
+            'side': 'target',
+            'repository': r.item.repository,
+            'http_status': r.status | default(0),
+            'message': r.json.detail | default(r.json.error_message | default(r.msg | default('Falha ao coletar tags no DR')))
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Tags {{ quay_compare_stage }} | Publicar erros de coleta atuais
+  ansible.builtin.set_fact:
+    quay_current_tag_collection_errors: "{{ quay_current_tag_collection_errors_json | from_json }}"
+
+- name: Tags {{ quay_compare_stage }} | Exibir resumo
+  ansible.builtin.debug:
+    msg:
+      - "Tags PRD coletadas: {{ quay_current_source_tag_records | length }}"
+      - "Tags DR coletadas : {{ quay_current_target_tag_records | length }}"
+      - "Erros de coleta : {{ quay_current_tag_collection_errors | length }}"
+      - "Paginação inteligente: {{ quay_tag_pagination_stop_when_page_not_full | bool }}"
+      - "Limite por página: {{ quay_tag_page_limit | int }}"
+      - "Máximo de páginas: {{ quay_max_pages | int }}"

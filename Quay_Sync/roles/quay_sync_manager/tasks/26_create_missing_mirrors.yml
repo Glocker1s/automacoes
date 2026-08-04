@@ -1,0 +1,213 @@
+---
+- name: Auto mirror | Validar configuração para criação automática
+  ansible.builtin.assert:
+    that:
+      - quay_auto_mirror_robot_short_name | string | trim | length > 0
+      - quay_auto_mirror_external_reference_prefix | string | trim | length > 0
+      - quay_auto_mirror_root_rule.rule_kind | default('') | string | trim | length > 0
+      - quay_auto_mirror_root_rule.rule_value | default([]) | length > 0
+      - not (quay_auto_mirror_source_credentials_required | default(true) | bool) or (quay_auto_mirror_source_username | string | trim | length > 0)
+      - not (quay_auto_mirror_source_credentials_required | default(true) | bool) or (quay_auto_mirror_source_password | string | trim | length > 0)
+    fail_msg: >-
+      Configuração incompleta para criação automática de mirrors. Valide
+      quay_auto_mirror_external_reference_prefix, robot, root_rule e credencial padrão do PRD.
+
+- name: Auto mirror | Definir namespaces e data inicial do sync
+  ansible.builtin.set_fact:
+    _quay_auto_mirror_namespaces: "{{ quay_missing_mirror_repositories | map(attribute='namespace') | unique | list }}"
+    _quay_auto_mirror_sync_start_date: >-
+      {{ lookup('ansible.builtin.pipe', "date -u '+%Y-%m-%dT%H:%M:%SZ'") }}
+
+- name: Auto mirror | Consultar robot padrão no DR
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/organization/{{ item | urlencode }}/robots/{{ quay_auto_mirror_robot_short_name | urlencode }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code: [200, 400, 404]
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ _quay_auto_mirror_namespaces }}"
+  loop_control:
+    label: "{{ item }}+{{ quay_auto_mirror_robot_short_name }}"
+  register: _quay_auto_mirror_robot_lookup
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Auto mirror | Validar respostas da consulta dos robots
+  ansible.builtin.fail:
+    msg: >-
+      Falha inesperada ao consultar o robot
+      {{ item.item }}+{{ quay_auto_mirror_robot_short_name }} no DR.
+      HTTP={{ item.status | default(0) }}.
+      Mensagem={{ (item.json | default({})).get('message', item.msg | default('Sem detalhes')) }}.
+  loop: "{{ _quay_auto_mirror_robot_lookup.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}+{{ quay_auto_mirror_robot_short_name }}"
+  when:
+    - (item.status | default(0) | int) != 200
+    - (item.status | default(0) | int) != 404
+    - not (
+        (item.status | default(0) | int) == 400
+        and
+        'could not find robot with specified username' in
+        ((item.json | default({})).get('message', '') | lower)
+      )
+
+- name: Auto mirror | Identificar namespaces sem robot
+  ansible.builtin.set_fact:
+    _quay_auto_mirror_missing_robot_namespaces_json: >-
+      {%- set out = [] -%}
+      {%- for r in (_quay_auto_mirror_robot_lookup.results | default([])) -%}
+        {%- set status = r.status | default(0) | int -%}
+        {%- set message = (r.json | default({})).get('message', '') | lower -%}
+        {%- if status == 404 or (status == 400 and 'could not find robot with specified username' in message) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Auto mirror | Publicar namespaces sem robot
+  ansible.builtin.set_fact:
+    _quay_auto_mirror_missing_robot_namespaces: "{{ _quay_auto_mirror_missing_robot_namespaces_json | from_json }}"
+
+- name: Auto mirror | Falhar se robots estiverem ausentes e criação automática estiver desabilitada
+  ansible.builtin.fail:
+    msg: >-
+      Os seguintes robots não existem no DR:
+      {% for namespace in _quay_auto_mirror_missing_robot_namespaces %}
+      {{ namespace }}+{{ quay_auto_mirror_robot_short_name }}{% if not loop.last %}, {% endif %}
+      {% endfor %}.
+      Crie os robots ou habilite quay_auto_mirror_robot_auto_create.
+  when:
+    - _quay_auto_mirror_missing_robot_namespaces | length > 0
+    - not (quay_auto_mirror_robot_auto_create | bool)
+
+- name: Auto mirror | Criar robots ausentes no DR
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/organization/{{ item | urlencode }}/robots/{{ quay_auto_mirror_robot_short_name | urlencode }}"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      description: "{{ quay_auto_mirror_robot_description }}"
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code: [200, 201]
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ _quay_auto_mirror_missing_robot_namespaces }}"
+  loop_control:
+    label: "{{ item }}+{{ quay_auto_mirror_robot_short_name }}"
+  register: _quay_auto_mirror_robot_create
+  when:
+    - quay_auto_mirror_robot_auto_create | bool
+    - _quay_auto_mirror_missing_robot_namespaces | length > 0
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Auto mirror | Criar repositories ausentes no DR
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/repository"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      repository: "{{ item.name }}"
+      namespace: "{{ item.namespace }}"
+      visibility: "{{ quay_auto_mirror_repository_visibility }}"
+      description: "{{ quay_auto_mirror_repository_description }}"
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code: [201]
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ quay_missing_mirror_repositories }}"
+  loop_control:
+    label: "{{ item.repository }}"
+  register: _quay_auto_mirror_repository_create
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Auto mirror | Conceder permissão do robot nos novos repositories
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/repository/{{ item.repository }}/permissions/user/{{ (item.namespace ~ '+' ~ quay_auto_mirror_robot_short_name) | urlencode }}"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      role: "{{ quay_auto_mirror_robot_repository_role }}"
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code: [200]
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ quay_missing_mirror_repositories }}"
+  loop_control:
+    label: "{{ item.repository }} -> {{ item.namespace }}+{{ quay_auto_mirror_robot_short_name }}"
+  register: _quay_auto_mirror_permission
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Auto mirror | Criar configuração de mirror nos novos repositories
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/repository/{{ item.repository }}/mirror"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body: >-
+      {{
+        {
+          'is_enabled': quay_auto_mirror_enabled | bool,
+          'external_reference': (quay_auto_mirror_external_reference_prefix | regex_replace('/+$', '')) ~ '/' ~ item.repository,
+          'external_registry_username': quay_auto_mirror_source_username | trim,
+          'external_registry_password': quay_auto_mirror_source_password,
+          'external_registry_config': quay_auto_mirror_external_registry_config,
+          'sync_start_date': _quay_auto_mirror_sync_start_date,
+          'sync_interval': quay_auto_mirror_sync_interval | int,
+          'robot_username': item.namespace ~ '+' ~ quay_auto_mirror_robot_short_name,
+          'skopeo_timeout_interval': quay_auto_mirror_skopeo_timeout_interval | int,
+          'root_rule': quay_auto_mirror_root_rule
+        } | to_json
+      }}
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code: [201]
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ quay_missing_mirror_repositories }}"
+  loop_control:
+    label: "{{ item.repository }}"
+  register: _quay_auto_mirror_config_create
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Auto mirror | Publicar repositories criados
+  ansible.builtin.set_fact:
+    quay_auto_mirror_created_repositories: >-
+      {{
+        _quay_auto_mirror_config_create.results
+        | default([])
+        | selectattr('status', 'equalto', 201)
+        | map(attribute='item.repository')
+        | list
+      }}
+
+- name: Auto mirror | Publicar total criado
+  ansible.builtin.set_fact:
+    quay_auto_mirror_created_count: "{{ quay_auto_mirror_created_repositories | length }}"
+
+- name: Auto mirror | Exibir resumo da criação
+  ansible.builtin.debug:
+    msg:
+      - "Namespaces avaliados: {{ _quay_auto_mirror_namespaces | length }}"
+      - "Robots ausentes identificados: {{ _quay_auto_mirror_missing_robot_namespaces | length }}"
+      - "Robots criados: {{ _quay_auto_mirror_robot_create.results | default([]) | length }}"
+      - "Mirrors solicitados para criação: {{ quay_missing_mirror_repositories | length }}"
+      - "Mirrors criados no DR: {{ quay_auto_mirror_created_count }}"
+      - "Repositories criados: {{ quay_auto_mirror_created_repositories }}"

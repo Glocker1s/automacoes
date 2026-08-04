@@ -1,0 +1,8 @@
+---
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Inicializar paginação
+  ansible.builtin.set_fact:
+    _quay_repo_current_page_index: 1
+    _quay_repo_next_page: ""
+
+- name: Repository discovery | {{ _quay_repo_side }} | {{ _quay_repo_namespace }} | Coletar primeira página
+  ansible.builtin.include_tasks: 22_collect_repository_page.yml

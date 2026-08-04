@@ -1,0 +1,52 @@
+---
+- name: Missing mirror | Comparar repositories PRD x DR
+  ansible.builtin.set_fact:
+    _quay_missing_mirror_analysis_json: >-
+      {%- set target_map = {} -%}
+      {%- set missing = [] -%}
+      {%- set conflicts = [] -%}
+      {%- set existing = [] -%}
+      {%- for t in (quay_target_repositories | default([])) -%}
+        {%- set _ = target_map.update({t.repository: t}) -%}
+      {%- endfor -%}
+      {%- for s in (quay_source_repositories | default([])) -%}
+        {%- set repo = s.repository -%}
+        {%- if repo not in target_map -%}
+          {%- set _ = missing.append(s) -%}
+        {%- elif (target_map[repo].state | default('')) == 'MIRROR' -%}
+          {%- set _ = existing.append(s) -%}
+        {%- else -%}
+          {%- set _ = conflicts.append({
+            'repository': repo,
+            'namespace': s.namespace,
+            'name': s.name,
+            'target_state': target_map[repo].state | default('UNKNOWN')
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ {
+        'missing': missing,
+        'conflicts': conflicts,
+        'existing': existing
+      } | to_json }}
+
+- name: Missing mirror | Publicar resultado da detecção
+  ansible.builtin.set_fact:
+    quay_missing_mirror_repositories: "{{ (_quay_missing_mirror_analysis_json | from_json).missing }}"
+    quay_target_non_mirror_conflicts: "{{ (_quay_missing_mirror_analysis_json | from_json).conflicts }}"
+    quay_existing_mirror_repositories: "{{ (_quay_missing_mirror_analysis_json | from_json).existing }}"
+    quay_missing_mirror_repositories_initial: >-
+      {{ quay_missing_mirror_repositories_initial | default((_quay_missing_mirror_analysis_json | from_json).missing) }}
+
+- name: Missing mirror | Inicializar resultado de criação automática
+  ansible.builtin.set_fact:
+    quay_auto_mirror_created_repositories: "{{ quay_auto_mirror_created_repositories | default([]) }}"
+    quay_auto_mirror_created_count: "{{ quay_auto_mirror_created_count | default(0) }}"
+
+- name: Missing mirror | Exibir resumo
+  ansible.builtin.debug:
+    msg:
+      - "Repositories PRD avaliados: {{ quay_source_repositories | length }}"
+      - "Mirrors já existentes no DR: {{ quay_existing_mirror_repositories | length }}"
+      - "Mirrors ausentes no DR: {{ quay_missing_mirror_repositories | length }}"
+      - "Repositories existentes no DR sem state MIRROR: {{ quay_target_non_mirror_conflicts | length }}"

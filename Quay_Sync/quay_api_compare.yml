@@ -1,0 +1,629 @@
+---
+- name: Comparar Quay PRD x Quay DR por repository mirror, tag e digest
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - quay_api_vars.yml
+
+  vars:
+    quay_repository_page_limit: 100
+    quay_tag_page_limit: 100
+    quay_output_dir: "./quay_api_validation_output"
+    quay_hide_sensitive_logs: false
+    quay_fail_job_on_divergence: false
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - quay_source is defined
+          - quay_target is defined
+          - quay_source.url is defined
+          - quay_target.url is defined
+          - quay_source.token is defined
+          - quay_target.token is defined
+          - quay_discovery_namespaces is defined
+          - quay_discovery_namespaces | length > 0
+        fail_msg: "Variáveis obrigatórias ausentes. Verifique quay_source, quay_target e quay_discovery_namespaces."
+
+    - name: Normalizar URLs dos Quays
+      ansible.builtin.set_fact:
+        quay_source_url: "{{ quay_source.url | regex_replace('/+$', '') }}"
+        quay_target_url: "{{ quay_target.url | regex_replace('/+$', '') }}"
+        quay_source_validate_certs: "{{ quay_source.validate_certs | default(true) | bool }}"
+        quay_target_validate_certs: "{{ quay_target.validate_certs | default(true) | bool }}"
+
+    - name: Criar diretório local de saída
+      ansible.builtin.file:
+        path: "{{ quay_output_dir }}"
+        state: directory
+        mode: "0755"
+
+    ###########################################################################
+    # 1. Validar API básica
+    ###########################################################################
+
+    - name: Validar discovery da API do Quay PRD
+      ansible.builtin.uri:
+        url: "{{ quay_source_url }}/api/v1/discovery"
+        method: GET
+        validate_certs: "{{ quay_source_validate_certs }}"
+        return_content: false
+        status_code:
+          - 200
+
+    - name: Validar discovery da API do Quay DR
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/discovery"
+        method: GET
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: false
+        status_code:
+          - 200
+
+    ###########################################################################
+    # 2. Listar repositórios por namespace
+    ###########################################################################
+
+    - name: Listar repositórios visíveis no PRD por namespace
+      ansible.builtin.uri:
+        url: "{{ quay_source_url }}/api/v1/repository?namespace={{ item | urlencode }}&last_modified=true"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_source.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_source_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+      loop: "{{ quay_discovery_namespaces }}"
+      loop_control:
+        label: "{{ item }}"
+      register: quay_source_repositories_response
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Listar repositórios visíveis no DR por namespace
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository?namespace={{ item | urlencode }}&last_modified=true"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+      loop: "{{ quay_discovery_namespaces }}"
+      loop_control:
+        label: "{{ item }}"
+      register: quay_target_repositories_response
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Inicializar listas de repositórios
+      ansible.builtin.set_fact:
+        quay_source_repositories: []
+        quay_target_repositories: []
+
+    - name: Normalizar repositórios do PRD
+      ansible.builtin.set_fact:
+        quay_source_repositories: "{{ quay_source_repositories + (item.json.repositories | default([])) }}"
+      loop: "{{ quay_source_repositories_response.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('namespace') }}"
+
+    - name: Normalizar repositórios do DR
+      ansible.builtin.set_fact:
+        quay_target_repositories: "{{ quay_target_repositories + (item.json.repositories | default([])) }}"
+      loop: "{{ quay_target_repositories_response.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('namespace') }}"
+
+    ###########################################################################
+    # 3. Descobrir repository mirrors no DR
+    ###########################################################################
+
+    - name: Inicializar lista de repositories mirrored no DR
+      ansible.builtin.set_fact:
+        quay_target_mirror_repositories: []
+
+    - name: Filtrar repositórios com state MIRROR no DR
+      ansible.builtin.set_fact:
+        quay_target_mirror_repositories: "{{ quay_target_mirror_repositories + [item] }}"
+      loop: "{{ quay_target_repositories }}"
+      loop_control:
+        label: "{{ item.namespace | default('') }}/{{ item.name | default('') }}"
+      when:
+        - item.state is defined
+        - item.state == "MIRROR"
+
+    - name: Exibir resumo do discovery
+      ansible.builtin.debug:
+        msg:
+          - "Quay PRD: {{ quay_source_url }}"
+          - "Quay DR : {{ quay_target_url }}"
+          - "Namespaces avaliados: {{ quay_discovery_namespaces | join(', ') }}"
+          - "Repositórios visíveis no PRD: {{ quay_source_repositories | length }}"
+          - "Repositórios visíveis no DR : {{ quay_target_repositories | length }}"
+          - "Repositórios MIRROR encontrados no DR: {{ quay_target_mirror_repositories | length }}"
+
+    - name: Falhar se nenhum mirror repository for encontrado
+      ansible.builtin.fail:
+        msg: "Nenhum repositório MIRROR foi encontrado no DR para os namespaces informados."
+      when: quay_target_mirror_repositories | length == 0
+
+    ###########################################################################
+    # 4. Coletar mirror config dos repos mirrored
+    ###########################################################################
+
+    - name: Consultar mirror config dos repositórios mirrored no DR
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item.namespace }}/{{ item.name }}/mirror"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 403
+          - 404
+      loop: "{{ quay_target_mirror_repositories }}"
+      loop_control:
+        label: "{{ item.namespace }}/{{ item.name }}"
+      register: quay_mirror_config_results
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Inicializar mirror configs
+      ansible.builtin.set_fact:
+        quay_mirror_configs: []
+
+    - name: Normalizar mirror configs
+      ansible.builtin.set_fact:
+        quay_mirror_configs: >-
+          {{
+            quay_mirror_configs +
+            [
+              {
+                "repository": item.item.namespace ~ "/" ~ item.item.name,
+                "namespace": item.item.namespace,
+                "name": item.item.name,
+                "http_status": item.status | default(0),
+                "mirror_found": (item.status | default(0)) == 200,
+                "is_enabled": item.json.is_enabled | default(None),
+                "mirror_type": item.json.mirror_type | default(""),
+                "external_reference": item.json.external_reference | default(""),
+                "sync_interval": item.json.sync_interval | default(None),
+                "sync_status": item.json.sync_status | default(""),
+                "sync_retries_remaining": item.json.sync_retries_remaining | default(None),
+                "robot_username": item.json.robot_username | default(""),
+                "root_rule": item.json.root_rule | default({}),
+                "raw": item.json | default({})
+              }
+            ]
+          }}
+      loop: "{{ quay_mirror_config_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.namespace }}/{{ item.item.name }}"
+      when: item.status | default(0) == 200
+
+    - name: Exibir mirror configs
+      ansible.builtin.debug:
+        msg:
+          repository: "{{ item.repository }}"
+          is_enabled: "{{ item.is_enabled }}"
+          mirror_type: "{{ item.mirror_type }}"
+          sync_status: "{{ item.sync_status }}"
+          root_rule: "{{ item.root_rule }}"
+          external_reference: "{{ item.external_reference }}"
+      loop: "{{ quay_mirror_configs }}"
+      loop_control:
+        label: "{{ item.repository }}"
+
+    ###########################################################################
+    # 5. Coletar tags no PRD e no DR para os repos mirrored
+    ###########################################################################
+
+    - name: Coletar tags no PRD dos repositórios mirrored
+      ansible.builtin.uri:
+        url: "{{ quay_source_url }}/api/v1/repository/{{ item.repository }}/tag/?onlyActiveTags=true&limit={{ quay_tag_page_limit }}&page=1"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_source.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_source_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 403
+          - 404
+      loop: "{{ quay_mirror_configs }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      register: quay_source_tag_results
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Coletar tags no DR dos repositórios mirrored
+      ansible.builtin.uri:
+        url: "{{ quay_target_url }}/api/v1/repository/{{ item.repository }}/tag/?onlyActiveTags=true&limit={{ quay_tag_page_limit }}&page=1"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ quay_target.token }}"
+          Accept: "application/json"
+        validate_certs: "{{ quay_target_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+          - 403
+          - 404
+      loop: "{{ quay_mirror_configs }}"
+      loop_control:
+        label: "{{ item.repository }}"
+      register: quay_target_tag_results
+      no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+    - name: Inicializar tag records
+      ansible.builtin.set_fact:
+        quay_source_tag_records: []
+        quay_target_tag_records: []
+
+    - name: Normalizar tags do PRD
+      ansible.builtin.set_fact:
+        quay_source_tag_records: >-
+          {{
+            quay_source_tag_records +
+            [
+              {
+                "side": "source",
+                "repository": item.0.item.repository,
+                "namespace": item.0.item.namespace,
+                "repo_name": item.0.item.name,
+                "tag": item.1.name | default(""),
+                "manifest_digest": item.1.manifest_digest | default(""),
+                "last_modified": item.1.last_modified | default(""),
+                "raw": item.1
+              }
+            ]
+          }}
+      loop: "{{ quay_source_tag_results.results | default([]) | subelements('json.tags', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.item.repository }}:{{ item.1.name | default('') }}"
+      when:
+        - item.0.status | default(0) == 200
+        - item.1.name is defined
+
+    - name: Normalizar tags do DR
+      ansible.builtin.set_fact:
+        quay_target_tag_records: >-
+          {{
+            quay_target_tag_records +
+            [
+              {
+                "side": "target",
+                "repository": item.0.item.repository,
+                "namespace": item.0.item.namespace,
+                "repo_name": item.0.item.name,
+                "tag": item.1.name | default(""),
+                "manifest_digest": item.1.manifest_digest | default(""),
+                "last_modified": item.1.last_modified | default(""),
+                "raw": item.1
+              }
+            ]
+          }}
+      loop: "{{ quay_target_tag_results.results | default([]) | subelements('json.tags', skip_missing=True) }}"
+      loop_control:
+        label: "{{ item.0.item.repository }}:{{ item.1.name | default('') }}"
+      when:
+        - item.0.status | default(0) == 200
+        - item.1.name is defined
+
+    - name: Exibir resumo de tags coletadas
+      ansible.builtin.debug:
+        msg:
+          - "Tags coletadas no PRD: {{ quay_source_tag_records | length }}"
+          - "Tags coletadas no DR : {{ quay_target_tag_records | length }}"
+
+    ###########################################################################
+    # 6. Comparar com Python local para suportar glob tipo release-*
+    ###########################################################################
+
+    - name: Salvar entrada da comparação em JSON
+      ansible.builtin.copy:
+        dest: "{{ quay_output_dir }}/quay_compare_input.json"
+        mode: "0644"
+        content: >-
+          {{
+            {
+              "source": {
+                "name": quay_source.name | default("PRD"),
+                "url": quay_source_url
+              },
+              "target": {
+                "name": quay_target.name | default("DR"),
+                "url": quay_target_url
+              },
+              "discovery_namespaces": quay_discovery_namespaces,
+              "mirror_configs": quay_mirror_configs,
+              "source_tag_records": quay_source_tag_records,
+              "target_tag_records": quay_target_tag_records
+            } | to_nice_json
+          }}
+
+    - name: Criar script local de comparação
+      ansible.builtin.copy:
+        dest: "{{ quay_output_dir }}/compare_quay_tags.py"
+        mode: "0755"
+        content: |
+          #!/usr/bin/env python3
+          import csv
+          import fnmatch
+          import json
+          import sys
+          from collections import Counter, defaultdict
+
+          input_path = sys.argv[1]
+          output_json_path = sys.argv[2]
+          output_csv_path = sys.argv[3]
+
+          with open(input_path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          mirror_configs = data.get("mirror_configs", [])
+          source_tags = data.get("source_tag_records", [])
+          target_tags = data.get("target_tag_records", [])
+
+          mirror_by_repo = {m["repository"]: m for m in mirror_configs}
+
+          source_by_repo_tag = {
+              (t["repository"], t["tag"]): t
+              for t in source_tags
+          }
+
+          target_by_repo_tag = {
+              (t["repository"], t["tag"]): t
+              for t in target_tags
+          }
+
+          target_tags_by_repo = defaultdict(list)
+          source_tags_by_repo = defaultdict(list)
+
+          for t in target_tags:
+              target_tags_by_repo[t["repository"]].append(t)
+
+          for t in source_tags:
+              source_tags_by_repo[t["repository"]].append(t)
+
+          def normalize_patterns(root_rule):
+              if not isinstance(root_rule, dict):
+                  return ["*"]
+
+              rule_kind = root_rule.get("rule_kind", "")
+              rule_value = root_rule.get("rule_value", [])
+
+              if rule_kind != "tag_glob_csv":
+                  return ["*"]
+
+              if isinstance(rule_value, str):
+                  rule_value = [x.strip() for x in rule_value.split(",") if x.strip()]
+
+              if not rule_value:
+                  return ["*"]
+
+              return rule_value
+
+          def tag_matches_filter(tag_name, root_rule):
+              patterns = normalize_patterns(root_rule)
+
+              for pattern in patterns:
+                  if pattern == "*":
+                      return True
+
+                  if fnmatch.fnmatchcase(tag_name, pattern):
+                      return True
+
+              return False
+
+          def digest_value(tag_record):
+              return (
+                  tag_record.get("manifest_digest")
+                  or tag_record.get("digest")
+                  or tag_record.get("image_id")
+                  or ""
+              )
+
+          rows = []
+
+          for mirror in mirror_configs:
+              repo = mirror["repository"]
+              root_rule = mirror.get("root_rule", {})
+              source_repo_tags = source_tags_by_repo.get(repo, [])
+
+              if not source_repo_tags:
+                  rows.append({
+                      "repository": repo,
+                      "tag": "",
+                      "status": "SOURCE_REPOSITORY_EMPTY_OR_INACCESSIBLE",
+                      "severity": "warning",
+                      "mirror_status": mirror.get("sync_status", ""),
+                      "mirror_enabled": mirror.get("is_enabled"),
+                      "filter": ",".join(normalize_patterns(root_rule)),
+                      "source_digest": "",
+                      "target_digest": "",
+                      "message": "Nenhuma tag foi retornada no PRD para este repository."
+                  })
+                  continue
+
+              for src in source_repo_tags:
+                  tag = src["tag"]
+                  key = (repo, tag)
+                  tgt = target_by_repo_tag.get(key)
+
+                  source_digest = digest_value(src)
+                  target_digest = digest_value(tgt or {})
+
+                  should_sync = tag_matches_filter(tag, root_rule)
+
+                  if not should_sync:
+                      if tgt:
+                          status = "OUT_OF_FILTER_PRESENT_ON_TARGET"
+                          severity = "info"
+                          message = "Tag não casa com filtro do mirror, mas existe no DR."
+                      else:
+                          status = "SKIPPED_BY_FILTER"
+                          severity = "info"
+                          message = "Tag não casa com filtro do mirror; ausência no DR é esperada."
+                  else:
+                      if not tgt:
+                          status = "MISSING_TAG"
+                          severity = "critical"
+                          message = "Tag deveria estar no DR, mas não foi encontrada."
+                      elif not source_digest or not target_digest:
+                          status = "DIGEST_UNAVAILABLE"
+                          severity = "warning"
+                          message = "Tag existe nos dois lados, mas não foi possível comparar digest."
+                      elif source_digest != target_digest:
+                          status = "DIGEST_MISMATCH"
+                          severity = "critical"
+                          message = "Tag existe nos dois lados, mas aponta para digest diferente."
+                      else:
+                          status = "OK"
+                          severity = "ok"
+                          message = "Tag sincronizada com digest igual."
+
+                  rows.append({
+                      "repository": repo,
+                      "tag": tag,
+                      "status": status,
+                      "severity": severity,
+                      "mirror_status": mirror.get("sync_status", ""),
+                      "mirror_enabled": mirror.get("is_enabled"),
+                      "filter": ",".join(normalize_patterns(root_rule)),
+                      "source_digest": source_digest,
+                      "target_digest": target_digest,
+                      "message": message
+                  })
+
+              source_tag_names = {t["tag"] for t in source_repo_tags}
+              for tgt in target_tags_by_repo.get(repo, []):
+                  if tgt["tag"] not in source_tag_names:
+                      rows.append({
+                          "repository": repo,
+                          "tag": tgt["tag"],
+                          "status": "EXTRA_TAG_ON_TARGET",
+                          "severity": "warning",
+                          "mirror_status": mirror.get("sync_status", ""),
+                          "mirror_enabled": mirror.get("is_enabled"),
+                          "filter": ",".join(normalize_patterns(root_rule)),
+                          "source_digest": "",
+                          "target_digest": digest_value(tgt),
+                          "message": "Tag existe no DR, mas não foi encontrada no PRD."
+                      })
+
+          counts = Counter(row["status"] for row in rows)
+          severity_counts = Counter(row["severity"] for row in rows)
+
+          sync_candidate_statuses = {
+              "MISSING_TAG",
+              "DIGEST_MISMATCH",
+              "DIGEST_UNAVAILABLE",
+          }
+
+          sync_candidate_repositories = sorted({
+              row["repository"]
+              for row in rows
+              if row["status"] in sync_candidate_statuses
+          })
+
+          result = {
+              "source": data.get("source", {}),
+              "target": data.get("target", {}),
+              "discovery_namespaces": data.get("discovery_namespaces", []),
+              "summary": {
+                  "repositories_evaluated": len(mirror_configs),
+                  "source_tags_evaluated": len(source_tags),
+                  "target_tags_evaluated": len(target_tags),
+                  "total_rows": len(rows),
+                  "status_counts": dict(counts),
+                  "severity_counts": dict(severity_counts),
+                  "sync_candidate_repositories": sync_candidate_repositories,
+                  "has_divergence": any(
+                      row["status"] in sync_candidate_statuses
+                      for row in rows
+                  )
+              },
+              "mirror_configs": mirror_configs,
+              "comparison_rows": rows
+          }
+
+          with open(output_json_path, "w", encoding="utf-8") as f:
+              json.dump(result, f, indent=2, ensure_ascii=False)
+
+          with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
+              writer = csv.DictWriter(
+                  f,
+                  fieldnames=[
+                      "repository",
+                      "tag",
+                      "status",
+                      "severity",
+                      "mirror_status",
+                      "mirror_enabled",
+                      "filter",
+                      "source_digest",
+                      "target_digest",
+                      "message",
+                  ],
+              )
+              writer.writeheader()
+              writer.writerows(rows)
+
+    - name: Executar comparação PRD x DR
+      ansible.builtin.command:
+        cmd: >-
+          python3 {{ quay_output_dir }}/compare_quay_tags.py
+          {{ quay_output_dir }}/quay_compare_input.json
+          {{ quay_output_dir }}/quay_compare_summary.json
+          {{ quay_output_dir }}/quay_compare_summary.csv
+      register: quay_compare_script_result
+      changed_when: false
+
+    - name: Carregar resultado da comparação
+      ansible.builtin.include_vars:
+        file: "{{ quay_output_dir }}/quay_compare_summary.json"
+        name: quay_compare_result
+
+    - name: Exibir resumo da comparação
+      ansible.builtin.debug:
+        msg:
+          - "Repositories avaliados: {{ quay_compare_result.summary.repositories_evaluated }}"
+          - "Tags PRD avaliadas: {{ quay_compare_result.summary.source_tags_evaluated }}"
+          - "Tags DR avaliadas: {{ quay_compare_result.summary.target_tags_evaluated }}"
+          - "Status: {{ quay_compare_result.summary.status_counts }}"
+          - "Severidade: {{ quay_compare_result.summary.severity_counts }}"
+          - "Repos candidatos a sync: {{ quay_compare_result.summary.sync_candidate_repositories }}"
+          - "JSON: {{ quay_output_dir }}/quay_compare_summary.json"
+          - "CSV : {{ quay_output_dir }}/quay_compare_summary.csv"
+
+    - name: Exibir linhas com divergência ou atenção
+      ansible.builtin.debug:
+        msg:
+          repository: "{{ item.repository }}"
+          tag: "{{ item.tag }}"
+          status: "{{ item.status }}"
+          severity: "{{ item.severity }}"
+          filter: "{{ item.filter }}"
+          source_digest: "{{ item.source_digest }}"
+          target_digest: "{{ item.target_digest }}"
+          message: "{{ item.message }}"
+      loop: "{{ quay_compare_result.comparison_rows }}"
+      loop_control:
+        label: "{{ item.repository }}:{{ item.tag }} -> {{ item.status }}"
+      when: item.status != "OK"
+
+    - name: Falhar quando houver divergência e quay_fail_job_on_divergence estiver habilitado
+      ansible.builtin.fail:
+        msg: "Foram encontradas divergências entre PRD e DR. Verifique {{ quay_output_dir }}/quay_compare_summary.csv."
+      when:
+        - quay_fail_job_on_divergence | bool
+        - quay_compare_result.summary.has_divergence | bool

@@ -1,0 +1,70 @@
+---
+- name: Consultar configuração de mirror dos repositórios no DR
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/repository/{{ item.namespace }}/{{ item.name }}/mirror"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code:
+      - 200
+      - 403
+      - 404
+  loop: "{{ quay_target_mirror_repositories }}"
+  loop_control:
+    label: "{{ item.namespace }}/{{ item.name }}"
+  register: _quay_mirror_config_results
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+
+- name: Normalizar configurações de mirror
+  ansible.builtin.set_fact:
+    quay_mirror_configs_json: >-
+      {%- set out = [] -%}
+      {%- for r in (_quay_mirror_config_results.results | default([])) -%}
+        {%- set repo = r.item.namespace ~ '/' ~ r.item.name -%}
+        {%- set status = r.status | default(0) | int -%}
+        {%- set j = r.json | default({}) -%}
+        {%- set _ = out.append({
+          'repository': repo,
+          'namespace': r.item.namespace,
+          'name': r.item.name,
+          'http_status': status,
+          'mirror_found': status == 200,
+          'is_enabled': j.is_enabled | default(false),
+          'mirror_type': j.mirror_type | default(''),
+          'external_reference': j.external_reference | default(''),
+          'external_registry_username': j.external_registry_username | default(''),
+          'sync_interval': j.sync_interval | default(None),
+          'sync_start_date': j.sync_start_date | default(''),
+          'sync_expiration_date': j.sync_expiration_date | default(''),
+          'sync_status': j.sync_status | default('CONFIG_ERROR'),
+          'sync_retries_remaining': j.sync_retries_remaining | default(None),
+          'robot_username': j.robot_username | default(''),
+          'root_rule': j.root_rule | default({}),
+          'skopeo_timeout_interval': j.skopeo_timeout_interval | default(None),
+          'architecture_filter': j.architecture_filter | default([]),
+          'api_error': j.detail | default(j.error_message | default(''))
+        }) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar configurações normalizadas
+  ansible.builtin.set_fact:
+    quay_mirror_configs: "{{ quay_mirror_configs_json | from_json }}"
+
+- name: Exibir resumo das configurações
+  ansible.builtin.debug:
+    msg:
+      repository: "{{ item.repository }}"
+      is_enabled: "{{ item.is_enabled }}"
+      mirror_type: "{{ item.mirror_type }}"
+      sync_status: "{{ item.sync_status }}"
+      root_rule: "{{ item.root_rule }}"
+      external_reference: "{{ item.external_reference }}"
+  loop: "{{ quay_mirror_configs }}"
+  loop_control:
+    label: "{{ item.repository }}"
+  when:
+    - quay_debug_enabled | bool

@@ -1,0 +1,6 @@
+---
+- name: Quay Sync Manager | Check e Sync PRD x DR
+  hosts: localhost
+  gather_facts: true
+  roles:
+    - role: quay_sync_manager

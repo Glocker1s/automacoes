@@ -1,0 +1,39 @@
+---
+quay_source:
+  name: "PRD"
+  url: "https://quay-prd-quay-quay-prd.apps.cluster-pnkh7.pnkh7.sandbox2478.opentlc.com"
+  token: "qmw8F7DbO2TiC1Krry6HizjzKMouz9mMkFo6wBbn"
+  validate_certs: false
+
+quay_target:
+  name: "DR"
+  url: "https://quay-dr-quay-quay-dr.apps.cluster-pnkh7.pnkh7.sandbox2478.opentlc.com"
+  token: "OFSG36d5m9drFcu6jpozfTKVUwPSxsLQJrF801nD"
+  validate_certs: false
+
+quay_discovery_namespaces:
+  - apps
+
+# Discovery automático no DR.
+# A ideia é listar os repositórios visíveis ao token do DR e filtrar state: MIRROR.
+quay_repository_page_limit: 100
+
+# Por segurança, esse primeiro playbook NÃO executa sync por padrão.
+# Depois de validar o discovery, mude para true para testar sync-cancel + sync-now.
+quay_execute_sync_actions: false
+
+# Limita quantos repos serão usados no teste de sync quando quay_execute_sync_actions=true.
+quay_sync_test_max_repositories: 3
+
+# Só para gerar arquivo local com o resultado do discovery.
+quay_output_dir: "./quay_api_validation_output"
+
+quay_tag_page_limit: 100
+
+# Lab: false para debugar.
+# Cliente: true para esconder token/log sensível.
+quay_hide_sensitive_logs: false
+
+# Por enquanto só reporta divergência.
+# Depois na role final podemos escolher se falha ou não.
+quay_fail_job_on_divergence: false

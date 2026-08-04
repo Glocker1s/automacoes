@@ -1,0 +1,114 @@
+---
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Definir repositories da rodada
+  ansible.builtin.set_fact:
+    _quay_source_page_repositories: "{{ _quay_source_next_page_repositories | default([]) }}"
+    _quay_target_page_repositories: "{{ _quay_target_next_page_repositories | default([]) }}"
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Consultar tags no PRD
+  ansible.builtin.uri:
+    url: "{{ quay_source_url }}/api/v1/repository/{{ item.repository }}/tag/?onlyActiveTags=true&limit={{ quay_tag_page_limit | int }}&page={{ _quay_tag_current_page | int }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ quay_source.token }}"
+      Accept: "application/json"
+    validate_certs: "{{ quay_source_validate_certs }}"
+    return_content: true
+    status_code:
+      - 200
+      - 403
+      - 404
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ _quay_source_page_repositories }}"
+  loop_control:
+    label: "{{ item.repository }} page={{ _quay_tag_current_page }}"
+  register: _quay_source_page_query
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+  when:
+    - (_quay_source_page_repositories | length) > 0
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Consultar tags no DR
+  ansible.builtin.uri:
+    url: "{{ quay_target_url }}/api/v1/repository/{{ item.repository }}/tag/?onlyActiveTags=true&limit={{ quay_tag_page_limit | int }}&page={{ _quay_tag_current_page | int }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ quay_target.token }}"
+      Accept: "application/json"
+    validate_certs: "{{ quay_target_validate_certs }}"
+    return_content: true
+    status_code:
+      - 200
+      - 403
+      - 404
+    timeout: "{{ quay_api_timeout | default(30) }}"
+  loop: "{{ _quay_target_page_repositories }}"
+  loop_control:
+    label: "{{ item.repository }} page={{ _quay_tag_current_page }}"
+  register: _quay_target_page_query
+  no_log: "{{ quay_hide_sensitive_logs | bool }}"
+  when:
+    - (_quay_target_page_repositories | length) > 0
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Acumular resultados da página
+  ansible.builtin.set_fact:
+    _quay_source_tag_results: >-
+      {{ (_quay_source_tag_results | default([])) + (_quay_source_page_query.results | default([])) }}
+    _quay_target_tag_results: >-
+      {{ (_quay_target_tag_results | default([])) + (_quay_target_page_query.results | default([])) }}
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Calcular próxima página
+  ansible.builtin.set_fact:
+    _quay_source_next_page_repositories_json: >-
+      {%- set out = [] -%}
+      {%- if quay_tag_pagination_stop_when_page_not_full | default(true) | bool -%}
+        {%- for r in (_quay_source_page_query.results | default([])) -%}
+          {%- set status = r.status | default(0) | int -%}
+          {%- set tags_count = r.json.tags | default([]) | length -%}
+          {%- if status == 200 and tags_count >= (quay_tag_page_limit | int) -%}
+            {%- set _ = out.append(r.item) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- else -%}
+        {%- set out = _quay_source_page_repositories | default([]) -%}
+      {%- endif -%}
+      {{ out | to_json }}
+    _quay_target_next_page_repositories_json: >-
+      {%- set out = [] -%}
+      {%- if quay_tag_pagination_stop_when_page_not_full | default(true) | bool -%}
+        {%- for r in (_quay_target_page_query.results | default([])) -%}
+          {%- set status = r.status | default(0) | int -%}
+          {%- set tags_count = r.json.tags | default([]) | length -%}
+          {%- if status == 200 and tags_count >= (quay_tag_page_limit | int) -%}
+            {%- set _ = out.append(r.item) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- else -%}
+        {%- set out = _quay_target_page_repositories | default([]) -%}
+      {%- endif -%}
+      {{ out | to_json }}
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Publicar próxima página
+  ansible.builtin.set_fact:
+    _quay_source_next_page_repositories: "{{ _quay_source_next_page_repositories_json | from_json }}"
+    _quay_target_next_page_repositories: "{{ _quay_target_next_page_repositories_json | from_json }}"
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Exibir resumo da paginação
+  ansible.builtin.debug:
+    msg:
+      - "Page {{ _quay_tag_current_page }}"
+      - "PRD consultados nesta página: {{ _quay_source_page_repositories | length }}"
+      - "DR consultados nesta página : {{ _quay_target_page_repositories | length }}"
+      - "PRD candidatos para próxima página: {{ _quay_source_next_page_repositories | length }}"
+      - "DR candidatos para próxima página : {{ _quay_target_next_page_repositories | length }}"
+  when:
+    - quay_debug_enabled | bool
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Avançar contador de página
+  ansible.builtin.set_fact:
+    _quay_tag_current_page: "{{ (_quay_tag_current_page | int) + 1 }}"
+
+- name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Coletar próxima página se necessário
+  ansible.builtin.include_tasks: 41_collect_tags_page.yml
+  when:
+    - (_quay_tag_current_page | int) <= (quay_max_pages | int)
+    - (_quay_source_next_page_repositories | default([]) | length) > 0 or
+      (_quay_target_next_page_repositories | default([]) | length) > 0
