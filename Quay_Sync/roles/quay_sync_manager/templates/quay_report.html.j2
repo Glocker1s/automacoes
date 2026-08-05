@@ -6,7 +6,7 @@
 {% macro card(title, value, subtitle, level) -%}
   {%- set border = '#4caf50' if level == 'ok' else ('#ef5350' if level == 'crit' else ('#ff9800' if level == 'warn' else '#78909c')) -%}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
-         style="width:100%;border-collapse:collapse;background:#262626;border:1px solid #4a4a4a;border-left:5px solid {{ border }};">
+         style="width:100%;border-collapse:collapse;border:1px solid #4a4a4a;border-left:5px solid {{ border }};">
     <tr>
       <td height="64" valign="top" style="height:64px;padding:10px;font-family:Arial,sans-serif;">
         <div style="font-size:12px;color:#d0d0d0;margin-bottom:4px;">{{ title }}</div>
