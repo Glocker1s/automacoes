@@ -30,6 +30,8 @@
         missing_remaining_count: "{{ quay_missing_mirror_repositories | default([]) | length }}"
         target_non_mirror_conflicts: "{{ quay_target_non_mirror_conflicts | default([]) }}"
         target_non_mirror_conflicts_count: "{{ quay_target_non_mirror_conflicts | default([]) | length }}"
+        target_non_mirror_ignored: "{{ quay_target_non_mirror_ignored | default([]) }}"
+        target_non_mirror_ignored_count: "{{ quay_target_non_mirror_ignored | default([]) | length }}"
       initial: "{{ quay_initial_result }}"
       final: "{{ quay_final_result }}"
       sync:
