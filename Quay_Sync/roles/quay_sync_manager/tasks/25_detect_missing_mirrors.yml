@@ -5,7 +5,9 @@
       {%- set target_map = {} -%}
       {%- set missing = [] -%}
       {%- set conflicts = [] -%}
+      {%- set ignored = [] -%}
       {%- set existing = [] -%}
+      {%- set exceptions = quay_target_non_mirror_exceptions | default([]) -%}
       {%- for t in (quay_target_repositories | default([])) -%}
         {%- set _ = target_map.update({t.repository: t}) -%}
       {%- endfor -%}
@@ -15,6 +17,13 @@
           {%- set _ = missing.append(s) -%}
         {%- elif (target_map[repo].state | default('')) == 'MIRROR' -%}
           {%- set _ = existing.append(s) -%}
+        {%- elif repo in exceptions -%}
+          {%- set _ = ignored.append({
+            'repository': repo,
+            'namespace': s.namespace,
+            'name': s.name,
+            'target_state': target_map[repo].state | default('UNKNOWN')
+          }) -%}
         {%- else -%}
           {%- set _ = conflicts.append({
             'repository': repo,
@@ -27,6 +36,7 @@
       {{ {
         'missing': missing,
         'conflicts': conflicts,
+        'ignored': ignored,
         'existing': existing
       } | to_json }}
 
@@ -34,6 +44,7 @@
   ansible.builtin.set_fact:
     quay_missing_mirror_repositories: "{{ (_quay_missing_mirror_analysis_json | from_json).missing }}"
     quay_target_non_mirror_conflicts: "{{ (_quay_missing_mirror_analysis_json | from_json).conflicts }}"
+    quay_target_non_mirror_ignored: "{{ (_quay_missing_mirror_analysis_json | from_json).ignored }}"
     quay_existing_mirror_repositories: "{{ (_quay_missing_mirror_analysis_json | from_json).existing }}"
     quay_missing_mirror_repositories_initial: >-
       {{ quay_missing_mirror_repositories_initial | default((_quay_missing_mirror_analysis_json | from_json).missing) }}
@@ -50,3 +61,4 @@
       - "Mirrors já existentes no DR: {{ quay_existing_mirror_repositories | length }}"
       - "Mirrors ausentes no DR: {{ quay_missing_mirror_repositories | length }}"
       - "Repositories existentes no DR sem state MIRROR: {{ quay_target_non_mirror_conflicts | length }}"
+      - "Repositories não-MIRROR ignorados por exceção: {{ quay_target_non_mirror_ignored | length }}"
