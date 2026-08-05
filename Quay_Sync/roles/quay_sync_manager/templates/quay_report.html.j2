@@ -3,17 +3,18 @@
   <span style="display:inline-block;background-color:{{ bg }};color:#ffffff;font-size:11px;font-weight:bold;padding:3px 7px;border-radius:3px;white-space:nowrap;">{{ text }}</span>
 {%- endmacro %}
 
-{% macro card(title, value, subtitle, level, width='25%') -%}
-  {%- set border = '#2e7d32' if level == 'ok' else ('#b00020' if level == 'crit' else ('#ef6c00' if level == 'warn' else '#607d8b')) -%}
-  <td width="{{ width }}" style="padding:6px;vertical-align:top;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;border-left:5px solid {{ border }};">
-      <tr><td style="padding:10px;font-family:Arial,sans-serif;">
-        <div style="font-size:12px;color:#555;margin-bottom:4px;">{{ title }}</div>
-        <div style="font-size:22px;font-weight:bold;color:#111;">{{ value }}</div>
-        <div style="font-size:11px;color:#666;margin-top:4px;">{{ subtitle }}</div>
-      </td></tr>
-    </table>
-  </td>
+{% macro card(title, value, subtitle, level) -%}
+  {%- set border = '#4caf50' if level == 'ok' else ('#ef5350' if level == 'crit' else ('#ff9800' if level == 'warn' else '#78909c')) -%}
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+         style="width:100%;border-collapse:collapse;background:#262626;border:1px solid #4a4a4a;border-left:5px solid {{ border }};">
+    <tr>
+      <td height="64" valign="top" style="height:64px;padding:10px;font-family:Arial,sans-serif;">
+        <div style="font-size:12px;color:#d0d0d0;margin-bottom:4px;">{{ title }}</div>
+        <div style="font-size:22px;font-weight:bold;color:#ffffff;line-height:24px;">{{ value }}</div>
+        <div style="font-size:11px;color:#bdbdbd;margin-top:4px;">{{ subtitle }}</div>
+      </td>
+    </tr>
+  </table>
 {%- endmacro %}
 
 {% macro status_label(status) -%}
@@ -123,32 +124,79 @@
           </td>
         </tr>
 
-        <tr><td style="padding:12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;">
-            <tr>
-              {{ card('Repositories mirror', summary.repositories_evaluated | default(0), 'detectados no DR', 'ok') }}
-              {{ card('Tags PRD', summary.source_tags_evaluated | default(0), 'avaliadas na origem', 'info') }}
-              {{ card('Divergências críticas', severity_counts.critical | default(0), 'faltantes ou digest diferente', 'crit' if (severity_counts.critical | default(0) | int) > 0 else 'ok') }}
-              {{ card('Candidatos a sync', summary.sync_candidate_repositories | default([]) | length, 'repositories com ação sugerida', 'warn' if (summary.sync_candidate_repositories | default([]) | length) > 0 else 'ok') }}
-            </tr>
-            <tr>
-              {{ card(
-                'Ainda sem mirror',
-                mirror_management.missing_remaining_count | default(0),
-                'repositories ausentes no DR',
-                'crit' if (mirror_management.missing_remaining_count | default(0) | int) > 0 else 'ok',
-                '50%'
-              ) }}
-              {{ card(
-                'Não-MIRROR no DR',
-                mirror_management.target_non_mirror_conflicts_count | default(0),
-                'fora das exceções configuradas',
-                'crit' if (mirror_management.target_non_mirror_conflicts_count | default(0) | int) > 0 else 'ok',
-                '50%'
-              ) }}
-            </tr>
-          </table>
-        </td></tr>
+        {% set sync_candidates_count = summary.sync_candidate_repositories | default([]) | length %}
+        {% set missing_mirrors_count = mirror_management.missing_remaining_count | default(0) | int %}
+        {% set non_mirror_conflicts_count = mirror_management.target_non_mirror_conflicts_count | default(0) | int %}
+
+        <tr>
+          <td style="padding:12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;background:#1f1f1f;">
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                  style="width:100%;table-layout:fixed;border-collapse:collapse;">
+              <tr>
+                <td width="25%" valign="top" style="width:25%;padding:6px;">
+                  {{ card(
+                    'Repositories mirror',
+                    summary.repositories_evaluated | default(0),
+                    'detectados no DR',
+                    'ok'
+                  ) }}
+                </td>
+
+                <td width="25%" valign="top" style="width:25%;padding:6px;">
+                  {{ card(
+                    'Tags PRD',
+                    summary.source_tags_evaluated | default(0),
+                    'avaliadas na origem',
+                    'info'
+                  ) }}
+                </td>
+
+                <td width="25%" valign="top" style="width:25%;padding:6px;">
+                  {{ card(
+                    'Divergências críticas',
+                    severity_counts.critical | default(0),
+                    'faltantes ou digest diferente',
+                    'crit' if (severity_counts.critical | default(0) | int) > 0 else 'ok'
+                  ) }}
+                </td>
+
+                <td width="25%" valign="top" style="width:25%;padding:6px;">
+                  {{ card(
+                    'Candidatos a sync',
+                    sync_candidates_count,
+                    'repositories com ação sugerida',
+                    'warn' if sync_candidates_count > 0 else 'ok'
+                  ) }}
+                </td>
+              </tr>
+            </table>
+
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                  style="width:100%;table-layout:fixed;border-collapse:collapse;">
+              <tr>
+                <td width="50%" valign="top" style="width:50%;padding:6px;">
+                  {{ card(
+                    'Ainda sem mirror',
+                    missing_mirrors_count,
+                    'repositories ausentes no DR',
+                    'crit' if missing_mirrors_count > 0 else 'ok'
+                  ) }}
+                </td>
+
+                <td width="50%" valign="top" style="width:50%;padding:6px;">
+                  {{ card(
+                    'Não-MIRROR no DR',
+                    non_mirror_conflicts_count,
+                    'fora das exceções configuradas',
+                    'crit' if non_mirror_conflicts_count > 0 else 'ok'
+                  ) }}
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
 
         <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;">
