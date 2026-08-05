@@ -172,3 +172,9 @@ quay_auto_mirror_robot_auto_create: true
 quay_auto_mirror_robot_description: "Robot utilizado pelo Quay Sync Manager"
 quay_auto_mirror_robot_repository_role: "write"
 
+# Repositories que existem no PRD e no DR, mas propositalmente
+# não devem possuir state MIRROR no DR.
+# Informar sempre no formato <namespace>/<repository>.
+quay_target_non_mirror_exceptions:
+  - "ansible/health-check"
+  - "ag-bkg-business-img/cadastro-biometria-facial-webapp"
