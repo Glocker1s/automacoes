@@ -3,9 +3,9 @@
   <span style="display:inline-block;background-color:{{ bg }};color:#ffffff;font-size:11px;font-weight:bold;padding:3px 7px;border-radius:3px;white-space:nowrap;">{{ text }}</span>
 {%- endmacro %}
 
-{% macro card(title, value, subtitle, level) -%}
+{% macro card(title, value, subtitle, level, width='25%') -%}
   {%- set border = '#2e7d32' if level == 'ok' else ('#b00020' if level == 'crit' else ('#ef6c00' if level == 'warn' else '#607d8b')) -%}
-  <td width="25%" style="padding:6px;vertical-align:top;">
+  <td width="{{ width }}" style="padding:6px;vertical-align:top;">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #d9d9d9;border-left:5px solid {{ border }};">
       <tr><td style="padding:10px;font-family:Arial,sans-serif;">
         <div style="font-size:12px;color:#555;margin-bottom:4px;">{{ title }}</div>
@@ -131,6 +131,22 @@
               {{ card('Divergências críticas', severity_counts.critical | default(0), 'faltantes ou digest diferente', 'crit' if (severity_counts.critical | default(0) | int) > 0 else 'ok') }}
               {{ card('Candidatos a sync', summary.sync_candidate_repositories | default([]) | length, 'repositories com ação sugerida', 'warn' if (summary.sync_candidate_repositories | default([]) | length) > 0 else 'ok') }}
             </tr>
+            <tr>
+              {{ card(
+                'Ainda sem mirror',
+                mirror_management.missing_remaining_count | default(0),
+                'repositories ausentes no DR',
+                'crit' if (mirror_management.missing_remaining_count | default(0) | int) > 0 else 'ok',
+                '50%'
+              ) }}
+              {{ card(
+                'Não-MIRROR no DR',
+                mirror_management.target_non_mirror_conflicts_count | default(0),
+                'fora das exceções configuradas',
+                'crit' if (mirror_management.target_non_mirror_conflicts_count | default(0) | int) > 0 else 'ok',
+                '50%'
+              ) }}
+            </tr>
           </table>
         </td></tr>
 
@@ -168,59 +184,80 @@
           </table>
         </td></tr>
 
-        {% if (mirror_management.missing_initial_count | default(0) | int) > 0 or
-              (mirror_management.target_non_mirror_conflicts_count | default(0) | int) > 0 or
-              (mirror_management.created_count | default(0) | int) > 0 %}
-        <tr>
-          <td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
-            <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Mirrors ausentes no DR</div>
+        {% set missing_initial = mirror_management.missing_initial | default([]) %}
+        {% set missing_remaining = mirror_management.missing_remaining | default([]) %}
+        {% set created_repos = mirror_management.created | default([]) %}
+        {% set non_mirror_conflicts = mirror_management.target_non_mirror_conflicts | default([]) %}
+        {% set non_mirror_ignored = mirror_management.target_non_mirror_ignored | default([]) %}
+        {% set missing_remaining_names = missing_remaining | map(attribute='repository') | list %}
 
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
-                  style="border-collapse:collapse;margin-bottom:8px;border:1px solid #d9d9d9;">
-              <tr style="background:#f3f4f6;">
-                <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Identificados</th>
-                <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Criados automaticamente</th>
-                <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Ainda ausentes</th>
-                <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Conflitos no DR</th>
-              </tr>
+        {% if missing_initial | length > 0 or non_mirror_conflicts | length > 0 or non_mirror_ignored | length > 0 %}
+        <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
+          <div style="font-size:15px;font-weight:bold;margin-bottom:7px;">Gestão de mirrors no DR</div>
 
-              <tr>
-                <td style="padding:8px;border:1px solid #d9d9d9;">
-                  {{ mirror_management.missing_initial_count | default(0) }}
-                </td>
-                <td style="padding:8px;border:1px solid #d9d9d9;">
-                  {{ mirror_management.created_count | default(0) }}
-                </td>
-                <td style="padding:8px;border:1px solid #d9d9d9;">
-                  {{ mirror_management.missing_remaining_count | default(0) }}
-                </td>
-                <td style="padding:8px;border:1px solid #d9d9d9;">
-                  {{ mirror_management.target_non_mirror_conflicts_count | default(0) }}
-                </td>
-              </tr>
-            </table>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                style="border-collapse:collapse;border:1px solid #d9d9d9;">
+            <tr style="background:#f3f4f6;">
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Repository</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Situação identificada</th>
+              <th align="left" style="padding:8px;border:1px solid #d9d9d9;">Tratamento</th>
+            </tr>
 
-            {% if mirror_management.created | default([]) | length > 0 %}
-            <div style="font-size:12px;margin-bottom:5px;">
-              <b>Criados:</b> {{ mirror_management.created | join(', ') }}
-            </div>
-            {% endif %}
+            {% for r in missing_initial %}
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">
+                {{ r.repository }}
+              </td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                {{ badge('Ausente no DR', 'warn') }}
+              </td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                {% if r.repository in created_repos %}
+                  {{ badge('Mirror criado automaticamente', 'ok') }}
+                {% elif r.repository in missing_remaining_names %}
+                  {{ badge('Ainda sem mirror', 'crit') }}
+                {% else %}
+                  {{ badge('Nenhuma alteração', 'info') }}
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
 
-            {% if mirror_management.missing_remaining | default([]) | length > 0 %}
-            <div style="font-size:12px;color:#b00020;margin-bottom:5px;">
-              <b>Ainda sem mirror:</b>
-              {{ mirror_management.missing_remaining | map(attribute='repository') | list | join(', ') }}
-            </div>
-            {% endif %}
+            {% for r in non_mirror_conflicts %}
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">
+                {{ r.repository }}
+              </td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                {{ badge('Existe no DR - ' ~ (r.target_state | default('NORMAL')), 'crit') }}
+              </td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                {{ badge('Não é MIRROR - verificar', 'crit') }}
+              </td>
+            </tr>
+            {% endfor %}
 
-            {% if mirror_management.target_non_mirror_conflicts | default([]) | length > 0 %}
-            <div style="font-size:12px;color:#b00020;">
-              <b>Existem no DR, mas não são MIRROR:</b>
-              {{ mirror_management.target_non_mirror_conflicts | map(attribute='repository') | list | join(', ') }}
-            </div>
-            {% endif %}
-          </td>
-        </tr>
+            {% for r in non_mirror_ignored %}
+            <tr>
+              <td style="padding:8px;border:1px solid #d9d9d9;font-family:Consolas,monospace;">
+                {{ r.repository }}
+              </td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                {{ badge('Existe no DR - ' ~ (r.target_state | default('NORMAL')), 'info') }}
+              </td>
+              <td style="padding:8px;border:1px solid #d9d9d9;">
+                {{ badge('Exceção configurada', 'info') }}
+              </td>
+            </tr>
+            {% endfor %}
+          </table>
+
+          {% if non_mirror_ignored | length > 0 %}
+          <div style="font-size:11px;color:#666;margin-top:6px;">
+            Repositories marcados como exceção são conhecidos pelo processo e não são considerados divergência.
+          </div>
+          {% endif %}
+        </td></tr>
         {% endif %}
 
         <tr><td style="padding:0 16px 12px 16px;border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;">
