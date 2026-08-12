@@ -1,0 +1,164 @@
+---
+- name: Preserve data | Validar grupo
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Preserve data"
+    pgm_host_error_msg: >-
+      Grupo {{ pgm_preserve_group.name | default('sem nome') }} inválido.
+      É necessário informar backup_tables e truncate_tables.
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_preserve_group.backup_tables | default([]) | length == 0 or pgm_preserve_group.truncate_tables | default([]) | length == 0
+
+- name: Preserve data | Definir dump do grupo
+  ansible.builtin.set_fact:
+    pgm_preserve_group_dump_dir: >-
+      {{ pgm_preserve_data_remote_dir }}/{{ pgm_preserve_group.name | default('group') | regex_replace('[^A-Za-z0-9_.-]', '_') }}.dump.dir
+  when:
+    - not (pgm_host_failed | bool)
+
+- name: Preserve data | Remover dump anterior do grupo
+  ansible.builtin.file:
+    path: "{{ pgm_preserve_group_dump_dir }}"
+    state: absent
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+
+- name: Preserve data | Capturar tabelas da base atual
+  ansible.builtin.shell: |
+    set -o pipefail
+    TABLE_ARGS=()
+    {% for table in pgm_preserve_group.backup_tables | default([]) %}
+    TABLE_ARGS+=("-t" "{{ table }}")
+    {% endfor %}
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Preserve data: {{ pgm_preserve_group.name | default('grupo') }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Capturando dados da base atual {{ pgm_database_name }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Tabelas: {{ pgm_preserve_group.backup_tables | default([]) | join(', ') }}" >> "{{ pgm_restore_log_file }}"
+
+    pg_dump -Fd \
+      --strict-names \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d "{{ pgm_database_name }}" \
+      -j "{{ pgm_preserve_group.jobs | default(pgm_db_cfg.restore.jobs | default(4)) }}" \
+      -f "{{ pgm_preserve_group_dump_dir }}" \
+      "${TABLE_ARGS[@]}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    echo "[INFO] Preserve data backup rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_preserve_backup
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+
+- name: Preserve data | Registrar falha na captura
+  ansible.builtin.set_fact:
+    pgm_host_failed: "{{ pgm_host_failed or pgm_preserve_data_fail_on_error }}"
+    pgm_host_warning: "{{ pgm_host_warning or not pgm_preserve_data_fail_on_error }}"
+    pgm_host_failed_task: "{{ 'Preserve data - backup' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
+    pgm_host_error_msg: "{{ 'Falha ao capturar dados específicos do destino. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
+  when:
+    - _pgm_preserve_backup is defined
+    - _pgm_preserve_backup.rc | default(0) | int != 0
+
+- name: Preserve data | Truncar tabelas na base restaurada
+  ansible.builtin.shell: |
+    set -o pipefail
+
+    echo "[INFO] Truncando tabelas de preserve data em {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Tabelas: {{ pgm_preserve_group.truncate_tables | join(', ') }}" >> "{{ pgm_restore_log_file }}"
+
+    psql -X -w -v ON_ERROR_STOP=1 \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d "{{ pgm_restore_target_db }}" \
+      -c "TRUNCATE TABLE {{ pgm_preserve_group.truncate_tables | join(', ') }}{{ ' CASCADE' if pgm_preserve_group.cascade | default(false) | bool else '' }};" \
+      >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    echo "[INFO] Preserve data truncate rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_preserve_truncate
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+
+- name: Preserve data | Registrar falha no truncate
+  ansible.builtin.set_fact:
+    pgm_host_failed: "{{ pgm_host_failed or pgm_preserve_data_fail_on_error }}"
+    pgm_host_warning: "{{ pgm_host_warning or not pgm_preserve_data_fail_on_error }}"
+    pgm_host_failed_task: "{{ 'Preserve data - truncate' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
+    pgm_host_error_msg: "{{ 'Falha ao limpar tabelas antes de restaurar dados preservados. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
+  when:
+    - _pgm_preserve_truncate is defined
+    - _pgm_preserve_truncate.rc | default(0) | int != 0
+
+- name: Preserve data | Restaurar dados preservados
+  ansible.builtin.shell: |
+    set -o pipefail
+    RESTORE_ARGS=(--data-only --no-owner --no-privileges --exit-on-error)
+
+    {% if pgm_preserve_group.disable_triggers | default(false) | bool %}
+    RESTORE_ARGS+=(--disable-triggers)
+    {% endif %}
+
+    echo "[INFO] Restaurando dados preservados em {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] disable_triggers={{ pgm_preserve_group.disable_triggers | default(false) | bool }}" >> "{{ pgm_restore_log_file }}"
+
+    pg_restore \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d "{{ pgm_restore_target_db }}" \
+      -j "{{ pgm_preserve_group.jobs | default(pgm_db_cfg.restore.jobs | default(4)) }}" \
+      "${RESTORE_ARGS[@]}" \
+      "{{ pgm_preserve_group_dump_dir }}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    echo "[INFO] Preserve data restore rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_preserve_restore
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+
+- name: Preserve data | Registrar falha no restore
+  ansible.builtin.set_fact:
+    pgm_host_failed: "{{ pgm_host_failed or pgm_preserve_data_fail_on_error }}"
+    pgm_host_warning: "{{ pgm_host_warning or not pgm_preserve_data_fail_on_error }}"
+    pgm_host_failed_task: "{{ 'Preserve data - restore' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
+    pgm_host_error_msg: "{{ 'Falha ao restaurar dados preservados do destino. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
+  when:
+    - _pgm_preserve_restore is defined
+    - _pgm_preserve_restore.rc | default(0) | int != 0

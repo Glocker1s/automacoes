@@ -1,0 +1,49 @@
+---
+- name: Preserve data | Resolver configuração
+  ansible.builtin.set_fact:
+    pgm_preserve_data_enabled: "{{ pgm_db_cfg.preserve_data.enabled | default(pgm_preserve_data_enabled_default) | bool }}"
+    pgm_preserve_data_fail_on_error: "{{ pgm_db_cfg.preserve_data.fail_on_error | default(pgm_preserve_data_fail_on_error_default) | bool }}"
+    pgm_preserve_data_run_on_envs: "{{ pgm_db_cfg.preserve_data.run_on_envs | default([]) | map('string') | map('lower') | list }}"
+    pgm_preserve_data_groups: "{{ pgm_db_cfg.preserve_data.groups | default([]) }}"
+
+- name: Preserve data | Resolver execução no ambiente
+  ansible.builtin.set_fact:
+    pgm_preserve_data_should_run: >-
+      {{
+        pgm_preserve_data_enabled
+        and (
+          pgm_preserve_data_run_on_envs | length == 0
+          or pgm_env | lower in pgm_preserve_data_run_on_envs
+        )
+      }}
+
+- name: Preserve data | Validar configuração
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Preserve data"
+    pgm_host_error_msg: "preserve_data.enabled=true, mas nenhum grupo foi configurado."
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_preserve_data_should_run | bool
+    - pgm_preserve_data_groups | length == 0
+
+- name: Preserve data | Criar diretório temporário
+  ansible.builtin.file:
+    path: "{{ pgm_preserve_data_remote_dir }}"
+    state: directory
+    mode: "0700"
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_preserve_data_should_run | bool
+
+- name: Preserve data | Processar grupos
+  ansible.builtin.include_tasks: 41_preserve_data_group.yml
+  loop: "{{ pgm_preserve_data_groups }}"
+  loop_control:
+    loop_var: pgm_preserve_group
+    label: "{{ pgm_preserve_group.name | default('grupo') }}"
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_preserve_data_should_run | bool

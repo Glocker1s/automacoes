@@ -1,0 +1,79 @@
+---
+- name: PostgreSQL Manager | Planejamento e inventário dinâmico
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: PostgreSQL Manager | Executar fase controller
+      ansible.builtin.include_role:
+        name: postgres_manager
+      vars:
+        pgm_phase: controller
+
+- name: PostgreSQL Manager | Backup origem
+  hosts: pgm_source_targets
+  gather_facts: true
+  tasks:
+    - name: PostgreSQL Manager | Executar fase backup
+      ansible.builtin.include_role:
+        name: postgres_manager
+      vars:
+        pgm_phase: backup
+      when:
+        - pgm_action_normalized | default(pgm_action | default('backup') | lower) in ['backup', 'sync']
+
+- name: PostgreSQL Manager | Barreira pós-backup do sync
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: PostgreSQL Manager | Inicializar barreira do sync
+      ansible.builtin.set_fact:
+        pgm_sync_backup_blocked: false
+        pgm_sync_backup_blocked_hosts: []
+        pgm_sync_restore_skip_reason: ""
+
+    - name: PostgreSQL Manager | Identificar backups que impedem restore
+      ansible.builtin.set_fact:
+        pgm_sync_backup_blocked_hosts: "{{ pgm_sync_backup_blocked_hosts + [item] }}"
+      loop: "{{ groups.pgm_source_targets | default([]) }}"
+      when:
+        - pgm_action_normalized | default(pgm_action | default('backup') | lower) == 'sync'
+        - hostvars[item].pgm_host_status | default('NÃO EXECUTADO') != 'SUCESSO'
+
+    - name: PostgreSQL Manager | Bloquear restore quando backup do sync não teve sucesso
+      ansible.builtin.set_fact:
+        pgm_sync_backup_blocked: true
+        pgm_sync_restore_skip_reason: >-
+          Restore não iniciado porque o backup do sync não terminou com SUCESSO.
+          Hosts de origem com falha/aviso: {{ pgm_sync_backup_blocked_hosts | join(', ') }}.
+      when:
+        - pgm_action_normalized | default(pgm_action | default('backup') | lower) == 'sync'
+        - pgm_sync_backup_blocked_hosts | length > 0
+
+    - name: PostgreSQL Manager | Exibir bloqueio do restore no sync
+      ansible.builtin.debug:
+        msg: "{{ pgm_sync_restore_skip_reason }}"
+      when:
+        - pgm_sync_backup_blocked | default(false) | bool
+
+- name: PostgreSQL Manager | Restore destinos
+  hosts: pgm_restore_targets
+  gather_facts: true
+  tasks:
+    - name: PostgreSQL Manager | Executar fase restore
+      ansible.builtin.include_role:
+        name: postgres_manager
+      vars:
+        pgm_phase: restore
+      when:
+        - pgm_action_normalized | default(pgm_action | default('backup') | lower) in ['restore', 'sync']
+        - not (hostvars['localhost'].pgm_sync_backup_blocked | default(false) | bool)
+
+- name: PostgreSQL Manager | Relatório consolidado
+  hosts: localhost
+  gather_facts: true
+  tasks:
+    - name: PostgreSQL Manager | Executar fase report
+      ansible.builtin.include_role:
+        name: postgres_manager
+      vars:
+        pgm_phase: report

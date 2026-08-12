@@ -1,0 +1,52 @@
+---
+cm:
+  postgres_manager:
+    databases:
+      marketdata:
+        description: "Base Marketdata"
+        database_name: "marketdata"
+        default_source_env: "prd"
+        default_sync_targets:
+          - "tu"
+          - "ti"
+          - "th"
+          - "fix"
+
+        restore:
+          mode: "promote"
+          target_temp_suffix: "_restoring"
+          old_suffix: "_old"
+          no_owner: true
+          no_privileges: true
+          jobs: 8
+          exclude_toc_patterns:
+            - "USER MAPPING"
+
+        grants:
+          capture_before_restore: true
+          apply_after_restore: true
+          fail_on_apply_error: false
+
+        materialized_views:
+          refresh_enabled: false
+          refresh_all: false
+          items: []
+
+        validations:
+          enabled: false
+          queries: []
+
+        hosts_env_sync:
+          prd: "192.168.10.10"
+          tu: "192.168.10.11"
+          ti: "192.168.10.12"
+          th:
+            th-marketdata-01:
+              ansible_host: "192.168.10.13"
+              database_name: "marketdata"
+              enabled: true
+            th-marketdata-02:
+              ansible_host: "192.168.10.14"
+              database_name: "marketdata"
+              enabled: true
+          fix: "192.168.10.15"

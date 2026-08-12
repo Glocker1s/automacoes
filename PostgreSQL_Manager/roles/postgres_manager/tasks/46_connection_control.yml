@@ -1,0 +1,142 @@
+---
+- name: Connection control | Resolver configuração
+  ansible.builtin.set_fact:
+    pgm_connection_control_enabled: "{{ (pgm_db_cfg.connection_control | default({})).get('enabled', pgm_connection_control_enabled_default) | bool }}"
+    pgm_connection_control_block_new_connections: "{{ (pgm_db_cfg.connection_control | default({})).get('block_new_connections', pgm_connection_control_block_new_connections_default) | bool }}"
+    pgm_connection_control_terminate_sessions: "{{ (pgm_db_cfg.connection_control | default({})).get('terminate_sessions', pgm_connection_control_terminate_sessions_default) | bool }}"
+    pgm_connection_control_keep_old_blocked: "{{ (pgm_db_cfg.connection_control | default({})).get('keep_old_blocked', pgm_connection_control_keep_old_blocked_default) | bool }}"
+
+- name: Connection control | Validar configuração
+  ansible.builtin.assert:
+    that:
+      - pgm_effective_restore_mode == 'promote'
+    fail_msg: "connection_control somente pode ser utilizado com restore.mode=promote."
+  when:
+    - pgm_connection_control_enabled | bool
+
+- name: Connection control | Bloquear conexões antes da promoção
+  ansible.builtin.shell: |
+    set -uo pipefail
+
+    DB_NAME="{{ pgm_database_name }}"
+    BLOCK_NEW="{{ 'true' if pgm_connection_control_block_new_connections | bool else 'false' }}"
+    TERMINATE="{{ 'true' if pgm_connection_control_terminate_sessions | bool else 'false' }}"
+
+    PSQL=(
+      psql -X -w -v ON_ERROR_STOP=1
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}"
+      -p "{{ pgm_db_port | default(pgm_default_port) }}"
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}"
+      -d postgres
+    )
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Connection control antes da promoção" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Database: ${DB_NAME}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] block_new_connections=${BLOCK_NEW}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] terminate_sessions=${TERMINATE}" >> "{{ pgm_restore_log_file }}"
+
+    if [ "${BLOCK_NEW}" = "true" ]; then
+      echo "[INFO] Bloqueando novas conexões em ${DB_NAME}" >> "{{ pgm_restore_log_file }}"
+
+      "${PSQL[@]}" -v db_name="${DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS false;
+    SQL
+
+      rc=$?
+      if [ "${rc}" -ne 0 ]; then
+        echo "[ERROR] Falha ao bloquear novas conexões. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit "${rc}"
+      fi
+
+      ALLOW_STATE="$(
+        "${PSQL[@]}" -v db_name="${DB_NAME}" -At 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT datallowconn
+      FROM pg_database
+     WHERE datname = :'db_name';
+    SQL
+      )"
+
+      rc=$?
+      if [ "${rc}" -ne 0 ]; then
+        echo "[ERROR] Falha ao validar datallowconn. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit "${rc}"
+      fi
+
+      echo "[INFO] datallowconn após bloqueio=${ALLOW_STATE}" >> "{{ pgm_restore_log_file }}"
+
+      if [ "${ALLOW_STATE}" != "f" ]; then
+        echo "[ERROR] Database ${DB_NAME} continua aceitando conexões." >> "{{ pgm_restore_log_file }}"
+        exit 30
+      fi
+    fi
+
+    if [ "${TERMINATE}" = "true" ]; then
+      echo "[INFO] Encerrando sessões existentes em ${DB_NAME}" >> "{{ pgm_restore_log_file }}"
+
+      "${PSQL[@]}" -v db_name="${DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+     WHERE datname = :'db_name'
+       AND pid <> pg_backend_pid();
+    SQL
+
+      rc=$?
+      if [ "${rc}" -ne 0 ]; then
+        echo "[ERROR] Falha ao encerrar sessões existentes. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit "${rc}"
+      fi
+
+      ACTIVE_SESSIONS="$(
+        "${PSQL[@]}" -v db_name="${DB_NAME}" -At 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT count(*)
+      FROM pg_stat_activity
+     WHERE datname = :'db_name';
+    SQL
+      )"
+
+      rc=$?
+      if [ "${rc}" -ne 0 ]; then
+        echo "[ERROR] Falha ao validar sessões restantes. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit "${rc}"
+      fi
+
+      echo "[INFO] Sessões restantes em ${DB_NAME}: ${ACTIVE_SESSIONS}" >> "{{ pgm_restore_log_file }}"
+
+      if [ "${ACTIVE_SESSIONS}" != "0" ]; then
+        echo "[ERROR] Ainda existem ${ACTIVE_SESSIONS} sessões em ${DB_NAME}." >> "{{ pgm_restore_log_file }}"
+        exit 31
+      fi
+    fi
+
+    echo "[INFO] Connection control rc=0" >> "{{ pgm_restore_log_file }}"
+    exit 0
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_connection_control
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - pgm_connection_control_enabled | bool
+
+- name: Connection control | Registrar bloqueio aplicado
+  ansible.builtin.set_fact:
+    pgm_connection_control_blocked: "{{ pgm_connection_control_block_new_connections | bool }}"
+  when:
+    - pgm_connection_control_enabled | bool
+    - _pgm_connection_control is defined
+    - _pgm_connection_control.rc | default(1) | int == 0
+
+- name: Connection control | Registrar falha
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Controlar conexões antes da promoção"
+    pgm_host_error_msg: "Falha ao controlar conexões da base {{ pgm_database_name }} antes da promoção. Verifique {{ pgm_restore_log_file }}."
+  when:
+    - _pgm_connection_control is defined
+    - _pgm_connection_control.rc | default(0) | int != 0

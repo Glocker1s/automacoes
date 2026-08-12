@@ -1,0 +1,68 @@
+---
+- name: Maintenance | Resolver configuração
+  ansible.builtin.set_fact:
+    pgm_maintenance_enabled: "{{ pgm_db_cfg.maintenance.enabled | default(pgm_maintenance_enabled_default) | bool }}"
+    pgm_maintenance_mode: >-
+      {%- if pgm_db_cfg.maintenance.mode is defined -%}
+      {{ pgm_db_cfg.maintenance.mode | lower | trim }}
+      {%- elif pgm_db_cfg.restore.vacuum_analyze | default(false) | bool -%}
+      vacuum_analyze
+      {%- else -%}
+      none
+      {%- endif -%}
+
+- name: Maintenance | Validar modo
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Maintenance"
+    pgm_host_error_msg: "maintenance.mode={{ pgm_maintenance_mode }} inválido. Valores aceitos: none, analyze, vacuum_analyze."
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_maintenance_mode not in ['none', 'analyze', 'vacuum_analyze']
+
+- name: Maintenance | Executar manutenção
+  ansible.builtin.shell: |
+    set -o pipefail
+
+    {% if pgm_maintenance_mode == 'analyze' %}
+    SQL="ANALYZE;"
+    {% else %}
+    SQL="VACUUM ANALYZE;"
+    {% endif %}
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Maintenance mode={{ pgm_maintenance_mode }}" >> "{{ pgm_restore_log_file }}"
+
+    psql -X -w -v ON_ERROR_STOP=1 \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d "{{ pgm_restore_target_db }}" \
+      -c "${SQL}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    echo "[INFO] Maintenance rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_maintenance
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_maintenance_enabled | bool
+    - pgm_maintenance_mode != 'none'
+
+- name: Maintenance | Registrar falha
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Maintenance"
+    pgm_host_error_msg: "Falha ao executar {{ pgm_maintenance_mode }}. Verifique {{ pgm_restore_log_file }}."
+  when:
+    - _pgm_maintenance is defined
+    - _pgm_maintenance.rc | default(0) | int != 0

@@ -1,0 +1,25 @@
+---
+- name: Preparar diretório local do relatório
+  ansible.builtin.file:
+    path: "{{ pgm_controller_tmp_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Coletar logs dos hosts
+  ansible.builtin.import_tasks: 80_collect_logs.yml
+
+- name: Publicar anexos no CIFS
+  ansible.builtin.import_tasks: 85_publish_cifs.yml
+
+- name: Montar relatório final
+  ansible.builtin.import_tasks: 90_build_report.yml
+
+- name: Falhar job se houve erro operacional
+  ansible.builtin.fail:
+    msg: "PostgreSQL Manager finalizou com falha. Verifique o e-mail/relatório gerado."
+  when:
+    - pgm_fail_job_on_error | bool
+    - pgm_overall_failed | default(false) | bool

@@ -1,0 +1,137 @@
+---
+cm:
+  postgres_manager:
+    databases:
+      dbcvm:
+        description: "Base DBCVM"
+        database_name: "dbcvm"
+
+        # Origem padrão do sync/backup e destinos padrão do sync.
+        default_source_env: "prd"
+        default_sync_targets:
+          - "tu"
+          - "ti"
+          - "th"
+          - "fix"
+        default_restore_targets: []
+
+        backup:
+          root_dir: "/backup/postgres_manager"
+          jobs: 8
+          format: "directory"
+          extra_args: ""
+          validate_dump: true
+
+        restore:
+          mode: "promote"              # promote | drop_in_place
+          target_temp_suffix: "_restoring"
+          old_suffix: "_old"
+          no_owner: true
+          no_privileges: true
+          jobs: 8
+          extra_args: ""
+          vacuum_analyze: true
+          exclude_toc_patterns:
+            - "USER MAPPING"
+            - "MATERIALIZED VIEW DATA public mv_search_companys"
+            - "MATERIALIZED VIEW DATA public mv_company_balance_guide"
+
+        grants:
+          capture_before_restore: true
+          apply_after_restore: true
+          fail_on_apply_error: false
+
+        dblink:
+          enabled: true
+          server_name: "remote_valemobi"
+          dbname_var: "dblink_dbname"
+          host_var: "dblink_host"
+          port_var: "dblink_port"
+          user_var: "dblink_user"
+          password_var: "dblink_password"
+
+        materialized_views:
+          refresh_enabled: true
+          refresh_all: false
+          items:
+            - schema: "public"
+              name: "mv_search_companys"
+              concurrently: false
+            - schema: "public"
+              name: "mv_company_balance_guide"
+              concurrently: false
+
+        users:
+          lock_before_promote:
+            - "svc_dbcvm"
+          unlock_after_promote:
+            - "svc_dbcvm"
+
+        validations:
+          enabled: true
+          queries:
+            - "queries/total.sql"
+            - "queries/total-by-table.sql"
+
+        # Mapa completo do banco por ambiente.
+        # Pode ter 1 ou N hosts por ambiente. O survey filtra por env e/ou host.
+        hosts_env_sync:
+          prd:
+            - name: "prd-dbcvm-01"
+              ansible_host: "192.168.0.10"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              source: true
+              enabled: true
+
+          tu:
+            - name: "tu-dbcvm-01"
+              ansible_host: "192.168.0.11"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              enabled: true
+
+          ti:
+            - name: "ti-dbcvm-01"
+              ansible_host: "192.168.0.12"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              enabled: true
+
+          th:
+            - name: "th-dbcvm-01"
+              ansible_host: "192.168.0.13"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              enabled: true
+
+            - name: "th-dbcvm-02"
+              ansible_host: "192.168.0.14"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              enabled: true
+
+          fix:
+            - name: "fix-dbcvm-01"
+              ansible_host: "192.168.0.15"
+              database_name: "dbcvm"
+              port: 5432
+              db_host: "127.0.0.1"
+              os_user: "postgres"
+              db_user: "postgres"
+              enabled: true

@@ -1,0 +1,67 @@
+---
+- name: Definir arquivo de configuração do banco
+  ansible.builtin.set_fact:
+    pgm_database_file: "{{ pgm_databases_dir }}/{{ pgm_database_key_normalized }}.yml"
+
+- name: Validar existência do arquivo do banco
+  ansible.builtin.stat:
+    path: "{{ pgm_database_file }}"
+  register: _pgm_database_file_stat
+  delegate_to: localhost
+
+- name: Falhar quando arquivo do banco não existir
+  ansible.builtin.fail:
+    msg: "Arquivo de banco não encontrado: {{ pgm_database_file }}"
+  when: not (_pgm_database_file_stat.stat.exists | default(false))
+
+- name: Carregar arquivo do banco
+  ansible.builtin.include_vars:
+    file: "{{ pgm_database_file }}"
+    name: _pgm_database_raw
+
+- name: Extrair configuração do banco
+  ansible.builtin.set_fact:
+    pgm_database_loaded_cfg: >-
+      {{
+        _pgm_database_raw.cm.postgres_manager.databases[pgm_database_key_normalized]
+        | default({})
+      }}
+
+- name: Validar bloco do banco no arquivo
+  ansible.builtin.assert:
+    that:
+      - pgm_database_loaded_cfg | length > 0
+    fail_msg: >-
+      O arquivo {{ pgm_database_file }} foi encontrado, mas não contém
+      cm.postgres_manager.databases.{{ pgm_database_key_normalized }}.
+
+- name: Consolidar configuração efetiva do banco
+  ansible.builtin.set_fact:
+    pgm_db_cfg: "{{ pgm_database_defaults | combine(pgm_database_loaded_cfg, recursive=True) }}"
+
+- name: Definir nome efetivo da base
+  ansible.builtin.set_fact:
+    pgm_database_name_effective: >-
+      {{
+        pgm_db_cfg.database_name
+        | default(pgm_database_key_normalized)
+        | string
+        | trim
+      }}
+
+- name: Validar hosts_env_sync
+  ansible.builtin.assert:
+    that:
+      - pgm_db_cfg.hosts_env_sync | default({}) | length > 0
+    fail_msg: >-
+      O banco {{ pgm_database_key_normalized }} não possui hosts_env_sync configurado.
+      Configure os ambientes/hosts em {{ pgm_database_file }}.
+
+- name: Exibir configuração carregada
+  ansible.builtin.debug:
+    msg:
+      database_file: "{{ pgm_database_file }}"
+      database_key: "{{ pgm_database_key_normalized }}"
+      database_name: "{{ pgm_database_name_effective }}"
+      action: "{{ pgm_action_normalized }}"
+      environments: "{{ pgm_db_cfg.hosts_env_sync.keys() | list | sort }}"

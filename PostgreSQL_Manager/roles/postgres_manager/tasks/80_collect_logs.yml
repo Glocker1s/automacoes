@@ -1,0 +1,172 @@
+---
+- name: Resolver hosts para coleta de logs
+  ansible.builtin.set_fact:
+    pgm_report_hosts: "{{ ((groups.pgm_source_targets | default([])) + (groups.pgm_restore_targets | default([]))) | unique | list }}"
+
+- name: Montar lista de artefatos remotos
+  ansible.builtin.set_fact:
+    _pgm_remote_artifacts_json: >-
+      {%- set out = [] -%}
+      {%- for h in pgm_report_hosts | default([]) -%}
+        {%- for p in hostvars[h].pgm_host_artifacts | default([]) -%}
+          {%- if p | string | length > 0 -%}
+            {%- set _ = out.append({
+              'host': h,
+              'path': p,
+              'filename': p | basename,
+              'local_path': pgm_controller_tmp_dir ~ '/' ~ (p | basename)
+            }) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar lista de artefatos remotos
+  ansible.builtin.set_fact:
+    pgm_remote_artifacts: "{{ _pgm_remote_artifacts_json | from_json }}"
+
+- name: Exibir artefatos remotos para coleta
+  ansible.builtin.debug:
+    msg:
+      remote_artifacts: "{{ pgm_remote_artifacts | default([]) }}"
+
+- name: Validar artefatos remotos
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ pgm_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.path }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  become_user: root
+  register: _pgm_remote_artifacts_stat
+  failed_when: false
+  changed_when: false
+
+- name: Montar lista de artefatos remotos existentes
+  ansible.builtin.set_fact:
+    _pgm_existing_remote_artifacts_json: >-
+      {%- set out = [] -%}
+      {%- for r in _pgm_remote_artifacts_stat.results | default([]) -%}
+        {%- if (r.stat.exists | default(false) | bool) and not (r.stat.isdir | default(false) | bool) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar artefatos remotos existentes
+  ansible.builtin.set_fact:
+    pgm_existing_remote_artifacts: "{{ _pgm_existing_remote_artifacts_json | from_json }}"
+
+- name: Exibir artefatos remotos existentes
+  ansible.builtin.debug:
+    msg:
+      existing_remote_artifacts: "{{ pgm_existing_remote_artifacts | default([]) }}"
+
+- name: Copiar artefatos para controller via fetch
+  ansible.builtin.fetch:
+    src: "{{ item.path }}"
+    dest: "{{ item.local_path }}"
+    flat: true
+  loop: "{{ pgm_existing_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.path }} -> {{ item.local_path }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  become_user: root
+  register: _pgm_fetch_artifacts
+  failed_when: false
+  changed_when: false
+
+- name: Verificar arquivos locais após fetch
+  ansible.builtin.stat:
+    path: "{{ item.local_path }}"
+  loop: "{{ pgm_existing_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.local_path }}"
+  register: _pgm_local_after_fetch
+  delegate_to: localhost
+  become: false
+
+- name: Montar lista pendente após fetch
+  ansible.builtin.set_fact:
+    _pgm_missing_after_fetch_json: >-
+      {%- set out = [] -%}
+      {%- for r in _pgm_local_after_fetch.results | default([]) -%}
+        {%- if not (r.stat.exists | default(false) | bool) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar lista pendente após fetch
+  ansible.builtin.set_fact:
+    pgm_missing_after_fetch: "{{ _pgm_missing_after_fetch_json | from_json }}"
+
+- name: Exibir pendências após fetch
+  ansible.builtin.debug:
+    msg:
+      missing_after_fetch: "{{ pgm_missing_after_fetch | default([]) }}"
+  when:
+    - pgm_missing_after_fetch | default([]) | length > 0
+
+- name: Ler artefatos pendentes via cat
+  ansible.builtin.command:
+    argv:
+      - /bin/cat
+      - "{{ item.path }}"
+  loop: "{{ pgm_missing_after_fetch | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.path }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  become_user: root
+  register: _pgm_cat_artifacts
+  failed_when: false
+  changed_when: false
+
+- name: Salvar artefatos pendentes no controller
+  ansible.builtin.copy:
+    content: "{{ item.stdout | default('') }}\n"
+    dest: "{{ item.item.local_path }}"
+    mode: "0644"
+  loop: "{{ _pgm_cat_artifacts.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.local_path | default('arquivo') }}"
+  delegate_to: localhost
+  become: false
+  when:
+    - item.rc is defined
+    - item.rc | int == 0
+    - item.item.local_path is defined
+
+- name: Verificar arquivos locais finais
+  ansible.builtin.stat:
+    path: "{{ item.local_path }}"
+  loop: "{{ pgm_existing_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.local_path }}"
+  register: _pgm_local_artifacts_final
+  delegate_to: localhost
+  become: false
+
+- name: Montar lista final de arquivos coletados
+  ansible.builtin.set_fact:
+    _pgm_collected_local_files_json: >-
+      {%- set out = [] -%}
+      {%- for r in _pgm_local_artifacts_final.results | default([]) -%}
+        {%- if r.stat.exists | default(false) | bool -%}
+          {%- set _ = out.append(r.item.local_path) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | list | sort | to_json }}
+
+- name: Definir arquivos locais coletados
+  ansible.builtin.set_fact:
+    pgm_collected_local_files: "{{ _pgm_collected_local_files_json | from_json }}"
+
+- name: Exibir arquivos coletados
+  ansible.builtin.debug:
+    msg:
+      expected: "{{ pgm_existing_remote_artifacts | default([]) | map(attribute='local_path') | list }}"
+      collected: "{{ pgm_collected_local_files | default([]) }}"

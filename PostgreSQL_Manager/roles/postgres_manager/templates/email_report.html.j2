@@ -1,0 +1,300 @@
+{% macro badge(text, kind='gray') -%}
+  {%- if kind == 'ok' -%}
+    <span style="display:inline-block;background-color:#e8f5e9;color:#1b5e20;font-size:12px;font-weight:bold;padding:4px 8px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- elif kind == 'warn' -%}
+    <span style="display:inline-block;background-color:#fff3e0;color:#9a6700;font-size:12px;font-weight:bold;padding:4px 8px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- elif kind == 'fail' -%}
+    <span style="display:inline-block;background-color:#ffebee;color:#b42318;font-size:12px;font-weight:bold;padding:4px 8px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- elif kind == 'blue' -%}
+    <span style="display:inline-block;background-color:#e8f1ff;color:#184e8a;font-size:12px;font-weight:bold;padding:4px 8px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- else -%}
+    <span style="display:inline-block;background-color:#eeeeee;color:#333333;font-size:12px;font-weight:bold;padding:4px 8px;border-radius:2px;white-space:nowrap;">{{ text }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro code(v) -%}
+  <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f5f5f5;color:#222222;padding:2px 5px;border-radius:2px;word-break:break-all;">{{ v | default('—') }}</span>
+{%- endmacro %}
+
+{% macro th(v) -%}
+  <th bgcolor="#f4f6f8" style="background-color:#f4f6f8;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">{{ v }}</th>
+{%- endmacro %}
+
+{% macro td_open() -%}
+  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+{%- endmacro %}
+
+{% macro card(label, value, help='', kind='gray') -%}
+  {% if kind == 'ok' %}
+    {% set border = '#b7dfc2' %}
+    {% set bg = '#f1f8f4' %}
+    {% set color = '#1b5e20' %}
+  {% elif kind == 'fail' %}
+    {% set border = '#f0b4b4' %}
+    {% set bg = '#fff5f5' %}
+    {% set color = '#b42318' %}
+  {% elif kind == 'warn' %}
+    {% set border = '#f0d49a' %}
+    {% set bg = '#fffaf0' %}
+    {% set color = '#9a6700' %}
+  {% else %}
+    {% set border = '#d9d9d9' %}
+    {% set bg = '#ffffff' %}
+    {% set color = '#111111' %}
+  {% endif %}
+  <td valign="top" style="width:20%;background-color:{{ bg }};border:1px solid {{ border }};padding:10px;font-family:Arial,sans-serif;color:#111111;">
+    <div style="font-size:12px;color:#666666;line-height:15px;">{{ label }}</div>
+    <div style="font-size:22px;font-weight:bold;color:{{ color }};margin-top:3px;line-height:26px;">{{ value }}</div>
+    {% if help | string | length > 0 %}
+    <div style="font-size:11px;color:#777777;margin-top:3px;line-height:14px;">{{ help }}</div>
+    {% endif %}
+  </td>
+{%- endmacro %}
+
+{% set job_id = tower_job_id | default(awx_job_id | default('local')) %}
+{% set template_name = tower_job_template_name | default(awx_job_template_name | default('PostgreSQL Manager')) %}
+{% set executor = tower_user_name | default(awx_user_name | default(ansible_user_id | default('N/A'))) %}
+{% set action = pgm_action_normalized | default(pgm_action | default('-')) %}
+{% set database = pgm_database_name_effective | default(pgm_database_key | default('-')) %}
+{% set source_env = pgm_source_env_effective | default(pgm_source_env | default('-')) %}
+{% set target_envs = pgm_target_envs_effective | default([]) %}
+{% set reason = pgm_execution_reason | default(motivo | default('-')) %}
+{% set rows = pgm_report_rows | default([]) %}
+{% set attachments = send_mail_attachments | default([]) %}
+{% set job_url = ansible_url | default('') ~ '/#/jobs/playbook/' ~ job_id ~ '/output' %}
+
+{% set totals = namespace(ok=0, warn=0, fail=0, backup=0, restore=0) %}
+{% for row in rows %}
+  {% if row.status == 'SUCESSO' %}
+    {% set totals.ok = totals.ok + 1 %}
+  {% elif row.status == 'SUCESSO COM AVISO' %}
+    {% set totals.warn = totals.warn + 1 %}
+  {% elif row.status == 'FALHA' %}
+    {% set totals.fail = totals.fail + 1 %}
+  {% endif %}
+
+  {% if row.action == 'backup' %}
+    {% set totals.backup = totals.backup + 1 %}
+  {% elif row.action == 'restore' %}
+    {% set totals.restore = totals.restore + 1 %}
+  {% endif %}
+{% endfor %}
+
+{% if pgm_overall_status == 'SUCESSO' %}
+  {% set banner_color = '#1f4d2b' %}
+  {% set status_kind = 'ok' %}
+{% elif pgm_overall_status == 'SUCESSO COM AVISO' %}
+  {% set banner_color = '#8a5a00' %}
+  {% set status_kind = 'warn' %}
+{% else %}
+  {% set banner_color = '#7f1d1d' %}
+  {% set status_kind = 'fail' %}
+{% endif %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td align="left" style="padding:8px 8px 12px 8px;">
+      <table role="presentation" width="1080" cellspacing="0" cellpadding="0" border="0" style="width:1080px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+        <tr>
+          <td bgcolor="{{ banner_color }}" style="background-color:{{ banner_color }};padding:15px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                  <div style="font-size:19px;font-weight:bold;color:#ffffff;margin:0;padding:0;">
+                    {{ pgm_report_title | default('PostgreSQL Manager') }}
+                  </div>
+                  <div style="font-size:13px;color:#f2f2f2;margin-top:5px;line-height:18px;">
+                    Job: <b>{{ job_id }}</b>
+                    &nbsp;|&nbsp; Template: <b>{{ template_name }}</b>
+                    &nbsp;|&nbsp; Executor: <b>{{ executor }}</b>
+                  </div>
+                </td>
+                <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                  {{ badge(pgm_overall_status | default('N/A'), status_kind) }}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;padding:12px 16px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+            <b>Ação:</b> {{ badge(action | upper, 'blue') }}
+            &nbsp;&nbsp;
+            <b>Banco:</b> {{ code(database) }}
+            &nbsp;&nbsp;
+            <b>Origem:</b> {{ code(source_env) }}
+            &nbsp;&nbsp;
+            <b>Destino(s):</b>
+            {% if target_envs | length > 0 %}
+              {{ code(target_envs | join(', ')) }}
+            {% else %}
+              {{ code('—') }}
+            {% endif %}
+            <br/>
+            <div style="margin-top:7px;">
+              <b>Motivo:</b> {{ reason if reason | string | length > 0 else '—' }}
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding-top:14px;">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>
+                {{ card('Hosts com sucesso', totals.ok, 'Execuções concluídas sem erro', 'ok') }}
+                <td width="1%" style="font-size:1px;">&nbsp;</td>
+                {{ card('Hosts com aviso', totals.warn, 'Execuções concluídas com observação', 'warn') }}
+                <td width="1%" style="font-size:1px;">&nbsp;</td>
+                {{ card('Hosts com falha', totals.fail, 'Execuções que exigem análise', 'fail') }}
+                <td width="1%" style="font-size:1px;">&nbsp;</td>
+                {{ card('Backups', totals.backup, 'Rotinas de backup executadas', 'gray') }}
+                <td width="1%" style="font-size:1px;">&nbsp;</td>
+                {{ card('Restores', totals.restore, 'Rotinas de restore executadas', 'gray') }}
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        {% if pgm_controller_failed | default(false) | bool %}
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#b42318;margin-bottom:7px;">
+              Falha no planejamento
+            </div>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>{{ th('Campo') }}{{ th('Valor') }}</tr>
+              <tr>{{ td_open() }}Task</td>{{ td_open() }}{{ code(pgm_controller_failed_task | default('desconhecida')) }}</td></tr>
+              <tr>{{ td_open() }}Mensagem</td>{{ td_open() }}<pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;margin:0;">{{ pgm_controller_error_msg | default('') }}</pre></td></tr>
+            </table>
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if rows | selectattr('status', 'equalto', 'FALHA') | list | length > 0 %}
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#b42318;margin-bottom:7px;">
+              Detalhes das falhas
+            </div>
+
+            {% for row in rows %}
+              {% if row.status == 'FALHA' %}
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;margin-bottom:10px;">
+                <tr>
+                  <td bgcolor="#fff5f5" style="background-color:#fff5f5;border:1px solid #f0b4b4;padding:10px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+                    <div style="font-size:14px;font-weight:bold;color:#b42318;margin-bottom:5px;">
+                      {{ row.host }} - {{ row.action | upper }} - {{ row.database }}
+                    </div>
+                    <div style="line-height:18px;">
+                      <b>Ambiente:</b> {{ code(row.env) }}
+                      &nbsp;&nbsp;
+                      <b>Task:</b> {{ code(row.failed_task | default('desconhecida')) }}
+                      &nbsp;&nbsp;
+                      <b>Log:</b> {{ code(row.log_file | default('—')) }}
+                    </div>
+                    {% if row.error | default('') | string | length > 0 %}
+                    <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#ffffff;border:1px solid #ead2d2;padding:8px;margin-top:8px;color:#222222;">{{ row.error }}</pre>
+                    {% endif %}
+                  </td>
+                </tr>
+              </table>
+              {% endif %}
+            {% endfor %}
+          </td>
+        </tr>
+        {% endif %}
+
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Resumo por host
+            </div>
+
+            {% if rows | length == 0 %}
+              <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;">
+                Nenhum host foi processado nesta execução.
+              </div>
+            {% else %}
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr>
+                  {{ th('Ambiente') }}
+                  {{ th('Host') }}
+                  {{ th('Banco') }}
+                  {{ th('Ação') }}
+                  {{ th('Status') }}
+                  {{ th('Dump') }}
+                  {{ th('Log') }}
+                </tr>
+
+                {% for row in rows %}
+                <tr>
+                  {{ td_open() }}{{ row.env | default('—') }}</td>
+                  {{ td_open() }}<b>{{ row.host | default('—') }}</b></td>
+                  {{ td_open() }}{{ code(row.database | default('—')) }}</td>
+                  {{ td_open() }}{{ badge((row.action | default('—')) | upper, 'blue') }}</td>
+                  {{ td_open() }}
+                    {% if row.status == 'SUCESSO' %}
+                      {{ badge(row.status, 'ok') }}
+                    {% elif row.status == 'SUCESSO COM AVISO' %}
+                      {{ badge(row.status, 'warn') }}
+                    {% elif row.status == 'FALHA' %}
+                      {{ badge(row.status, 'fail') }}
+                    {% else %}
+                      {{ badge(row.status | default('N/A'), 'gray') }}
+                    {% endif %}
+                  </td>
+                  {{ td_open() }}{{ code(row.dump | default('—')) }}</td>
+                  {{ td_open() }}{{ code(row.log_file | default('—')) }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+            {% endif %}
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Anexos e artefatos
+            </div>
+
+            {% if attachments | length > 0 %}
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr>{{ th('Arquivo') }}</tr>
+                {% for item in attachments %}
+                <tr>{{ td_open() }}{{ code(item) }}</td></tr>
+                {% endfor %}
+              </table>
+            {% else %}
+              <div style="background-color:#fffaf0;border:1px solid #f0d49a;padding:10px;font-family:Arial,sans-serif;font-size:13px;color:#9a6700;">
+                Nenhum anexo foi publicado para este relatório.
+              </div>
+            {% endif %}
+
+            {% if pgm_cifs_report_upload_failed | default(false) | bool %}
+              <div style="background-color:#fffaf0;border:1px solid #f0d49a;padding:10px;margin-top:8px;font-family:Arial,sans-serif;font-size:13px;color:#9a6700;">
+                <b>Atenção:</b> houve falha ao publicar anexos no CIFS.
+                <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#ffffff;border:1px solid #ead2d2;padding:8px;margin-top:8px;color:#222222;">{{ pgm_cifs_report_upload_error | default('Erro não informado.') }}</pre>
+              </div>
+            {% endif %}
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding-top:14px;font-family:Arial,sans-serif;font-size:12px;color:#666666;line-height:18px;">
+            Output do job:
+            {% if ansible_url | default('') | length > 0 %}
+              <a href="{{ job_url }}" style="color:#184e8a;text-decoration:none;">{{ job_id }}</a>
+            {% else %}
+              {{ job_id }}
+            {% endif %}
+            <br/>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

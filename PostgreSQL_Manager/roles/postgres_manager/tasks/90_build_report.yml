@@ -1,0 +1,85 @@
+---
+- name: Report | Resolver hosts do relatório
+  ansible.builtin.set_fact:
+    pgm_report_hosts: "{{ ((groups.pgm_source_targets | default([])) + (groups.pgm_restore_targets | default([]))) | unique | list }}"
+
+- name: Report | Montar linhas do relatório
+  ansible.builtin.set_fact:
+    _pgm_report_rows_json: >-
+      {%- set out = [] -%}
+      {%- for h in pgm_report_hosts | default([]) -%}
+        {%- set hv = hostvars[h] -%}
+        {%- set item = {
+          'host': h,
+          'env': hv.pgm_env | default('-'),
+          'database': hv.pgm_database_name | default('-'),
+          'action': hv.pgm_host_action | default(hv.pgm_role | default('-')),
+          'status': hv.pgm_host_status | default('NÃO EXECUTADO'),
+          'failed_task': hv.pgm_host_failed_task | default(''),
+          'error': hv.pgm_host_error_msg | default(''),
+          'log_file': hv.pgm_host_log_file | default(''),
+          'dump': (hv.pgm_host_summary | default({})).get('dump', '')
+        } -%}
+        {%- set _ = out.append(item) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report | Publicar linhas do relatório
+  ansible.builtin.set_fact:
+    pgm_report_rows: "{{ _pgm_report_rows_json | from_json }}"
+
+- name: Report | Definir status geral
+  ansible.builtin.set_fact:
+    pgm_overall_failed: >-
+      {{
+        (pgm_controller_failed | default(false) | bool)
+        or
+        (
+          pgm_report_rows
+          | selectattr('status', 'equalto', 'FALHA')
+          | list
+          | length > 0
+        )
+      }}
+    pgm_overall_warning: >-
+      {{
+        (pgm_cifs_report_upload_failed | default(false) | bool)
+        or
+        (
+          pgm_report_rows
+          | selectattr('status', 'equalto', 'SUCESSO COM AVISO')
+          | list
+          | length > 0
+        )
+      }}
+
+- name: Report | Definir status textual geral
+  ansible.builtin.set_fact:
+    pgm_overall_status: "{{ 'FALHA' if pgm_overall_failed | bool else ('SUCESSO COM AVISO' if pgm_overall_warning | bool else 'SUCESSO') }}"
+
+- name: Report | Renderizar HTML do relatório
+  ansible.builtin.set_fact:
+    pgm_report_html: "{{ lookup('ansible.builtin.template', 'email_report.html.j2') }}"
+
+- name: Report | Publicar set_stats para e-mail
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: >-
+        {{ pgm_report_subject_prefix }} - Job #{{ tower_job_id | default(awx_job_id | default('local')) }} -
+        {{ tower_job_template_name | default(awx_job_template_name | default('PostgreSQL Manager')) }} -
+        {{ pgm_overall_status }}
+      send_mail_body: "{{ pgm_report_html }}"
+      send_mail_cifs: "{{ pgm_cifs_label | default(send_mail_cifs | default('')) }}"
+      send_mail_cifs_path: "{{ pgm_cifs_attachment_path | default(send_mail_cifs_path | default('')) }}"
+      send_mail_cifs_address: "{{ pgm_cifs_address | default(send_mail_cifs_address | default({})) }}"
+      cifs_workgroup: "{{ pgm_cifs_workgroup | default(cifs_workgroup | default('')) }}"
+      send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
+      send_mail_attachments: "{{ send_mail_attachments | default(send_mail_cifs_remote_files | default([])) }}"
+      tmp_path_local: "{{ pgm_controller_tmp_dir }}"
+
+- name: Report | Exibir status geral
+  ansible.builtin.debug:
+    msg:
+      status: "{{ pgm_overall_status }}"
+      rows: "{{ pgm_report_rows }}"
+      attachments: "{{ send_mail_attachments | default([]) }}"

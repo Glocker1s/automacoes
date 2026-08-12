@@ -1,0 +1,255 @@
+---
+- name: Backup | Normalizar configuração carregada no host dinâmico
+  ansible.builtin.set_fact:
+    pgm_db_cfg: "{{ pgm_db_cfg | from_yaml if pgm_db_cfg is string else pgm_db_cfg }}"
+
+- name: Backup | Inicializar status do backup
+  ansible.builtin.set_fact:
+    pgm_host_failed: false
+    pgm_host_warning: false
+    pgm_host_error_msg: ""
+    pgm_host_failed_task: ""
+    pgm_host_status: "EM EXECUÇÃO"
+    pgm_host_action: "backup"
+    pgm_host_artifacts: []
+    pgm_host_steps: []
+    pgm_backup_dir: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}"
+    pgm_backup_jobs: "{{ (pgm_db_cfg.backup.jobs | default(pgm_default_jobs)) | int }}"
+    pgm_dump_dir: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}/{{ pgm_dump_basename }}"
+    pgm_dump_log_file: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}/{{ pgm_dump_basename | regex_replace('\\.dump\\.dir$', '') }}.dump.log"
+    pgm_host_log_file: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}/{{ pgm_dump_basename | regex_replace('\\.dump\\.dir$', '') }}.dump.log"
+    pgm_latest_manifest_file: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}/{{ pgm_latest_manifest_name }}"
+
+- name: Backup | Bloco de backup controlado
+  block:
+    - name: Backup | Criar diretório de backup
+      ansible.builtin.file:
+        path: "{{ pgm_backup_dir }}"
+        state: directory
+        mode: "0775"
+      become: true
+      become_user: root
+
+    - name: Backup | Inicializar log do backup
+      ansible.builtin.copy:
+        dest: "{{ pgm_dump_log_file }}"
+        mode: "0640"
+        content: |
+          PostgreSQL Manager - Backup
+          Host: {{ inventory_hostname }}
+          Ambiente: {{ pgm_env }}
+          Banco: {{ pgm_database_name }}
+          Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
+          Início: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+          Dump: {{ pgm_dump_dir }}
+
+      become: true
+      become_user: root
+
+    - name: Backup | Remover dump anterior com mesmo nome
+      ansible.builtin.file:
+        path: "{{ pgm_dump_dir }}"
+        state: absent
+      become: true
+      become_user: root
+
+    - name: Backup | Executar pg_dump
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "[INFO] Executando pg_dump em {{ pgm_database_name }}" >> "{{ pgm_dump_log_file }}"
+        pg_dump \
+          -w \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -Fd \
+          -j "{{ pgm_backup_jobs }}" \
+          -f "{{ pgm_dump_dir }}" \
+          {{ pgm_db_cfg.backup.extra_args | default('') }} \
+          "{{ pgm_database_name }}" >> "{{ pgm_dump_log_file }}" 2>&1
+        rc=$?
+        echo "[INFO] pg_dump rc=${rc}" >> "{{ pgm_dump_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_dump_exec
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+
+    - name: Backup | Registrar falha do pg_dump quando houver
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Executar pg_dump"
+        pgm_host_error_msg: "pg_dump retornou rc={{ _pgm_dump_exec.rc }}. Verifique o log {{ pgm_dump_log_file }}."
+      when: _pgm_dump_exec.rc | int != 0
+
+    - name: Backup | Validar dump com pg_restore -l
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "" >> "{{ pgm_dump_log_file }}"
+        echo "[INFO] Validando dump com pg_restore -l" >> "{{ pgm_dump_log_file }}"
+        pg_restore -l "{{ pgm_dump_dir }}" >> "{{ pgm_dump_log_file }}" 2>&1
+        rc=$?
+        echo "[INFO] pg_restore -l rc=${rc}" >> "{{ pgm_dump_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+      register: _pgm_dump_validate
+      failed_when: false
+      changed_when: false
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_db_cfg.backup.validate_dump | default(true) | bool
+
+    - name: Backup | Registrar falha de validação do dump
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validar dump"
+        pgm_host_error_msg: "pg_restore -l retornou rc={{ _pgm_dump_validate.rc }}. Verifique o log {{ pgm_dump_log_file }}."
+      when:
+        - _pgm_dump_validate is defined
+        - _pgm_dump_validate.rc is defined
+        - _pgm_dump_validate.rc | int != 0
+
+    - name: Backup | Criar manifesto latest local
+      ansible.builtin.copy:
+        dest: "{{ pgm_latest_manifest_file }}"
+        content: "{{ pgm_dump_basename }}\n"
+        mode: "0644"
+      become: true
+      become_user: root
+      when: not (pgm_host_failed | bool)
+
+    - name: Backup | Publicar dump no CIFS
+      when:
+        - pgm_cifs_enabled | bool
+        - not (pgm_host_failed | bool)
+      block:
+        - name: Backup | Resolver endereço CIFS
+          ansible.builtin.set_fact:
+            _pgm_cifs_server: "{{ (pgm_cifs_address | default({})).get(pgm_cifs_label | default('') | lower, '') }}"
+
+        - name: Backup | Validar endereço CIFS
+          ansible.builtin.fail:
+            msg: "CIFS não mapeado: pgm_cifs_label={{ pgm_cifs_label }}"
+          when: _pgm_cifs_server | length == 0
+
+        - name: Backup | Criar diretório de montagem CIFS
+          ansible.builtin.file:
+            path: "{{ pgm_cifs_mount_dir }}"
+            state: directory
+            mode: "0755"
+          become: true
+
+        - name: Backup | Criar arquivo temporário de senha CIFS
+          ansible.builtin.copy:
+            dest: "{{ pgm_cifs_password_file }}"
+            content: "{{ ansible_password | default('') }}"
+            mode: "0600"
+          become: true
+          no_log: true
+
+        - name: Backup | Montar CIFS
+          ansible.builtin.shell: |
+            set -euo pipefail
+            if mountpoint -q "{{ pgm_cifs_mount_dir }}"; then
+              umount "{{ pgm_cifs_mount_dir }}" || true
+            fi
+            mount -t cifs "{{ _pgm_cifs_server }}" "{{ pgm_cifs_mount_dir }}" \
+              -o username="{{ ansible_user }}",password="$(cat {{ pgm_cifs_password_file }})",domain="{{ pgm_cifs_domain }}",rw,vers="{{ pgm_cifs_vers }}"
+          args:
+            executable: /bin/bash
+          become: true
+          no_log: true
+
+        - name: Backup | Copiar dump e manifesto para CIFS
+          ansible.builtin.shell: |
+            set -euo pipefail
+            DST="{{ pgm_cifs_mount_dir }}{{ pgm_cifs_dump_path | regex_replace('/$', '') }}"
+            mkdir -p "$DST"
+            rm -rf "$DST/{{ pgm_dump_basename }}"
+            cp -a "{{ pgm_dump_dir }}" "$DST/"
+            cp -f "{{ pgm_dump_log_file }}" "$DST/"
+            cp -f "{{ pgm_latest_manifest_file }}" "$DST/"
+            sync
+          args:
+            executable: /bin/bash
+          become: true
+
+      rescue:
+        - name: Backup | Registrar falha de publicação CIFS do backup
+          ansible.builtin.set_fact:
+            pgm_host_warning: true
+            pgm_cifs_upload_failed: true
+            pgm_cifs_upload_error: >-
+              {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default(ansible_failed_result | to_json)) }}
+            pgm_host_failed: "{{ pgm_fail_on_cifs_error | bool }}"
+            pgm_host_failed_task: "Publicar dump no CIFS"
+            pgm_host_error_msg: >-
+              {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Falha ao publicar dump no CIFS.')) }}
+
+      always:
+        - name: Backup | Desmontar CIFS backup
+          ansible.builtin.shell: "umount {{ pgm_cifs_mount_dir }} || true"
+          become: true
+          changed_when: false
+          failed_when: false
+
+        - name: Backup | Remover senha temporária CIFS backup
+          ansible.builtin.file:
+            path: "{{ pgm_cifs_password_file }}"
+            state: absent
+          become: true
+          failed_when: false
+          no_log: true
+
+  rescue:
+    - name: Backup | Marcar falha inesperada do backup
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+        pgm_host_error_msg: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result.stdout
+            | default('Falha não detalhada durante o backup.')))
+          }}
+
+  always:
+    - name: Backup | Finalizar log de backup
+      ansible.builtin.shell: |
+        cat <<'EOF' >> "{{ pgm_dump_log_file }}"
+
+        Fim: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+        Status: {{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}
+        EOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: root
+      failed_when: false
+      changed_when: false
+
+    - name: Backup | Publicar status final do backup no host
+      ansible.builtin.set_fact:
+        pgm_host_status: "{{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}"
+        pgm_host_artifacts:
+          - "{{ pgm_dump_log_file }}"
+        pgm_host_summary:
+          env: "{{ pgm_env }}"
+          host: "{{ inventory_hostname }}"
+          database: "{{ pgm_database_name }}"
+          action: "backup"
+          dump: "{{ pgm_dump_basename }}"
+          dump_dir: "{{ pgm_dump_dir }}"
+          log_file: "{{ pgm_dump_log_file }}"

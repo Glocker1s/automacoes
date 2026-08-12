@@ -1,0 +1,55 @@
+---
+- name: Post restore | Resolver configuração de truncate
+  ansible.builtin.set_fact:
+    pgm_post_restore_truncate_enabled: "{{ pgm_db_cfg.post_restore.truncate_enabled | default(pgm_post_restore_truncate_enabled_default) | bool }}"
+    pgm_post_restore_truncate_fail_on_error: "{{ pgm_db_cfg.post_restore.fail_on_error | default(pgm_post_restore_truncate_fail_on_error_default) | bool }}"
+    pgm_post_restore_truncate_run_on_envs: "{{ pgm_db_cfg.post_restore.run_on_envs | default([]) | map('string') | map('lower') | list }}"
+    pgm_post_restore_truncate_groups: "{{ pgm_db_cfg.post_restore.truncate_groups | default([]) }}"
+
+- name: Post restore | Truncar tabelas configuradas
+  ansible.builtin.shell: |
+    set -o pipefail
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Post-restore truncate: {{ item.name | default('grupo') }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Tabelas: {{ item.tables | default([]) | join(', ') }}" >> "{{ pgm_restore_log_file }}"
+
+    psql -X -w -v ON_ERROR_STOP=1 \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d "{{ pgm_restore_target_db }}" \
+      -c "TRUNCATE TABLE {{ item.tables | join(', ') }}{{ ' CASCADE' if item.cascade | default(false) | bool else '' }};" \
+      >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    echo "[INFO] Post-restore truncate rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  loop: "{{ pgm_post_restore_truncate_groups }}"
+  loop_control:
+    label: "{{ item.name | default('grupo') }}"
+  register: _pgm_post_restore_truncate
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_post_restore_truncate_enabled | bool
+    - pgm_post_restore_truncate_groups | length > 0
+    - pgm_post_restore_truncate_run_on_envs | length == 0 or pgm_env | lower in pgm_post_restore_truncate_run_on_envs
+
+- name: Post restore | Registrar falha no truncate
+  ansible.builtin.set_fact:
+    pgm_host_failed: "{{ pgm_host_failed or pgm_post_restore_truncate_fail_on_error }}"
+    pgm_host_warning: "{{ pgm_host_warning or not pgm_post_restore_truncate_fail_on_error }}"
+    pgm_host_failed_task: "{{ 'Post-restore truncate' if pgm_post_restore_truncate_fail_on_error else pgm_host_failed_task }}"
+    pgm_host_error_msg: "{{ 'Falha ao executar truncate pós-restore. Verifique ' ~ pgm_restore_log_file if pgm_post_restore_truncate_fail_on_error else pgm_host_error_msg }}"
+  when:
+    - _pgm_post_restore_truncate is defined
+    - _pgm_post_restore_truncate.results | default([]) | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list | length > 0

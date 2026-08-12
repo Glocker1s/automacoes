@@ -1,0 +1,213 @@
+---
+- name: Database create | Resolver configuração
+  ansible.builtin.set_fact:
+    pgm_database_create_inherit_from_current: "{{ (pgm_db_cfg.database_create | default({})).get('inherit_from_current', pgm_database_create_inherit_from_current_default) | bool }}"
+    pgm_database_create_validate_inheritance: "{{ (pgm_db_cfg.database_create | default({})).get('validate_inheritance', pgm_database_create_validate_inheritance_default) | bool }}"
+    pgm_database_create_sql_file: "{{ pgm_restore_dir_root }}/create_database_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ pgm_job_id }}.sql"
+
+- name: Database create | Validar configuração
+  ansible.builtin.assert:
+    that:
+      - pgm_effective_restore_mode == 'promote'
+    fail_msg: "database_create.inherit_from_current somente pode ser utilizado com restore.mode=promote."
+  when:
+    - pgm_database_create_inherit_from_current | bool
+
+- name: Database create | Preparar base herdando propriedades do destino
+  ansible.builtin.shell: |
+    set -uo pipefail
+
+    SOURCE_DB="{{ pgm_database_name }}"
+    TARGET_DB="{{ pgm_restore_target_db }}"
+    CREATE_SQL="{{ pgm_database_create_sql_file }}"
+
+    PSQL=(
+      psql -X -w -v ON_ERROR_STOP=1
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}"
+      -p "{{ pgm_db_port | default(pgm_default_port) }}"
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}"
+      -d postgres
+    )
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Preparando ${TARGET_DB} herdando propriedades de ${SOURCE_DB}" >> "{{ pgm_restore_log_file }}"
+
+    SOURCE_META="$(
+      "${PSQL[@]}" -v source_db="${SOURCE_DB}" -At 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT concat_ws('|',
+      pg_get_userbyid(d.datdba),
+      pg_encoding_to_char(d.encoding),
+      COALESCE(to_jsonb(d)->>'datlocprovider', 'c'),
+      d.datcollate,
+      d.datctype,
+      t.spcname,
+      d.datconnlimit::text
+    )
+    FROM pg_database d
+    JOIN pg_tablespace t ON t.oid = d.dattablespace
+    WHERE d.datname = :'source_db';
+    SQL
+    )"
+
+    rc=$?
+    if [ "${rc}" -ne 0 ] || [ -z "${SOURCE_META}" ]; then
+      echo "[ERROR] Não foi possível obter propriedades de ${SOURCE_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit 20
+    fi
+
+    PROVIDER="$(echo "${SOURCE_META}" | cut -d'|' -f3)"
+    if [ "${PROVIDER}" != "c" ]; then
+      echo "[ERROR] Locale provider ${PROVIDER} não suportado nesta versão da automação. Esperado: libc." >> "{{ pgm_restore_log_file }}"
+      exit 21
+    fi
+
+    echo "[INFO] Propriedades origem: ${SOURCE_META}" >> "{{ pgm_restore_log_file }}"
+
+    "${PSQL[@]}" -v target_db="${TARGET_DB}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    SELECT pg_terminate_backend(pid)
+    FROM pg_stat_activity
+    WHERE datname = :'target_db'
+      AND pid <> pg_backend_pid();
+
+    DROP DATABASE IF EXISTS :"target_db";
+    SQL
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao remover ${TARGET_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
+    "${PSQL[@]}" -v source_db="${SOURCE_DB}" -v target_db="${TARGET_DB}" -At > "${CREATE_SQL}" 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT format(
+      'CREATE DATABASE %I WITH OWNER = %I TEMPLATE = template0 ENCODING = %L LOCALE_PROVIDER = libc LC_COLLATE = %L LC_CTYPE = %L TABLESPACE = %I CONNECTION LIMIT = %s;',
+      :'target_db',
+      pg_get_userbyid(d.datdba),
+      pg_encoding_to_char(d.encoding),
+      d.datcollate,
+      d.datctype,
+      t.spcname,
+      d.datconnlimit
+    )
+    FROM pg_database d
+    JOIN pg_tablespace t ON t.oid = d.dattablespace
+    WHERE d.datname = :'source_db';
+    SQL
+
+    rc=$?
+    if [ "${rc}" -ne 0 ] || [ ! -s "${CREATE_SQL}" ]; then
+      echo "[ERROR] Falha ao gerar CREATE DATABASE para ${TARGET_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit 22
+    fi
+
+    echo "[INFO] Criando ${TARGET_DB} com propriedades herdadas" >> "{{ pgm_restore_log_file }}"
+    "${PSQL[@]}" -f "${CREATE_SQL}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao criar ${TARGET_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
+    TARGET_META="$(
+      "${PSQL[@]}" -v target_db="${TARGET_DB}" -At 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT concat_ws('|',
+      pg_get_userbyid(d.datdba),
+      pg_encoding_to_char(d.encoding),
+      COALESCE(to_jsonb(d)->>'datlocprovider', 'c'),
+      d.datcollate,
+      d.datctype,
+      t.spcname,
+      d.datconnlimit::text
+    )
+    FROM pg_database d
+    JOIN pg_tablespace t ON t.oid = d.dattablespace
+    WHERE d.datname = :'target_db';
+    SQL
+    )"
+
+    rc=$?
+    if [ "${rc}" -ne 0 ] || [ -z "${TARGET_META}" ]; then
+      echo "[ERROR] Não foi possível validar propriedades de ${TARGET_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit 23
+    fi
+
+    echo "[INFO] Propriedades criada: ${TARGET_META}" >> "{{ pgm_restore_log_file }}"
+
+    {% if pgm_database_create_validate_inheritance | bool %}
+    if [ "${SOURCE_META}" != "${TARGET_META}" ]; then
+      echo "[ERROR] As propriedades de ${TARGET_DB} são diferentes de ${SOURCE_DB}." >> "{{ pgm_restore_log_file }}"
+      echo "[ERROR] Origem: ${SOURCE_META}" >> "{{ pgm_restore_log_file }}"
+      echo "[ERROR] Destino: ${TARGET_META}" >> "{{ pgm_restore_log_file }}"
+      exit 24
+    fi
+    echo "[INFO] Validação das propriedades herdadas rc=0" >> "{{ pgm_restore_log_file }}"
+    {% endif %}
+
+    echo "[INFO] Preparar base herdada rc=0" >> "{{ pgm_restore_log_file }}"
+    exit 0
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_prepare_db_inherited
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_database_create_inherit_from_current | bool
+
+- name: Database create | Preparar base com comportamento padrão
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo "[INFO] Preparando base {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+
+    psql -X -w -v ON_ERROR_STOP=1 \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d postgres <<SQL >> "{{ pgm_restore_log_file }}" 2>&1
+    SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+     WHERE datname = '{{ pgm_restore_target_db }}';
+    DROP DATABASE IF EXISTS "{{ pgm_restore_target_db }}";
+    CREATE DATABASE "{{ pgm_restore_target_db }}";
+    SQL
+
+    rc=$?
+    echo "[INFO] Preparar base rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_prepare_db_default
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - not (pgm_host_failed | bool)
+    - not (pgm_database_create_inherit_from_current | bool)
+
+- name: Database create | Registrar falha na criação herdada
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Preparar base destino"
+    pgm_host_error_msg: "Falha ao criar {{ pgm_restore_target_db }} herdando propriedades de {{ pgm_database_name }}. Verifique {{ pgm_restore_log_file }}."
+  when:
+    - _pgm_prepare_db_inherited is defined
+    - _pgm_prepare_db_inherited.rc | default(0) | int != 0
+
+- name: Database create | Registrar falha na criação padrão
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Preparar base destino"
+    pgm_host_error_msg: "Falha ao preparar base {{ pgm_restore_target_db }}. rc={{ _pgm_prepare_db_default.rc | default('desconhecido') }}."
+  when:
+    - _pgm_prepare_db_default is defined
+    - _pgm_prepare_db_default.rc | default(0) | int != 0

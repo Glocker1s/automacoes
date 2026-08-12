@@ -1,0 +1,107 @@
+---
+- name: Connection control | Finalizar estado das databases
+  ansible.builtin.shell: |
+    set -uo pipefail
+
+    DB_NAME="{{ pgm_database_name }}"
+    OLD_DB_NAME="{{ pgm_target_old_db }}"
+    KEEP_OLD_BLOCKED="{{ 'true' if pgm_connection_control_keep_old_blocked | bool else 'false' }}"
+
+    PSQL=(
+      psql -X -w -v ON_ERROR_STOP=1
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}"
+      -p "{{ pgm_db_port | default(pgm_default_port) }}"
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}"
+      -d postgres
+    )
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Finalizando connection control" >> "{{ pgm_restore_log_file }}"
+
+    echo "[INFO] Liberando conexões na nova base ${DB_NAME}" >> "{{ pgm_restore_log_file }}"
+
+    "${PSQL[@]}" -v db_name="${DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS true;
+    SQL
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao liberar conexões em ${DB_NAME}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
+    OLD_EXISTS="$(
+      "${PSQL[@]}" -v db_name="${OLD_DB_NAME}" -At 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT count(*)
+      FROM pg_database
+     WHERE datname = :'db_name';
+    SQL
+    )"
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao validar existência de ${OLD_DB_NAME}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
+    if [ "${OLD_EXISTS}" = "1" ]; then
+      if [ "${KEEP_OLD_BLOCKED}" = "true" ]; then
+        echo "[INFO] Mantendo ${OLD_DB_NAME} bloqueada para conexões" >> "{{ pgm_restore_log_file }}"
+
+        "${PSQL[@]}" -v db_name="${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS false;
+    SQL
+      else
+        echo "[INFO] Liberando conexões em ${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}"
+
+        "${PSQL[@]}" -v db_name="${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS true;
+    SQL
+      fi
+
+      rc=$?
+      if [ "${rc}" -ne 0 ]; then
+        echo "[ERROR] Falha ao definir estado de ${OLD_DB_NAME}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit "${rc}"
+      fi
+    fi
+
+    echo "[INFO] Estado final das databases:" >> "{{ pgm_restore_log_file }}"
+
+    "${PSQL[@]}" \
+      -v current_db="${DB_NAME}" \
+      -v old_db="${OLD_DB_NAME}" \
+      >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    SELECT datname, datallowconn
+      FROM pg_database
+     WHERE datname IN (:'current_db', :'old_db')
+     ORDER BY datname;
+    SQL
+
+    rc=$?
+    echo "[INFO] Finalizar connection control rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit "${rc}"
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_connection_control_finalize
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - pgm_connection_control_enabled | bool
+    - pgm_restore_promoted | default(false) | bool
+
+- name: Connection control | Registrar falha na finalização
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Finalizar controle de conexões"
+    pgm_host_error_msg: >-
+      A base restaurada foi promovida, mas houve falha ao finalizar
+      o controle de conexões. Verifique {{ pgm_restore_log_file }}.
+  when:
+    - _pgm_connection_control_finalize is defined
+    - _pgm_connection_control_finalize.rc | default(0) | int != 0

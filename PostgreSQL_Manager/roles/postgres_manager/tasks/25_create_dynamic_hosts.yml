@@ -1,0 +1,149 @@
+---
+- name: Inicializar lista de hosts do plano
+  ansible.builtin.set_fact:
+    pgm_plan_hosts: "{{ (pgm_source_candidates | default([])) + (pgm_target_candidates | default([])) }}"
+    pgm_unreachable_hosts: []
+    pgm_postgres_unreachable_hosts: []
+
+- name: Testar SSH dos hosts resolvidos
+  ansible.builtin.wait_for:
+    host: "{{ item.ansible_host }}"
+    port: "{{ pgm_ssh_port | default(22) }}"
+    timeout: "{{ pgm_wait_timeout | default(5) }}"
+    state: started
+  register: _pgm_ssh_probe
+  failed_when: false
+  changed_when: false
+  loop: "{{ pgm_plan_hosts }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.ansible_host }}:{{ pgm_ssh_port | default(22) }}"
+  delegate_to: localhost
+  when: pgm_probe_ssh_enabled | bool
+
+- name: Publicar hosts sem SSH
+  ansible.builtin.set_fact:
+    pgm_unreachable_hosts: >-
+      {{
+        _pgm_ssh_probe.results
+        | default([])
+        | selectattr('failed', 'defined')
+        | selectattr('failed')
+        | map(attribute='item.name')
+        | list
+      }}
+  when: pgm_probe_ssh_enabled | bool
+
+- name: Falhar se houver host sem SSH
+  ansible.builtin.fail:
+    msg: "Hosts sem SSH acessível: {{ pgm_unreachable_hosts | join(', ') }}"
+  when:
+    - pgm_fail_on_unreachable | bool
+    - pgm_unreachable_hosts | default([]) | length > 0
+
+- name: Testar porta PostgreSQL nos hosts resolvidos
+  ansible.builtin.wait_for:
+    host: "{{ item.ansible_host }}"
+    port: "{{ item.port | default(pgm_default_port) }}"
+    timeout: "{{ pgm_wait_timeout | default(5) }}"
+    state: started
+  register: _pgm_pg_probe
+  failed_when: false
+  changed_when: false
+  loop: "{{ pgm_plan_hosts }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.ansible_host }}:{{ item.port | default(pgm_default_port) }}"
+  delegate_to: localhost
+  when: pgm_probe_postgres_enabled | bool
+
+- name: Publicar hosts sem porta PostgreSQL
+  ansible.builtin.set_fact:
+    pgm_postgres_unreachable_hosts: >-
+      {{
+        _pgm_pg_probe.results
+        | default([])
+        | selectattr('failed', 'defined')
+        | selectattr('failed')
+        | map(attribute='item.name')
+        | list
+      }}
+  when: pgm_probe_postgres_enabled | bool
+
+- name: Falhar se houver host sem porta PostgreSQL
+  ansible.builtin.fail:
+    msg: "Hosts sem porta PostgreSQL acessível: {{ pgm_postgres_unreachable_hosts | join(', ') }}"
+  when:
+    - pgm_fail_on_unreachable | bool
+    - pgm_probe_postgres_enabled | bool
+    - pgm_postgres_unreachable_hosts | default([]) | length > 0
+
+- name: Adicionar hosts de origem dinamicamente
+  ansible.builtin.add_host:
+    name: "{{ item.name }}"
+    groups:
+      - pgm_source_targets
+      - pgm_all_targets
+    ansible_host: "{{ item.ansible_host }}"
+    ansible_connection: ssh
+    ansible_port: "{{ pgm_ssh_port | default(22) }}"
+    ansible_user: "{{ ansible_user | default(omit) }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ linux_key | default(ansible_ssh_private_key_file | default(omit)) }}"
+    ansible_ssh_common_args: "{{ ansible_ssh_common_args | default('-o StrictHostKeyChecking=no') }}"
+    pgm_env: "{{ item.env }}"
+    pgm_role: "source"
+    pgm_database_key: "{{ pgm_database_key_normalized }}"
+    pgm_database_name: "{{ item.database_name }}"
+    pgm_db_host: "{{ item.db_host | default(pgm_default_db_host) }}"
+    pgm_db_port: "{{ item.port | default(pgm_default_port) }}"
+    pgm_db_user: "{{ item.db_user | default(pgm_default_db_user) }}"
+    pgm_os_user: "{{ item.os_user | default(pgm_default_os_user) }}"
+    pgm_db_password: "{{ item.db_password | default(pgm_db_password | default('')) }}"
+    pgm_db_cfg: "{{ pgm_db_cfg }}"
+    pgm_dump_basename: "{{ pgm_dump_basename }}"
+    pgm_latest_manifest_name: "{{ pgm_latest_manifest_name }}"
+    pgm_source_env_effective: "{{ pgm_source_env_effective }}"
+    pgm_action_normalized: "{{ pgm_action_normalized }}"
+  loop: "{{ pgm_source_candidates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: pgm_action_normalized in ['backup', 'sync']
+  no_log: true
+
+- name: Adicionar hosts de destino dinamicamente
+  ansible.builtin.add_host:
+    name: "{{ item.name }}"
+    groups:
+      - pgm_restore_targets
+      - pgm_all_targets
+    ansible_host: "{{ item.ansible_host }}"
+    ansible_connection: ssh
+    ansible_port: "{{ pgm_ssh_port | default(22) }}"
+    ansible_user: "{{ ansible_user | default(omit) }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ linux_key | default(ansible_ssh_private_key_file | default(omit)) }}"
+    ansible_ssh_common_args: "{{ ansible_ssh_common_args | default('-o StrictHostKeyChecking=no') }}"
+    pgm_env: "{{ item.env }}"
+    pgm_role: "target"
+    pgm_database_key: "{{ pgm_database_key_normalized }}"
+    pgm_database_name: "{{ item.database_name }}"
+    pgm_db_host: "{{ item.db_host | default(pgm_default_db_host) }}"
+    pgm_db_port: "{{ item.port | default(pgm_default_port) }}"
+    pgm_db_user: "{{ item.db_user | default(pgm_default_db_user) }}"
+    pgm_os_user: "{{ item.os_user | default(pgm_default_os_user) }}"
+    pgm_db_password: "{{ item.db_password | default(pgm_db_password | default('')) }}"
+    pgm_db_cfg: "{{ pgm_db_cfg }}"
+    pgm_dump_basename: "{{ pgm_dump_basename }}"
+    pgm_latest_manifest_name: "{{ pgm_latest_manifest_name }}"
+    pgm_source_env_effective: "{{ pgm_source_env_effective }}"
+    pgm_action_normalized: "{{ pgm_action_normalized }}"
+  loop: "{{ pgm_target_candidates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: pgm_action_normalized in ['restore', 'sync']
+  no_log: true
+
+- name: Exibir grupos dinâmicos criados
+  ansible.builtin.debug:
+    msg:
+      source_targets: "{{ groups.pgm_source_targets | default([]) }}"
+      restore_targets: "{{ groups.pgm_restore_targets | default([]) }}"
