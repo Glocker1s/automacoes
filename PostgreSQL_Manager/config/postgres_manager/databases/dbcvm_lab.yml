@@ -1,69 +1,143 @@
 ---
-# Use:
-#   pgm_database_key: dbcvm_lab
+# ============================================================================
+# PostgreSQL Manager - Profile de banco
+#
+# Use no Survey:
+# pgm_database_key: dbcvm_lab
+#
+# Este arquivo define COMO a database dbcvm deve ser tratada.
+# Não contém credenciais.
+# ============================================================================
 
 cm:
   postgres_manager:
     databases:
       dbcvm_lab:
+
+        # Descrição apenas informativa do profile.
         description: "Lab DBCVM PostgreSQL Manager"
+
+        # Nome real da database PostgreSQL.
         database_name: "dbcvm"
 
+        # Ambiente usado como origem quando pgm_source_env vier vazio.
         default_source_env: "prd"
+
+        # Destinos padrão da ação sync quando nenhum destino for informado.
         default_sync_targets:
           - "tu"
           - "th"
           - "fix"
+
+        # Destinos padrão para restore puro.
+        # Vazio força normalmente o operador a informar o destino.
         default_restore_targets: []
 
+        # --------------------------------------------------------------------
+        # BACKUP
+        # --------------------------------------------------------------------
         backup:
+
+          # Diretório local do host PostgreSQL onde o pg_dump é criado.
           root_dir: "/backup/postgres_manager"
+
+          # Paralelismo do pg_dump em formato directory.
           jobs: 4
+
+          # Formato previsto do dump.
+          # Hoje a automação está homologada usando directory.
           format: "directory"
+
+          # Argumentos adicionais opcionais para o pg_dump.
           extra_args: ""
+
+          # Valida o dump com pg_restore -l depois da criação.
           validate_dump: true
 
+        # --------------------------------------------------------------------
+        # RESTORE
+        # --------------------------------------------------------------------
         restore:
+
+          # Estratégia do restore.
+          # promote é o modo homologado atualmente.
           mode: "promote"
+
+          # Sufixo da database temporária.
+          # dbcvm -> dbcvm_restoring
           target_temp_suffix: "_restoring"
+
+          # Sufixo usado para preservar a database anterior.
+          # dbcvm -> dbcvm_old
           old_suffix: "_old"
+
+          # Não restaura ownership do ambiente de origem.
           no_owner: true
+
+          # Não restaura grants/ACLs do dump de origem.
+          # As permissões do destino são tratadas pelo bloco grants.
           no_privileges: true
+
+          # Paralelismo do pg_restore.
           jobs: 4
+
+          # Argumentos extras opcionais do pg_restore.
           extra_args: ""
 
-          # Legado.
-          # A manutenção agora será controlada pelo bloco maintenance.
-          vacuum_analyze: false
-
+          # Entradas removidas da lista do pg_restore.
           exclude_toc_patterns:
+
+            # User Mappings da origem não são restaurados.
+            # Serão recriados corretamente pelo bloco dblink.
             - "USER MAPPING"
+
+            # Não restaura os dados materializados das MVs.
+            # Elas serão atualizadas no destino depois das transformações.
             - "MATERIALIZED VIEW DATA public mv_search_companys"
             - "MATERIALIZED VIEW DATA public mv_company_balance_guide"
             - "MATERIALIZED VIEW DATA public mv_masking_demo"
 
+        # --------------------------------------------------------------------
+        # CRIAÇÃO DA _RESTORING
+        # --------------------------------------------------------------------
         database_create:
+
+          # Cria dbcvm_restoring herdando propriedades da dbcvm atual:
+          # owner, encoding, locale, tablespace e connection limit.
           inherit_from_current: true
+
+          # Compara as propriedades depois da criação.
+          # Se houver diferença, falha antes do pg_restore.
           validate_inheritance: true
 
+        # --------------------------------------------------------------------
+        # GRANTS
+        # --------------------------------------------------------------------
         grants:
+
+          # Captura as permissões da database atual antes do restore.
           capture_before_restore: true
+
+          # Reaplica as permissões capturadas na _restoring.
           apply_after_restore: true
+
+          # true  = erro em grant impede o promote.
+          # false = erro vira aviso e o fluxo continua.
           fail_on_apply_error: false
 
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         # PRESERVE DATA
-        #
-        # Simula as tabelas de configuração que precisam continuar com os
-        # valores do ambiente destino.
-        #
-        # Exemplo PRD -> TU:
-        #   app.environment_config de PRD vem no dump principal
-        #   depois é substituída pela app.environment_config da TU atual
-        # -------------------------------------------------------------------
+        # Mantém dados específicos do ambiente destino.
+        # --------------------------------------------------------------------
         preserve_data:
+
+          # Liga a funcionalidade.
           enabled: true
+
+          # Falha nessa etapa impede o promote.
           fail_on_error: true
+
+          # Ambientes onde preserve_data deve executar.
           run_on_envs:
             - "tu"
             - "th"
@@ -72,39 +146,43 @@ cm:
           groups:
             - name: "environment_configuration"
 
-              # São as tabelas das quais guardaremos os dados atuais do destino.
+              # Dados que serão capturados da database atual do destino.
               backup_tables:
                 - "app.environment_config"
                 - "app.feature_flags"
 
-              # São as tabelas que serão esvaziadas na _restoring antes de
-              # colocar os dados preservados.
-              #
-              # audit.preserve_trigger_audit NÃO está no backup_tables.
-              # Isso simula o caso CorePaqueta onde existe uma tabela truncada
-              # que não é restaurada.
+              # Tabelas que serão truncadas na _restoring.
+              # Podem existir tabelas aqui que não estão em backup_tables.
               truncate_tables:
                 - "app.environment_config"
                 - "app.feature_flags"
                 - "audit.preserve_trigger_audit"
 
+              # Restaura somente os dados preservados.
               restore_data_only: true
 
-              # Simula o comportamento usado pela CorePaqueta.
+              # Desabilita triggers durante a reinserção dos dados.
               disable_triggers: true
 
+              # false evita TRUNCATE CASCADE.
               cascade: false
+
+              # Paralelismo do restore do dump de preserve.
               jobs: 4
 
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         # POST RESTORE
-        #
-        # Essa tabela NÃO será preservada.
-        # Os dados que vieram de PRD simplesmente serão removidos.
-        # -------------------------------------------------------------------
+        # Limpa dados da origem que não devem existir no destino.
+        # --------------------------------------------------------------------
         post_restore:
+
+          # Liga os truncates declarados abaixo.
           truncate_enabled: true
+
+          # Erro no truncate impede o promote.
           fail_on_error: true
+
+          # Ambientes onde essa limpeza deve executar.
           run_on_envs:
             - "tu"
             - "th"
@@ -112,33 +190,43 @@ cm:
 
           truncate_groups:
             - name: "clear_runtime_sessions"
+
+              # Tabelas que deverão ficar vazias.
               tables:
                 - "app.runtime_sessions"
+
+              # false evita truncar dependências automaticamente.
               cascade: false
 
-        # -------------------------------------------------------------------
-        # DBLINK
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
+        # DBLINK / FOREIGN SERVERS
+        # --------------------------------------------------------------------
         dblink:
+
+          # Liga configuração de Foreign Servers/User Mappings.
           enabled: true
 
-          # Foreign Servers existentes no banco.
-          # Os valores podem mudar de acordo com o ambiente destino.
+          # Foreign Servers persistentes do PostgreSQL.
           servers:
             - name: "remote_valemobi"
+
+              # Endpoint correto por ambiente.
               environments:
                 prd:
                   host: "127.0.0.1"
                   port: "5432"
                   dbname: "valemobi"
+
                 tu:
                   host: "127.0.0.1"
                   port: "5432"
                   dbname: "valemobi"
+
                 th:
                   host: "127.0.0.1"
                   port: "5432"
                   dbname: "valemobi"
+
                 fix:
                   host: "127.0.0.1"
                   port: "5432"
@@ -150,25 +238,33 @@ cm:
                   host: "10.10.10.10"
                   port: "5432"
                   dbname: "core_prd"
+
                 tu:
                   host: "10.20.20.20"
                   port: "5433"
                   dbname: "core_tu"
+
                 th:
                   host: "10.30.30.30"
                   port: "5434"
                   dbname: "core_th"
+
                 fix:
                   host: "10.40.40.40"
                   port: "5435"
                   dbname: "core_fix"
 
-          # User Mappings.
-          # user_var/password_var continuam vindo da Credential do AAP.
+          # Credenciais usadas por cada usuário local em cada Foreign Server.
           user_mappings:
             - server_name: "remote_valemobi"
+
+              # Usuário local PostgreSQL que receberá o mapping.
               local_user: "postgres"
+
+              # Nome da variável injetada pela Credential com usuário remoto.
               user_var: "dblink_user"
+
+              # Nome da variável injetada pela Credential com senha remota.
               password_var: "dblink_password"
 
             - server_name: "remote_core_lab"
@@ -176,44 +272,67 @@ cm:
               user_var: "dblink_user"
               password_var: "dblink_password"
 
-          # Conexões nomeadas necessárias somente para SQLs que usam
-          # dblink('nome_da_conexao', ...).
+          # Conexões dblink nomeadas.
+          # Só são necessárias para SQL que utiliza dblink('nome', ...).
           connections:
             - name: "myconn"
+
+              # Foreign Server usado por essa conexão.
               server_name: "remote_valemobi"
+
+              # Abre myconn antes do refresh das MVs.
               connect_before_refresh: true
 
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         # MASKING
-        #
-        # Executará depois de preserve_data, post_restore e dblink.
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         masking:
+
+          # Liga mascaramento.
           enabled: true
+
+          # Erro de masking impede o promote.
           fail_on_error: true
+
+          # Ambientes onde masking pode executar.
           run_on_envs:
             - "tu"
             - "th"
             - "fix"
+
+          # Ambientes explicitamente protegidos contra masking.
           protected_envs:
             - "prd"
+
           scripts:
             - name: "dbcvm_lab_scramble"
+
+              # Arquivo SQL da automação.
               file: "masking/fc_dbcvm_lab_scramble_database.sql"
+
+              # Função criada/atualizada pelo SQL.
               function: "public.fc_dbcvm_lab_scramble_database"
+
+              # Executa a função depois de carregar o arquivo.
               execute_function: true
 
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         # MATERIALIZED VIEWS
-        #
-        # mv_masking_demo prova que o refresh aconteceu depois do masking.
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         materialized_views:
+
+          # Liga refresh das MVs.
           refresh_enabled: true
+
+          # false = somente items.
+          # true  = procura todas as MVs da database.
           refresh_all: false
+
           items:
             - schema: "public"
               name: "mv_search_companys"
+
+              # true usaria REFRESH MATERIALIZED VIEW CONCURRENTLY.
               concurrently: false
 
             - schema: "public"
@@ -224,36 +343,74 @@ cm:
               name: "mv_masking_demo"
               concurrently: false
 
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         # MANUTENÇÃO
-        #
-        # O procedimento do cliente usa ANALYZE.
-        # -------------------------------------------------------------------
+        # --------------------------------------------------------------------
         maintenance:
+
+          # Liga manutenção depois das transformações.
           enabled: true
+
+          # Modos previstos:
+          # none | analyze | vacuum_analyze
           mode: "analyze"
 
+        # --------------------------------------------------------------------
+        # CONTROLE DE CONEXÕES NO CUTOVER
+        # --------------------------------------------------------------------
         connection_control:
+
+          # Liga o controle da database antes do promote.
           enabled: true
+
+          # Executa ALLOW_CONNECTIONS false antes da troca.
           block_new_connections: true
+
+          # Encerra sessões já conectadas à database atual.
           terminate_sessions: true
+
+          # Mantém dbcvm_old sem aceitar conexões após a promoção.
           keep_old_blocked: true
 
+        # --------------------------------------------------------------------
+        # VALIDAÇÕES
+        # --------------------------------------------------------------------
         validations:
+
+          # Liga execução das queries depois do promote.
           enabled: true
+
+          # SQLs executados sequencialmente na database promovida.
           queries:
             - "queries/total.sql"
             - "queries/total-by-table.sql"
             - "queries/advanced-restore.sql"
 
+        # --------------------------------------------------------------------
+        # HOSTS / AMBIENTES
+        # --------------------------------------------------------------------
         hosts_env_sync:
+
           prd:
             - name: "prd-dbcvm-01"
+
+              # Endereço usado pelo Ansible para conectar no servidor.
               ansible_host: "192.168.122.165"
+
+              # Database daquele host.
+              # Permite override caso o nome varie por host.
               database_name: "dbcvm"
+
+              # Porta PostgreSQL.
               port: 5432
+
+              # Host PostgreSQL visto de dentro do servidor.
               db_host: "127.0.0.1"
+
+              # Host pode atuar como origem quando esse ambiente for escolhido.
               source: true
+
+              # false remove o host do planejamento sem apagar a configuração.
               enabled: true
 
           tu:
