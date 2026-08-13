@@ -10,24 +10,36 @@
 pgm_action: "backup"
 pgm_database_key: ""
 
-# Seleção de origem/destino.
-# Quando vazio, a role usa default_source_env/default_sync_targets do arquivo do banco.
+# ============================================================================
+# SELEÇÃO DE ORIGEM / DESTINO
+# ============================================================================
+# Quando vazio, a role usa os valores padrão definidos no arquivo do banco.
+
 pgm_source_env: ""
-pgm_source_host: "" # aceita name ou ansible_host
-pgm_target_envs: "" # lista: tu,ti,th,fix
-pgm_target_hosts: "" # lista: th-db-01,192.168.0.10
+pgm_source_host: ""          # aceita name ou ansible_host
+pgm_target_envs: ""          # lista de ambientes: tu, ti, th, fix
+pgm_target_hosts: ""         # lista de hosts: th-db-01,192.168.0.10
 pgm_restore_dump_name: "latest" # latest ou nome do diretório .dump.dir
 
-# Confirmações de segurança.
-pgm_confirm_restore: "nao" # restore/sync exigem sim
+# ============================================================================
+# CONFIRMAÇÕES E SEGURANÇA
+# ============================================================================
+
+pgm_confirm_restore: "nao"              # restore/sync exigem sim
 pgm_confirm_multi_target_restore: "nao" # restore puro com mais de 1 target exige sim
 pgm_fail_job_on_error: true
 
-# Configuração.
+# ============================================================================
+# CONFIGURAÇÃO
+# ============================================================================
+
 pgm_config_root: "{{ playbook_dir }}/config/postgres_manager"
 pgm_databases_dir: "{{ pgm_config_root }}/databases"
 
-# PostgreSQL defaults.
+# ============================================================================
+# POSTGRESQL - DEFAULTS TÉCNICOS
+# ============================================================================
+
 pgm_pg_bin_path: "/usr/bin"
 pgm_default_port: 5432
 pgm_default_db_host: "127.0.0.1"
@@ -36,138 +48,445 @@ pgm_default_db_user: "{{ databases_username }}"
 pgm_default_jobs: 8
 pgm_db_password: "{{ databases_password }}"
 
-# Diretórios.
+# ============================================================================
+# DIRETÓRIOS
+# ============================================================================
+
 pgm_backup_root_dir: "/backup/postgres_manager"
 pgm_restore_root_dir: "/backup/postgres_manager_restore"
 pgm_controller_tmp_dir: "/tmp/postgres-manager-{{ tower_job_id | default(awx_job_id | default('local')) }}"
 
-# Inventário dinâmico.
+# ============================================================================
+# INVENTÁRIO DINÂMICO / CONECTIVIDADE
+# ============================================================================
+
 pgm_ssh_port: 22
 pgm_wait_timeout: 5
+
+# Testa SSH antes de adicionar/executar hosts do plano.
 pgm_probe_ssh_enabled: true
+
+# Teste adicional da porta PostgreSQL.
+# Mantido desligado por padrão.
 pgm_probe_postgres_enabled: false
+
+# Falha o planejamento quando algum host necessário estiver inacessível.
 pgm_fail_on_unreachable: true
 
-# Restore defaults.
-pgm_restore_mode: "promote" # promote | drop_in_place
+# ============================================================================
+# RESTORE - DEFAULTS GERAIS
+# ============================================================================
+
+# Estratégia padrão.
+# promote é o modo homologado atualmente.
+pgm_restore_mode: "promote"
+
+# Nomes auxiliares usados no modo promote.
 pgm_restore_temp_suffix: "_restoring"
 pgm_restore_old_suffix: "_old"
+
+# Evita trazer owner e ACLs do ambiente de origem.
 pgm_restore_no_owner: true
 pgm_restore_no_privileges: true
+
+# Preservação/reaplicação das permissões atuais do destino.
 pgm_preserve_target_grants: true
 pgm_apply_target_grants: true
 pgm_fail_on_grant_apply_error: false
-pgm_vacuum_analyze_after_restore: true
+
+# Remove o dump copiado para o host destino após o restore.
 pgm_cleanup_remote_dump_after_restore: false
+
+# Mantido por compatibilidade até confirmação de uso no restante da role.
 pgm_keep_remote_logs: false
 
+# ============================================================================
+# CONNECTION CONTROL
+# ============================================================================
+# Controle de conexões durante o cutover.
+# Desabilitado por padrão para não alterar profiles antigos automaticamente.
+
 pgm_connection_control_enabled_default: false
+
+# Quando habilitado, impede novas conexões na database atual antes do promote.
 pgm_connection_control_block_new_connections_default: true
+
+# Encerra sessões já conectadas antes da troca das databases.
 pgm_connection_control_terminate_sessions_default: true
+
+# Mantém a database _old bloqueada após o promote.
 pgm_connection_control_keep_old_blocked_default: true
 
+# ============================================================================
+# DATABASE CREATE
+# ============================================================================
+# Controla como a database _restoring é criada.
+
+# Quando true, herda propriedades da database atual do ambiente destino.
 pgm_database_create_inherit_from_current_default: false
+
+# Compara as propriedades da database criada com a database atual.
 pgm_database_create_validate_inheritance_default: true
 
-# Mascaramento de dados pós-restore.
-# Por padrão vem desligado e só roda quando habilitado no arquivo do banco.
+# ============================================================================
+# MASKING
+# ============================================================================
+# Por padrão fica desligado e só executa quando habilitado no profile do banco.
+
 pgm_masking_enabled_default: false
+
+# Falha de masking impede o promote quando a feature estiver habilitada.
 pgm_masking_fail_on_error_default: true
+
+# Ambientes protegidos contra execução de masking.
 pgm_masking_protected_envs_default:
-  - prd
+  - "prd"
+
+# Diretório temporário utilizado para os scripts SQL de masking.
 pgm_masking_remote_dir: "{{ pgm_restore_root_dir }}/masking_{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# Remove scripts temporários após a execução.
 pgm_masking_cleanup_remote_files: true
 
-# Preservação de dados específicos do ambiente destino.
+# ============================================================================
+# PRESERVE DATA
+# ============================================================================
+# Preserva dados específicos do ambiente destino antes do promote.
+
 pgm_preserve_data_enabled_default: false
+
+# Falha durante captura/truncate/restore dos dados preservados impede promote.
 pgm_preserve_data_fail_on_error_default: true
+
+# Diretório temporário utilizado pelos dumps de preserve_data.
 pgm_preserve_data_remote_dir: "{{ pgm_restore_dir_root | default(pgm_restore_root_dir) }}/preserve_data_{{ pgm_job_id | default(tower_job_id | default(awx_job_id | default('local'))) }}"
+
+# Remove dumps temporários de preserve_data ao final.
 pgm_preserve_data_cleanup_remote_files: true
 
-# Truncates específicos pós-restore.
+# ============================================================================
+# POST RESTORE
+# ============================================================================
+# Truncates declarativos executados após o restore principal.
+
 pgm_post_restore_truncate_enabled_default: false
+
+# Falha em truncate pós-restore impede promote.
 pgm_post_restore_truncate_fail_on_error_default: true
 
-# Manutenção pós-restore.
-# Mantém vacuum_analyze como default para não mudar profiles antigos sem querer.
+# ============================================================================
+# MANUTENÇÃO PÓS-RESTORE
+# ============================================================================
+# Substitui o antigo restore.vacuum_analyze.
+#
+# Modos previstos:
+# none | analyze | vacuum_analyze
+#
+# Mantemos vacuum_analyze como default para preservar o comportamento
+# histórico de profiles que ainda não definem explicitamente maintenance.
+
 pgm_maintenance_enabled_default: true
 pgm_maintenance_mode_default: "vacuum_analyze"
 
-# CIFS usado para transferência de dumps e anexos do relatório.
-# Fica no defaults porque é comportamento operacional da role, não regra de banco.
+# ============================================================================
+# CIFS
+# ============================================================================
+# Usado para transferência dos dumps e publicação dos anexos do relatório.
+# É configuração operacional da role, não uma regra específica de database.
+
 pgm_cifs_enabled: true
 pgm_cifs_label: "producao"
+
+# Diretório remoto principal da automação.
 pgm_cifs_path: "/Ansible/postgres_manager"
+
+# Diretório onde dumps são armazenados.
 pgm_cifs_dump_path: "{{ pgm_cifs_path }}"
+
+# Diretório usado pelo fluxo genérico de anexos/e-mail.
 pgm_cifs_attachment_path: "/Ansible/mail_attachments"
+
+# Mount temporário no host que acessa o compartilhamento.
 pgm_cifs_mount_dir: "/tmp/postgres-manager-cifs"
+
+# Arquivo temporário de senha utilizado no mount/smbclient.
 pgm_cifs_password_file: "/tmp/.postgres-manager-cifs-pass-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
 pgm_cifs_workgroup: "WORKGROUP"
 pgm_cifs_domain: "{{ pgm_cifs_workgroup }}"
 pgm_cifs_vers: "3.0"
+
+# Compartilhamentos disponíveis.
 pgm_cifs_address:
   tutihofix: "//192.168.0.247/certs"
   producao: "//192.168.0.149/certs"
+
+# Mantido até confirmação de uso em todos os fluxos CIFS.
 pgm_fail_on_cifs_error: false
 
-# Variáveis compatíveis com fluxo de e-mail já usado em outras automações.
+# ============================================================================
+# COMPATIBILIDADE COM FLUXO GENÉRICO DE E-MAIL
+# ============================================================================
+
 send_mail_cifs: "{{ pgm_cifs_label }}"
 send_mail_cifs_path: "{{ pgm_cifs_attachment_path }}"
 send_mail_cifs_address: "{{ pgm_cifs_address }}"
 cifs_workgroup: "{{ pgm_cifs_workgroup }}"
 
-# Relatório.
+# ============================================================================
+# RELATÓRIO
+# ============================================================================
+
 pgm_report_timezone: "America/Sao_Paulo"
 pgm_report_title: "PostgreSQL Manager"
 pgm_report_subject_prefix: "Ansible-Report"
 ansible_url: "https://ansible.hml.mca.corp"
 
-# Defaults internos aplicados sobre cada arquivo de banco.
+# ============================================================================
+# DEFAULTS DOS PROFILES DE DATABASE
+# ============================================================================
+# Este bloco representa a estrutura base de qualquer arquivo localizado em:
+#
+#   config/postgres_manager/databases/
+#
+# O profile específico do banco sobrescreve esses valores e o resultado
+# consolidado é publicado em pgm_db_cfg.
+# ============================================================================
+
 pgm_database_defaults:
+
+  # --------------------------------------------------------------------------
+  # IDENTIFICAÇÃO
+  # --------------------------------------------------------------------------
+
   description: ""
   database_name: ""
+
+  # Ambiente padrão de origem.
   default_source_env: "prd"
+
+  # Destinos padrão da ação sync.
   default_sync_targets: []
+
+  # Destinos padrão do restore puro.
   default_restore_targets: []
 
+  # --------------------------------------------------------------------------
+  # BACKUP
+  # --------------------------------------------------------------------------
+
   backup:
+
+    # Diretório onde o dump será criado na origem.
     root_dir: "{{ pgm_backup_root_dir }}"
+
+    # Paralelismo padrão.
     jobs: "{{ pgm_default_jobs }}"
+
+    # Formato atualmente homologado pela automação.
     format: "directory"
+
+    # Argumentos adicionais opcionais.
     extra_args: ""
+
+    # Executa validação do dump depois do pg_dump.
     validate_dump: true
 
+  # --------------------------------------------------------------------------
+  # RESTORE
+  # --------------------------------------------------------------------------
+
   restore:
+
+    # Estratégia utilizada para restauração.
     mode: "{{ pgm_restore_mode }}"
+
+    # Nome temporário criado no modo promote.
     target_temp_suffix: "{{ pgm_restore_temp_suffix }}"
+
+    # Nome usado para preservar a database anterior.
     old_suffix: "{{ pgm_restore_old_suffix }}"
+
+    # Não restaura ownership da origem.
     no_owner: "{{ pgm_restore_no_owner }}"
+
+    # Não restaura ACLs da origem.
     no_privileges: "{{ pgm_restore_no_privileges }}"
+
+    # Paralelismo padrão do pg_restore.
     jobs: "{{ pgm_default_jobs }}"
+
+    # Argumentos adicionais opcionais.
     extra_args: ""
+
+    # Itens excluídos da lista do pg_restore.
+    # User Mapping é tratado separadamente pela etapa DBLink.
     exclude_toc_patterns:
       - "USER MAPPING"
-    vacuum_analyze: "{{ pgm_vacuum_analyze_after_restore }}"
+
+  # --------------------------------------------------------------------------
+  # DATABASE CREATE
+  # --------------------------------------------------------------------------
+
+  database_create:
+
+    # Quando true, a _restoring herda propriedades da database atual:
+    # owner, encoding, locale, tablespace e connection limit.
+    inherit_from_current: "{{ pgm_database_create_inherit_from_current_default }}"
+
+    # Compara as propriedades após a criação.
+    validate_inheritance: "{{ pgm_database_create_validate_inheritance_default }}"
+
+  # --------------------------------------------------------------------------
+  # GRANTS
+  # --------------------------------------------------------------------------
 
   grants:
+
+    # Captura permissões atuais do destino antes do restore.
     capture_before_restore: "{{ pgm_preserve_target_grants }}"
+
+    # Reaplica as permissões capturadas na database restaurada.
     apply_after_restore: "{{ pgm_apply_target_grants }}"
+
+    # Define se erro ao reaplicar grants deve impedir o promote.
     fail_on_apply_error: "{{ pgm_fail_on_grant_apply_error }}"
 
+  # --------------------------------------------------------------------------
+  # PRESERVE DATA
+  # --------------------------------------------------------------------------
+
+  preserve_data:
+
+    # Feature desligada por padrão.
+    enabled: "{{ pgm_preserve_data_enabled_default }}"
+
+    # Quando habilitada, erro impede promote por padrão.
+    fail_on_error: "{{ pgm_preserve_data_fail_on_error_default }}"
+
+    # Ambientes onde a preservação poderá executar.
+    run_on_envs: []
+
+    # Grupos declarativos de tabelas.
+    groups: []
+
+  # --------------------------------------------------------------------------
+  # POST RESTORE
+  # --------------------------------------------------------------------------
+
+  post_restore:
+
+    # Truncates desligados por padrão.
+    truncate_enabled: "{{ pgm_post_restore_truncate_enabled_default }}"
+
+    # Erro impede promote por padrão.
+    fail_on_error: "{{ pgm_post_restore_truncate_fail_on_error_default }}"
+
+    # Ambientes onde os truncates poderão executar.
+    run_on_envs: []
+
+    # Grupos declarativos de truncate.
+    truncate_groups: []
+
+  # --------------------------------------------------------------------------
+  # DBLINK / FOREIGN SERVERS
+  # --------------------------------------------------------------------------
+
   dblink:
+
+    # Feature desligada por padrão.
     enabled: false
+
+    # Foreign Servers declarados para a database.
+    servers: []
+
+    # User Mappings recriados após o restore.
+    user_mappings: []
+
+    # Conexões dblink nomeadas usadas por SQL/MVs.
+    connections: []
+
+  # --------------------------------------------------------------------------
+  # MASKING
+  # --------------------------------------------------------------------------
+
+  masking:
+
+    # Feature desligada por padrão.
+    enabled: "{{ pgm_masking_enabled_default }}"
+
+    # Erro de masking impede promote por padrão.
+    fail_on_error: "{{ pgm_masking_fail_on_error_default }}"
+
+    # Ambientes onde masking poderá executar.
+    run_on_envs: []
+
+    # Ambientes nos quais masking nunca deve executar.
+    protected_envs: "{{ pgm_masking_protected_envs_default }}"
+
+    # Scripts/funções de masking.
+    scripts: []
+
+  # --------------------------------------------------------------------------
+  # MATERIALIZED VIEWS
+  # --------------------------------------------------------------------------
 
   materialized_views:
+
+    # Refresh desligado por padrão.
     refresh_enabled: false
+
+    # true atualiza todas; false utiliza apenas items.
     refresh_all: false
+
+    # Lista explícita das MVs.
     items: []
 
-  users:
-    lock_before_promote: []
-    unlock_after_promote: []
+  # --------------------------------------------------------------------------
+  # MANUTENÇÃO
+  # --------------------------------------------------------------------------
+
+  maintenance:
+
+    # Habilita manutenção pós-restore.
+    enabled: "{{ pgm_maintenance_enabled_default }}"
+
+    # none | analyze | vacuum_analyze
+    mode: "{{ pgm_maintenance_mode_default }}"
+
+  # --------------------------------------------------------------------------
+  # CONNECTION CONTROL
+  # --------------------------------------------------------------------------
+
+  connection_control:
+
+    # Desligado por padrão para compatibilidade com profiles antigos.
+    enabled: "{{ pgm_connection_control_enabled_default }}"
+
+    # Bloqueia novas conexões antes do promote.
+    block_new_connections: "{{ pgm_connection_control_block_new_connections_default }}"
+
+    # Encerra sessões existentes.
+    terminate_sessions: "{{ pgm_connection_control_terminate_sessions_default }}"
+
+    # Mantém a database antiga bloqueada depois do promote.
+    keep_old_blocked: "{{ pgm_connection_control_keep_old_blocked_default }}"
+
+  # --------------------------------------------------------------------------
+  # VALIDAÇÕES
+  # --------------------------------------------------------------------------
 
   validations:
+
+    # Queries adicionais desligadas por padrão.
     enabled: false
+
+    # Arquivos SQL executados depois do restore/promote.
     queries: []
 
+  # --------------------------------------------------------------------------
+  # HOSTS / AMBIENTES
+  # --------------------------------------------------------------------------
+
+  # Inventário lógico do banco por ambiente.
   hosts_env_sync: {}
