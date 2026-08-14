@@ -6,12 +6,14 @@
     pgm_database_create_sql_file: "{{ pgm_restore_dir_root }}/create_database_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ pgm_job_id }}.sql"
 
 - name: Database create | Validar configuração
-  ansible.builtin.assert:
-    that:
-      - pgm_effective_restore_mode == 'promote'
-    fail_msg: "database_create.inherit_from_current somente pode ser utilizado com restore.mode=promote."
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Preparar base destino"
+    pgm_host_error_msg: "drop_in_place exige database_create.inherit_from_current=true para preservar as propriedades da base removida."
   when:
-    - pgm_database_create_inherit_from_current | bool
+    - not (pgm_host_failed | bool)
+    - pgm_effective_restore_mode == 'drop_in_place'
+    - not (pgm_database_create_inherit_from_current | bool)
 
 - name: Database create | Preparar base herdando propriedades do destino
   ansible.builtin.shell: |
@@ -19,6 +21,8 @@
 
     SOURCE_DB="{{ pgm_database_name }}"
     TARGET_DB="{{ pgm_restore_target_db }}"
+    TEMP_DB="{{ pgm_target_temp_db }}"
+    OLD_DB="{{ pgm_target_old_db }}"
     CREATE_SQL="{{ pgm_database_create_sql_file }}"
 
     PSQL=(
@@ -63,21 +67,6 @@
 
     echo "[INFO] Propriedades origem: ${SOURCE_META}" >> "{{ pgm_restore_log_file }}"
 
-    "${PSQL[@]}" -v target_db="${TARGET_DB}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
-    SELECT pg_terminate_backend(pid)
-    FROM pg_stat_activity
-    WHERE datname = :'target_db'
-      AND pid <> pg_backend_pid();
-
-    DROP DATABASE IF EXISTS :"target_db";
-    SQL
-
-    rc=$?
-    if [ "${rc}" -ne 0 ]; then
-      echo "[ERROR] Falha ao remover ${TARGET_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
-      exit "${rc}"
-    fi
-
     "${PSQL[@]}" -v source_db="${SOURCE_DB}" -v target_db="${TARGET_DB}" -At > "${CREATE_SQL}" 2>> "{{ pgm_restore_log_file }}" <<'SQL'
     SELECT format(
       'CREATE DATABASE %I WITH OWNER = %I TEMPLATE = template0 ENCODING = %L LOCALE_PROVIDER = libc LC_COLLATE = %L LC_CTYPE = %L TABLESPACE = %I CONNECTION LIMIT = %s;',
@@ -87,7 +76,7 @@
       d.datcollate,
       d.datctype,
       t.spcname,
-      d.datconnlimit
+      {% if pgm_effective_restore_mode == 'drop_in_place' %}0{% else %}d.datconnlimit{% endif %}
     )
     FROM pg_database d
     JOIN pg_tablespace t ON t.oid = d.dattablespace
@@ -100,7 +89,43 @@
       exit 22
     fi
 
+    {% if pgm_effective_restore_mode == 'drop_in_place' %}
+    echo "[INFO] Limpando bases auxiliares antigas antes do drop_in_place" >> "{{ pgm_restore_log_file }}"
+    "${PSQL[@]}" -v temp_db="${TEMP_DB}" -v old_db="${OLD_DB}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+     WHERE datname IN (:'temp_db', :'old_db')
+       AND pid <> pg_backend_pid();
+    DROP DATABASE IF EXISTS :"temp_db";
+    DROP DATABASE IF EXISTS :"old_db";
+    SQL
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao limpar bases auxiliares do drop_in_place. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+    {% endif %}
+
+    echo "[INFO] Removendo ${TARGET_DB} para recriação" >> "{{ pgm_restore_log_file }}"
+    "${PSQL[@]}" -v target_db="${TARGET_DB}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+     WHERE datname = :'target_db'
+       AND pid <> pg_backend_pid();
+    DROP DATABASE IF EXISTS :"target_db";
+    SQL
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao remover ${TARGET_DB}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
     echo "[INFO] Criando ${TARGET_DB} com propriedades herdadas" >> "{{ pgm_restore_log_file }}"
+    {% if pgm_effective_restore_mode == 'drop_in_place' %}
+    echo "[INFO] drop_in_place: CONNECTION LIMIT temporário=0" >> "{{ pgm_restore_log_file }}"
+    {% endif %}
     "${PSQL[@]}" -f "${CREATE_SQL}" >> "{{ pgm_restore_log_file }}" 2>&1
 
     rc=$?
@@ -135,12 +160,24 @@
     echo "[INFO] Propriedades criada: ${TARGET_META}" >> "{{ pgm_restore_log_file }}"
 
     {% if pgm_database_create_validate_inheritance | bool %}
+    {% if pgm_effective_restore_mode == 'drop_in_place' %}
+    SOURCE_BASE="$(echo "${SOURCE_META}" | cut -d'|' -f1-6)"
+    TARGET_BASE="$(echo "${TARGET_META}" | cut -d'|' -f1-6)"
+    TARGET_LIMIT="$(echo "${TARGET_META}" | cut -d'|' -f7)"
+    if [ "${SOURCE_BASE}" != "${TARGET_BASE}" ] || [ "${TARGET_LIMIT}" != "0" ]; then
+      echo "[ERROR] ${TARGET_DB} não herdou as propriedades esperadas para drop_in_place." >> "{{ pgm_restore_log_file }}"
+      echo "[ERROR] Origem: ${SOURCE_META}" >> "{{ pgm_restore_log_file }}"
+      echo "[ERROR] Destino: ${TARGET_META}" >> "{{ pgm_restore_log_file }}"
+      exit 24
+    fi
+    {% else %}
     if [ "${SOURCE_META}" != "${TARGET_META}" ]; then
       echo "[ERROR] As propriedades de ${TARGET_DB} são diferentes de ${SOURCE_DB}." >> "{{ pgm_restore_log_file }}"
       echo "[ERROR] Origem: ${SOURCE_META}" >> "{{ pgm_restore_log_file }}"
       echo "[ERROR] Destino: ${TARGET_META}" >> "{{ pgm_restore_log_file }}"
       exit 24
     fi
+    {% endif %}
     echo "[INFO] Validação das propriedades herdadas rc=0" >> "{{ pgm_restore_log_file }}"
     {% endif %}
 
@@ -192,6 +229,7 @@
   become_user: root
   when:
     - not (pgm_host_failed | bool)
+    - pgm_effective_restore_mode == 'promote'
     - not (pgm_database_create_inherit_from_current | bool)
 
 - name: Database create | Registrar falha na criação herdada
