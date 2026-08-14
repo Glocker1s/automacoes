@@ -25,6 +25,7 @@
   become_user: root
   when:
     - not (pgm_host_failed | bool)
+    - pgm_preserve_data_phase in ['capture', 'full']
 
 - name: Preserve data | Capturar tabelas da base atual
   ansible.builtin.shell: |
@@ -64,6 +65,7 @@
   become_user: root
   when:
     - not (pgm_host_failed | bool)
+    - pgm_preserve_data_phase in ['capture', 'full']
 
 - name: Preserve data | Registrar falha na captura
   ansible.builtin.set_fact:
@@ -72,8 +74,30 @@
     pgm_host_failed_task: "{{ 'Preserve data - backup' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
     pgm_host_error_msg: "{{ 'Falha ao capturar dados específicos do destino. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
   when:
+    - pgm_preserve_data_phase in ['capture', 'full']
     - _pgm_preserve_backup is defined
     - _pgm_preserve_backup.rc | default(0) | int != 0
+
+- name: Preserve data | Validar dump capturado
+  ansible.builtin.stat:
+    path: "{{ pgm_preserve_group_dump_dir }}/toc.dat"
+  register: _pgm_preserve_dump_stat
+  become: true
+  become_user: root
+  failed_when: false
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_preserve_data_phase == 'apply'
+
+- name: Preserve data | Registrar dump preservado ausente
+  ansible.builtin.set_fact:
+    pgm_host_failed: "{{ pgm_host_failed or pgm_preserve_data_fail_on_error }}"
+    pgm_host_warning: "{{ pgm_host_warning or not pgm_preserve_data_fail_on_error }}"
+    pgm_host_failed_task: "{{ 'Preserve data - dump preservado' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
+    pgm_host_error_msg: "{{ 'Dump preservado não encontrado para o grupo ' ~ (pgm_preserve_group.name | default('grupo')) ~ '. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
+  when:
+    - pgm_preserve_data_phase == 'apply'
+    - not (_pgm_preserve_dump_stat.stat.exists | default(false))
 
 - name: Preserve data | Truncar tabelas na base restaurada
   ansible.builtin.shell: |
@@ -105,6 +129,7 @@
   become_user: root
   when:
     - not (pgm_host_failed | bool)
+    - pgm_preserve_data_phase in ['apply', 'full']
 
 - name: Preserve data | Registrar falha no truncate
   ansible.builtin.set_fact:
@@ -113,6 +138,7 @@
     pgm_host_failed_task: "{{ 'Preserve data - truncate' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
     pgm_host_error_msg: "{{ 'Falha ao limpar tabelas antes de restaurar dados preservados. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
   when:
+    - pgm_preserve_data_phase in ['apply', 'full']
     - _pgm_preserve_truncate is defined
     - _pgm_preserve_truncate.rc | default(0) | int != 0
 
@@ -152,6 +178,7 @@
   become_user: root
   when:
     - not (pgm_host_failed | bool)
+    - pgm_preserve_data_phase in ['apply', 'full']
 
 - name: Preserve data | Registrar falha no restore
   ansible.builtin.set_fact:
@@ -160,5 +187,6 @@
     pgm_host_failed_task: "{{ 'Preserve data - restore' if pgm_preserve_data_fail_on_error else pgm_host_failed_task }}"
     pgm_host_error_msg: "{{ 'Falha ao restaurar dados preservados do destino. Verifique ' ~ pgm_restore_log_file if pgm_preserve_data_fail_on_error else pgm_host_error_msg }}"
   when:
+    - pgm_preserve_data_phase in ['apply', 'full']
     - _pgm_preserve_restore is defined
     - _pgm_preserve_restore.rc | default(0) | int != 0
