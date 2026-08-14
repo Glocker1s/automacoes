@@ -1,5 +1,5 @@
 ---
-- name: Connection control | Finalizar estado das databases
+- name: Connection control | Finalizar estado das databases do promote
   ansible.builtin.shell: |
     set -uo pipefail
 
@@ -16,8 +16,7 @@
     )
 
     echo "" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] Finalizando connection control" >> "{{ pgm_restore_log_file }}"
-
+    echo "[INFO] Finalizando connection control do promote" >> "{{ pgm_restore_log_file }}"
     echo "[INFO] Liberando conexões na nova base ${DB_NAME}" >> "{{ pgm_restore_log_file }}"
 
     "${PSQL[@]}" -v db_name="${DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
@@ -47,13 +46,11 @@
     if [ "${OLD_EXISTS}" = "1" ]; then
       if [ "${KEEP_OLD_BLOCKED}" = "true" ]; then
         echo "[INFO] Mantendo ${OLD_DB_NAME} bloqueada para conexões" >> "{{ pgm_restore_log_file }}"
-
         "${PSQL[@]}" -v db_name="${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
     ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS false;
     SQL
       else
         echo "[INFO] Liberando conexões em ${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}"
-
         "${PSQL[@]}" -v db_name="${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
     ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS true;
     SQL
@@ -67,12 +64,8 @@
     fi
 
     echo "[INFO] Estado final das databases:" >> "{{ pgm_restore_log_file }}"
-
-    "${PSQL[@]}" \
-      -v current_db="${DB_NAME}" \
-      -v old_db="${OLD_DB_NAME}" \
-      >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
-    SELECT datname, datallowconn
+    "${PSQL[@]}" -v current_db="${DB_NAME}" -v old_db="${OLD_DB_NAME}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    SELECT datname, datallowconn, datconnlimit
       FROM pg_database
      WHERE datname IN (:'current_db', :'old_db')
      ORDER BY datname;
@@ -93,15 +86,90 @@
   become_user: root
   when:
     - pgm_connection_control_enabled | bool
+    - pgm_effective_restore_mode == 'promote'
     - pgm_restore_promoted | default(false) | bool
 
-- name: Connection control | Registrar falha na finalização
+- name: Connection control | Finalizar estado da database no drop_in_place
+  ansible.builtin.shell: |
+    set -uo pipefail
+
+    DB_NAME="{{ pgm_database_name }}"
+    ORIGINAL_LIMIT="{{ pgm_drop_original_connection_limit }}"
+
+    PSQL=(
+      psql -X -w -v ON_ERROR_STOP=1
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}"
+      -p "{{ pgm_db_port | default(pgm_default_port) }}"
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}"
+      -d postgres
+    )
+
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Finalizando connection control do drop_in_place" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Restaurando CONNECTION LIMIT original=${ORIGINAL_LIMIT}" >> "{{ pgm_restore_log_file }}"
+
+    "${PSQL[@]}" -v db_name="${DB_NAME}" -v conn_limit="${ORIGINAL_LIMIT}" >> "{{ pgm_restore_log_file }}" 2>&1 <<'SQL'
+    ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS true CONNECTION LIMIT :conn_limit;
+    SQL
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao liberar ${DB_NAME} após drop_in_place. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
+    FINAL_STATE="$(
+      "${PSQL[@]}" -v db_name="${DB_NAME}" -At 2>> "{{ pgm_restore_log_file }}" <<'SQL'
+    SELECT datallowconn::text || '|' || datconnlimit::text
+      FROM pg_database
+     WHERE datname = :'db_name';
+    SQL
+    )"
+
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      echo "[ERROR] Falha ao validar estado final de ${DB_NAME}. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+      exit "${rc}"
+    fi
+
+    echo "[INFO] Estado final ${DB_NAME}: ${FINAL_STATE}" >> "{{ pgm_restore_log_file }}"
+    if [ "${FINAL_STATE}" != "true|${ORIGINAL_LIMIT}" ] && [ "${FINAL_STATE}" != "t|${ORIGINAL_LIMIT}" ]; then
+      echo "[ERROR] Estado final inesperado em ${DB_NAME}: ${FINAL_STATE}" >> "{{ pgm_restore_log_file }}"
+      exit 40
+    fi
+
+    echo "[INFO] Finalizar connection control rc=0" >> "{{ pgm_restore_log_file }}"
+    exit 0
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_connection_control_finalize_drop
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  when:
+    - pgm_connection_control_enabled | bool
+    - pgm_effective_restore_mode == 'drop_in_place'
+    - pgm_drop_in_place_database_recreated | default(false) | bool
+    - not (pgm_host_failed | bool)
+
+- name: Connection control | Registrar falha na finalização do promote
   ansible.builtin.set_fact:
     pgm_host_failed: true
     pgm_host_failed_task: "Finalizar controle de conexões"
-    pgm_host_error_msg: >-
-      A base restaurada foi promovida, mas houve falha ao finalizar
-      o controle de conexões. Verifique {{ pgm_restore_log_file }}.
+    pgm_host_error_msg: "Falha ao finalizar o controle de conexões após promote. Verifique {{ pgm_restore_log_file }}."
   when:
     - _pgm_connection_control_finalize is defined
     - _pgm_connection_control_finalize.rc | default(0) | int != 0
+
+- name: Connection control | Registrar falha na finalização do drop_in_place
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Finalizar controle de conexões"
+    pgm_host_error_msg: "Falha ao liberar a base após drop_in_place. Verifique {{ pgm_restore_log_file }}."
+  when:
+    - _pgm_connection_control_finalize_drop is defined
+    - _pgm_connection_control_finalize_drop.rc | default(0) | int != 0
