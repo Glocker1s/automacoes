@@ -136,6 +136,7 @@
     pgm_latest_manifest_name: "{{ pgm_latest_manifest_name }}"
     pgm_source_env_effective: "{{ pgm_source_env_effective }}"
     pgm_action_normalized: "{{ pgm_action_normalized }}"
+    pgm_host_restore_mode: "{{ item.restore_mode | default(pgm_db_cfg.restore.mode | default(pgm_restore_mode)) }}"
   loop: "{{ pgm_target_candidates }}"
   loop_control:
     label: "{{ item.name }}"
