@@ -15,7 +15,12 @@
     pgm_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
     pgm_restore_dir_root: "{{ pgm_restore_root_dir }}"
     pgm_restore_jobs: "{{ (pgm_db_cfg.restore.jobs | default(pgm_default_jobs)) | int }}"
-    pgm_effective_restore_mode: "{{ pgm_db_cfg.restore.mode | default(pgm_restore_mode) }}"
+    pgm_effective_restore_mode: >-
+      {{
+        (pgm_host_restore_mode | default('') | string | lower | trim)
+        if (pgm_host_restore_mode | default('') | string | trim | length > 0)
+        else (pgm_db_cfg.restore.mode | default(pgm_restore_mode) | string | lower | trim)
+      }}
     pgm_target_temp_db: "{{ pgm_database_name ~ (pgm_db_cfg.restore.target_temp_suffix | default(pgm_restore_temp_suffix)) }}"
     pgm_target_old_db: "{{ pgm_database_name ~ (pgm_db_cfg.restore.old_suffix | default(pgm_restore_old_suffix)) }}"
     pgm_restore_log_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
@@ -23,7 +28,10 @@
     pgm_grants_file: "{{ pgm_restore_root_dir }}/grants_before_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.sql"
     pgm_restore_list_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.lst"
     pgm_restore_promoted: false
-    pgm_restore_database_state: "Restore ainda não promovido."
+    pgm_restore_completed: false
+    pgm_drop_in_place_started: false
+    pgm_drop_in_place_database_recreated: false
+    pgm_restore_database_state: "Restore ainda não concluído."
     pgm_connection_control_enabled: false
     pgm_connection_control_blocked: false
 
@@ -53,8 +61,18 @@
       become: true
       become_user: root
 
+    - name: Restore | Validar modo efetivo
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validar modo de restore"
+        pgm_host_error_msg: "Modo de restore inválido: {{ pgm_effective_restore_mode }}. Valores aceitos: promote ou drop_in_place."
+      when:
+        - pgm_effective_restore_mode not in ['promote', 'drop_in_place']
+
     - name: Restore | Resolver dump para restore via CIFS
-      when: pgm_cifs_enabled | bool
+      when:
+        - pgm_cifs_enabled | bool
+        - not (pgm_host_failed | bool)
       block:
         - name: Restore | Resolver endereço CIFS restore
           ansible.builtin.set_fact:
@@ -226,6 +244,109 @@
         - _pgm_capture_grants.rc is defined
         - _pgm_capture_grants.rc | int != 0
 
+    - name: Restore | Validar requisitos do drop_in_place
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validar drop_in_place"
+        pgm_host_error_msg: >-
+          drop_in_place exige database_create.inherit_from_current=true e
+          connection_control com enabled=true, block_new_connections=true e terminate_sessions=true.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - >
+          not (
+            (pgm_db_cfg.database_create | default({})).get('inherit_from_current', pgm_database_create_inherit_from_current_default) | bool
+            and (pgm_db_cfg.connection_control | default({})).get('enabled', pgm_connection_control_enabled_default) | bool
+            and (pgm_db_cfg.connection_control | default({})).get('block_new_connections', pgm_connection_control_block_new_connections_default) | bool
+            and (pgm_db_cfg.connection_control | default({})).get('terminate_sessions', pgm_connection_control_terminate_sessions_default) | bool
+          )
+
+    - name: Restore | Capturar estado original para drop_in_place
+      ansible.builtin.shell: |
+        set -o pipefail
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d postgres \
+          -v db_name="{{ pgm_database_name }}" -At <<'SQL'
+        SELECT d.oid::text || '|' || d.datconnlimit::text || '|' || CASE WHEN r.rolsuper THEN 't' ELSE 'f' END
+          FROM pg_database d
+          JOIN pg_roles r ON r.rolname = current_user
+         WHERE d.datname = :'db_name';
+        SQL
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_drop_precheck
+      failed_when: false
+      changed_when: false
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+
+    - name: Restore | Registrar falha no precheck do drop_in_place
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validar drop_in_place"
+        pgm_host_error_msg: "Não foi possível capturar OID, connection limit e privilégio do usuário antes do drop_in_place."
+      when:
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - _pgm_drop_precheck is defined
+        - _pgm_drop_precheck.rc | default(1) | int != 0 or _pgm_drop_precheck.stdout | default('') | trim | length == 0
+
+    - name: Restore | Publicar estado original do drop_in_place
+      ansible.builtin.set_fact:
+        pgm_drop_original_database_oid: "{{ ((_pgm_drop_precheck.stdout | trim).split('|'))[0] | int }}"
+        pgm_drop_original_connection_limit: "{{ ((_pgm_drop_precheck.stdout | trim).split('|'))[1] | int }}"
+        pgm_drop_db_user_superuser: "{{ ((_pgm_drop_precheck.stdout | trim).split('|'))[2] == 't' }}"
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - _pgm_drop_precheck is defined
+        - _pgm_drop_precheck.rc | default(1) | int == 0
+        - (_pgm_drop_precheck.stdout | default('') | trim).split('|') | length == 3
+
+    - name: Restore | Bloquear drop_in_place sem PostgreSQL superuser
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Validar drop_in_place"
+        pgm_host_error_msg: >-
+          drop_in_place requer que o db_user utilizado pela automação seja PostgreSQL superuser.
+          Nenhuma database foi removida.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - not (pgm_drop_db_user_superuser | default(false) | bool)
+
+    - name: Restore | Capturar preserve_data antes do drop_in_place
+      ansible.builtin.include_tasks: 40_preserve_data.yml
+      vars:
+        pgm_preserve_phase: "capture"
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+
+    - name: Restore | Controlar conexões antes do drop_in_place
+      ansible.builtin.include_tasks: 46_connection_control.yml
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+
+    - name: Restore | Registrar início destrutivo do drop_in_place
+      ansible.builtin.set_fact:
+        pgm_drop_in_place_started: true
+        pgm_restore_database_state: >-
+          drop_in_place iniciado. A base original será removida e não haverá cópia _old.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+
     - name: Restore | Definir banco efetivo de restore
       ansible.builtin.set_fact:
         pgm_restore_target_db: >-
@@ -236,6 +357,16 @@
       ansible.builtin.include_tasks: 35_prepare_restore_database.yml
       when:
         - not (pgm_host_failed | bool)
+
+    - name: Restore | Registrar database recriada no drop_in_place
+      ansible.builtin.set_fact:
+        pgm_drop_in_place_database_recreated: true
+        pgm_restore_database_state: >-
+          Base {{ pgm_database_name }} recriada para drop_in_place com CONNECTION LIMIT temporário 0.
+          Restore e validações ainda estão em andamento.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
 
     - name: Restore | Preparar lista filtrada do pg_restore
       ansible.builtin.shell: |
@@ -317,19 +448,6 @@
         - _pgm_restore_exec.rc is defined
         - _pgm_restore_exec.rc | int != 0
 
-    - name: Restore | Registrar restore direto concluído
-      ansible.builtin.set_fact:
-        pgm_restore_promoted: true
-        pgm_restore_database_state: >-
-          Restore em modo drop_in_place concluído. A base {{ pgm_database_name }}
-          foi recriada e está ativa; a base anterior não foi preservada como {{ pgm_target_old_db }}.
-      when:
-        - not (pgm_host_failed | bool)
-        - pgm_effective_restore_mode == 'drop_in_place'
-        - _pgm_restore_exec is defined
-        - _pgm_restore_exec.rc is defined
-        - _pgm_restore_exec.rc | int == 0
-
     - name: Restore | Reaplicar grants capturados do destino
       ansible.builtin.shell: |
         set -o pipefail
@@ -376,10 +494,21 @@
         - _pgm_apply_grants.rc is defined
         - _pgm_apply_grants.rc | int != 0
 
-    - name: Restore | Preservar dados específicos do ambiente
+    - name: Restore | Preservar dados específicos do ambiente no promote
       ansible.builtin.include_tasks: 40_preserve_data.yml
+      vars:
+        pgm_preserve_phase: "full"
       when:
         - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'promote'
+
+    - name: Restore | Aplicar preserve_data no drop_in_place
+      ansible.builtin.include_tasks: 40_preserve_data.yml
+      vars:
+        pgm_preserve_phase: "apply"
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
 
     - name: Restore | Executar ações pós-restore
       ansible.builtin.include_tasks: 42_post_restore.yml
@@ -736,6 +865,33 @@
         - _pgm_validations is defined
         - _pgm_validations.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
 
+    - name: Restore | Finalizar controle de conexões do drop_in_place
+      ansible.builtin.include_tasks: 47_connection_control_finalize.yml
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_connection_control_enabled | default(false) | bool
+        - pgm_drop_in_place_database_recreated | default(false) | bool
+
+    - name: Restore | Registrar drop_in_place concluído
+      ansible.builtin.set_fact:
+        pgm_restore_completed: true
+        pgm_restore_database_state: >-
+          Restore drop_in_place concluído com sucesso. A base {{ pgm_database_name }} foi recriada,
+          validada e liberada para uso. A base anterior não foi preservada como {{ pgm_target_old_db }}.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_drop_in_place_database_recreated | default(false) | bool
+
+    - name: Restore | Registrar restore promote concluído
+      ansible.builtin.set_fact:
+        pgm_restore_completed: true
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_effective_restore_mode == 'promote'
+        - pgm_restore_promoted | default(false) | bool
+
   rescue:
     - name: Restore | Marcar falha inesperada do restore
       ansible.builtin.set_fact:
@@ -793,6 +949,97 @@
         - not (pgm_restore_promoted | default(false) | bool)
         - pgm_host_failed_task | default('') == 'Promover base restaurada'
 
+    - name: Restore | Registrar falha drop_in_place antes da etapa destrutiva
+      ansible.builtin.set_fact:
+        pgm_restore_database_state: >-
+          drop_in_place não iniciou a etapa destrutiva. A base original {{ pgm_database_name }} permanece ativa.
+        pgm_host_error_msg: >-
+          {{ pgm_host_error_msg | default('Falha durante o drop_in_place.') }}
+          A etapa destrutiva não foi iniciada e a base original permanece ativa.
+      when:
+        - pgm_host_failed | default(false) | bool
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_drop_original_database_oid is not defined
+
+    - name: Restore | Consultar OID atual após falha do drop_in_place
+      ansible.builtin.shell: |
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d postgres \
+          -v db_name="{{ pgm_database_name }}" -At <<'SQL'
+        SELECT oid::text FROM pg_database WHERE datname = :'db_name';
+        SQL
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      register: _pgm_drop_current_oid
+      failed_when: false
+      changed_when: false
+      become: true
+      become_user: root
+      when:
+        - pgm_host_failed | default(false) | bool
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_drop_original_database_oid is defined
+
+    - name: Connection control | Recuperar base original quando drop não ocorreu
+      ansible.builtin.shell: |
+        set -uo pipefail
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d postgres \
+          -v db_name="{{ pgm_database_name }}" \
+          -v conn_limit="{{ pgm_drop_original_connection_limit }}" <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
+        ALTER DATABASE :"db_name" WITH ALLOW_CONNECTIONS true CONNECTION LIMIT :conn_limit;
+        SQL
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      become: true
+      become_user: root
+      failed_when: false
+      changed_when: false
+      when:
+        - pgm_host_failed | default(false) | bool
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_drop_original_database_oid is defined
+        - _pgm_drop_current_oid.stdout | default('') | trim | string == pgm_drop_original_database_oid | string
+
+    - name: Restore | Registrar base original preservada no drop_in_place
+      ansible.builtin.set_fact:
+        pgm_restore_database_state: >-
+          drop_in_place falhou antes da remoção da base original. {{ pgm_database_name }} permanece ativa e teve o acesso restaurado.
+        pgm_host_error_msg: >-
+          {{ pgm_host_error_msg | default('Falha durante o drop_in_place.') }}
+          A base original não foi removida e teve o acesso restaurado.
+      when:
+        - pgm_host_failed | default(false) | bool
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_drop_original_database_oid is defined
+        - _pgm_drop_current_oid.stdout | default('') | trim | string == pgm_drop_original_database_oid | string
+
+    - name: Restore | Registrar falha após remoção da base no drop_in_place
+      ansible.builtin.set_fact:
+        pgm_restore_database_state: >-
+          drop_in_place falhou após a etapa destrutiva. A base anterior não está preservada como {{ pgm_target_old_db }}
+          e a database atual deve ser validada manualmente antes de ser liberada para uso.
+        pgm_host_error_msg: >-
+          {{ pgm_host_error_msg | default('Falha durante o drop_in_place.') }}
+          A base anterior já foi removida; a database atual não foi liberada para uso e requer validação manual.
+      when:
+        - pgm_host_failed | default(false) | bool
+        - pgm_effective_restore_mode == 'drop_in_place'
+        - pgm_drop_original_database_oid is defined
+        - _pgm_drop_current_oid.stdout | default('') | trim | string != pgm_drop_original_database_oid | string
+
     - name: Connection control | Recuperar acesso quando promote não concluir
       ansible.builtin.shell: |
         set -uo pipefail
@@ -845,6 +1092,7 @@
       failed_when: false
       changed_when: false
       when:
+        - pgm_effective_restore_mode == 'promote'
         - pgm_connection_control_enabled | default(false) | bool
         - not (pgm_restore_promoted | default(false) | bool)
 
@@ -857,7 +1105,9 @@
         Task: {{ pgm_host_failed_task | default('desconhecida') }}
         Mensagem: {{ pgm_host_error_msg | default('') }}
         {% endif %}
+        Modo efetivo: {{ pgm_effective_restore_mode }}
         Promovido: {{ pgm_restore_promoted | default(false) | bool }}
+        Concluído: {{ pgm_restore_completed | default(false) | bool }}
         Estado da base: {{ pgm_restore_database_state | default('Estado não informado.') }}
         Fim: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
         Status: {{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}
@@ -907,7 +1157,9 @@
           dump_dir: "{{ pgm_effective_dump_dir | default('') }}"
           log_file: "{{ pgm_restore_log_file }}"
           grants_file: "{{ pgm_grants_file }}"
+          restore_mode: "{{ pgm_effective_restore_mode }}"
           promoted: "{{ pgm_restore_promoted | default(false) | bool }}"
+          completed: "{{ pgm_restore_completed | default(false) | bool }}"
           database_state: "{{ pgm_restore_database_state | default('') }}"
           failed_task: "{{ pgm_host_failed_task | default('') }}"
           error_msg: "{{ pgm_host_error_msg | default('') }}"
