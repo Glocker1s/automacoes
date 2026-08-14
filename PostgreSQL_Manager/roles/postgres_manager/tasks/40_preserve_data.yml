@@ -5,6 +5,7 @@
     pgm_preserve_data_fail_on_error: "{{ pgm_db_cfg.preserve_data.fail_on_error | default(pgm_preserve_data_fail_on_error_default) | bool }}"
     pgm_preserve_data_run_on_envs: "{{ pgm_db_cfg.preserve_data.run_on_envs | default([]) | map('string') | map('lower') | list }}"
     pgm_preserve_data_groups: "{{ pgm_db_cfg.preserve_data.groups | default([]) }}"
+    pgm_preserve_data_phase: "{{ pgm_preserve_phase | default('full') | string | lower }}"
 
 - name: Preserve data | Resolver execução no ambiente
   ansible.builtin.set_fact:
@@ -16,6 +17,16 @@
           or pgm_env | lower in pgm_preserve_data_run_on_envs
         )
       }}
+
+- name: Preserve data | Validar fase
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Preserve data"
+    pgm_host_error_msg: "Fase preserve_data inválida: {{ pgm_preserve_data_phase }}. Valores aceitos: capture, apply ou full."
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_preserve_data_should_run | bool
+    - pgm_preserve_data_phase not in ['capture', 'apply', 'full']
 
 - name: Preserve data | Validar configuração
   ansible.builtin.set_fact:
