@@ -6,19 +6,24 @@
     pgm_connection_control_terminate_sessions: "{{ (pgm_db_cfg.connection_control | default({})).get('terminate_sessions', pgm_connection_control_terminate_sessions_default) | bool }}"
     pgm_connection_control_keep_old_blocked: "{{ (pgm_db_cfg.connection_control | default({})).get('keep_old_blocked', pgm_connection_control_keep_old_blocked_default) | bool }}"
 
-- name: Connection control | Validar configuração
+- name: Connection control | Validar configuração do drop_in_place
   ansible.builtin.assert:
     that:
-      - pgm_effective_restore_mode == 'promote'
-    fail_msg: "connection_control somente pode ser utilizado com restore.mode=promote."
+      - pgm_connection_control_enabled | bool
+      - pgm_connection_control_block_new_connections | bool
+      - pgm_connection_control_terminate_sessions | bool
+    fail_msg: >-
+      drop_in_place exige connection_control.enabled=true,
+      block_new_connections=true e terminate_sessions=true.
   when:
-    - pgm_connection_control_enabled | bool
+    - pgm_effective_restore_mode == 'drop_in_place'
 
-- name: Connection control | Bloquear conexões antes da promoção
+- name: Connection control | Bloquear conexões antes do cutover
   ansible.builtin.shell: |
     set -uo pipefail
 
     DB_NAME="{{ pgm_database_name }}"
+    MODE="{{ pgm_effective_restore_mode }}"
     BLOCK_NEW="{{ 'true' if pgm_connection_control_block_new_connections | bool else 'false' }}"
     TERMINATE="{{ 'true' if pgm_connection_control_terminate_sessions | bool else 'false' }}"
 
@@ -31,7 +36,7 @@
     )
 
     echo "" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] Connection control antes da promoção" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Connection control antes do ${MODE}" >> "{{ pgm_restore_log_file }}"
     echo "[INFO] Database: ${DB_NAME}" >> "{{ pgm_restore_log_file }}"
     echo "[INFO] block_new_connections=${BLOCK_NEW}" >> "{{ pgm_restore_log_file }}"
     echo "[INFO] terminate_sessions=${TERMINATE}" >> "{{ pgm_restore_log_file }}"
@@ -135,8 +140,8 @@
 - name: Connection control | Registrar falha
   ansible.builtin.set_fact:
     pgm_host_failed: true
-    pgm_host_failed_task: "Controlar conexões antes da promoção"
-    pgm_host_error_msg: "Falha ao controlar conexões da base {{ pgm_database_name }} antes da promoção. Verifique {{ pgm_restore_log_file }}."
+    pgm_host_failed_task: "Controlar conexões antes do {{ pgm_effective_restore_mode }}"
+    pgm_host_error_msg: "Falha ao controlar conexões da base {{ pgm_database_name }} antes do {{ pgm_effective_restore_mode }}. Verifique {{ pgm_restore_log_file }}."
   when:
     - _pgm_connection_control is defined
     - _pgm_connection_control.rc | default(0) | int != 0
