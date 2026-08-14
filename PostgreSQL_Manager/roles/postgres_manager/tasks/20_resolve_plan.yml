@@ -109,12 +109,15 @@
         {%- set host_filter_ok = (pgm_selected_target_hosts | length == 0) or (name_l in pgm_selected_target_hosts) or (ip_l in pgm_selected_target_hosts) -%}
         {%- if enabled and env_ok and host_filter_ok -%}
           {%- set dbname = h.database_name | default(pgm_database_name_effective) -%}
+          {%- set host_restore_mode = h.restore_mode | default('') | string | lower | trim -%}
+          {%- set effective_restore_mode = host_restore_mode if host_restore_mode | length > 0 else (pgm_db_cfg.restore.mode | default(pgm_restore_mode) | string | lower | trim) -%}
           {%- set item = h | combine({
                 'database_name': dbname,
                 'port': h.port | default(pgm_default_port),
                 'db_host': h.db_host | default(pgm_default_db_host),
                 'db_user': h.db_user | default(pgm_default_db_user),
                 'os_user': h.os_user | default(pgm_default_os_user),
+                'restore_mode': effective_restore_mode,
                 'role': 'target'
               }, recursive=True) -%}
           {%- set _ = out.append(item) -%}
@@ -126,6 +129,18 @@
   ansible.builtin.set_fact:
     pgm_source_candidates: "{{ _pgm_source_candidates_json | from_json }}"
     pgm_target_candidates: "{{ _pgm_target_candidates_json | from_json }}"
+
+- name: Validar modo de restore dos destinos
+  ansible.builtin.assert:
+    that:
+      - item.restore_mode | default(pgm_restore_mode) in ['promote', 'drop_in_place']
+    fail_msg: >-
+      restore_mode inválido no host {{ item.name }}: {{ item.restore_mode | default('') }}.
+      Valores aceitos: promote ou drop_in_place.
+  loop: "{{ pgm_target_candidates | default([]) }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.restore_mode | default(pgm_restore_mode) }}"
+  when: pgm_action_normalized in ['restore', 'sync']
 
 - name: Validar origem quando ação exige backup
   ansible.builtin.assert:
