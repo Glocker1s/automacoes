@@ -190,6 +190,10 @@
                     <div style="line-height:18px;">
                       <b>Ambiente:</b> {{ code(row.env) }}
                       &nbsp;&nbsp;
+                      {% if row.restore_mode | default('') | length > 0 %}
+                      <b>Modo:</b> {{ code(row.restore_mode) }}
+                      &nbsp;&nbsp;
+                      {% endif %}
                       <b>Task:</b> {{ code(row.failed_task | default('desconhecida')) }}
                       &nbsp;&nbsp;
                       <b>Log:</b> {{ code(row.log_file | default('—')) }}
@@ -223,6 +227,7 @@
                   {{ th('Host') }}
                   {{ th('Banco') }}
                   {{ th('Ação') }}
+                  {{ th('Modo') }}
                   {{ th('Status') }}
                   {{ th('Dump') }}
                   {{ th('Log') }}
@@ -234,6 +239,7 @@
                   {{ td_open() }}<b>{{ row.host | default('—') }}</b></td>
                   {{ td_open() }}{{ code(row.database | default('—')) }}</td>
                   {{ td_open() }}{{ badge((row.action | default('—')) | upper, 'blue') }}</td>
+                  {{ td_open() }}{{ code(row.restore_mode | default('—') if row.action == 'restore' else '—') }}</td>
                   {{ td_open() }}
                     {% if row.status == 'SUCESSO' %}
                       {{ badge(row.status, 'ok') }}
