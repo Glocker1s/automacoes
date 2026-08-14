@@ -59,8 +59,8 @@ cm:
         # --------------------------------------------------------------------
         restore:
 
-          # Estratégia do restore.
-          # promote é o modo homologado atualmente.
+          # Estratégia padrão do restore.
+          # Pode ser sobrescrita por host com restore_mode.
           mode: "promote"
 
           # Sufixo da database temporária.
@@ -102,8 +102,8 @@ cm:
         # --------------------------------------------------------------------
         database_create:
 
-          # Cria dbcvm_restoring herdando propriedades da dbcvm atual:
-          # owner, encoding, locale, tablespace e connection limit.
+          # Cria a base de restore herdando propriedades da dbcvm atual:
+          # no promote usa dbcvm_restoring; no drop_in_place recria dbcvm.
           inherit_from_current: true
 
           # Compara as propriedades depois da criação.
@@ -360,16 +360,16 @@ cm:
         # --------------------------------------------------------------------
         connection_control:
 
-          # Liga o controle da database antes do promote.
+          # Liga o controle da database antes do cutover.
           enabled: true
 
-          # Executa ALLOW_CONNECTIONS false antes da troca.
+          # Executa ALLOW_CONNECTIONS false antes da troca/remoção.
           block_new_connections: true
 
           # Encerra sessões já conectadas à database atual.
           terminate_sessions: true
 
-          # Mantém dbcvm_old sem aceitar conexões após a promoção.
+          # No promote, mantém dbcvm_old sem aceitar conexões após a promoção.
           keep_old_blocked: true
 
         # --------------------------------------------------------------------
@@ -377,7 +377,7 @@ cm:
         # --------------------------------------------------------------------
         validations:
 
-          # Liga execução das queries depois do promote.
+          # Liga execução das queries no final do restore.
           enabled: true
 
           # SQLs executados sequencialmente na database promovida.
@@ -437,5 +437,9 @@ cm:
               database_name: "dbcvm"
               port: 5432
               db_host: "127.0.0.1"
+
+              # Override por host. O profile continua promote por padrão.
+              restore_mode: "drop_in_place"
+
               source: true
               enabled: true
