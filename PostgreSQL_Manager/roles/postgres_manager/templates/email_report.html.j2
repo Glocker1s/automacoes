@@ -285,6 +285,13 @@
                 <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#ffffff;border:1px solid #ead2d2;padding:8px;margin-top:8px;color:#222222;">{{ pgm_cifs_report_upload_error | default('Erro não informado.') }}</pre>
               </div>
             {% endif %}
+
+            {% if pgm_cifs_cleanup_failed | default(false) | bool %}
+              <div style="background-color:#fffaf0;border:1px solid #f0d49a;padding:10px;margin-top:8px;font-family:Arial,sans-serif;font-size:13px;color:#9a6700;">
+                <b>Atenção:</b> o restore foi concluído, mas houve falha ao remover o dump consumido do CIFS.
+                <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#ffffff;border:1px solid #ead2d2;padding:8px;margin-top:8px;color:#222222;">{{ pgm_cifs_cleanup_error | default('Erro não informado.') }}</pre>
+              </div>
+            {% endif %}
           </td>
         </tr>
 
