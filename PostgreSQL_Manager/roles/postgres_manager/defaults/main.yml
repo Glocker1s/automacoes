@@ -233,6 +233,10 @@ send_mail_cifs_path: "{{ pgm_cifs_attachment_path }}"
 send_mail_cifs_address: "{{ pgm_cifs_address }}"
 cifs_workgroup: "{{ pgm_cifs_workgroup }}"
 
+# Remove do CIFS o dump consumido após restore/sync concluído com sucesso.
+# Backup puro mantém dump, log e latest publicados no CIFS.
+pgm_cleanup_cifs_dump_after_restore: true
+
 # ============================================================================
 # RELATÓRIO
 # ============================================================================
