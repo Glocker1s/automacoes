@@ -47,6 +47,8 @@
       {{
         (pgm_cifs_report_upload_failed | default(false) | bool)
         or
+        (pgm_cifs_cleanup_failed | default(false) | bool)
+        or
         (
           pgm_report_rows
           | selectattr('status', 'equalto', 'SUCESSO COM AVISO')
