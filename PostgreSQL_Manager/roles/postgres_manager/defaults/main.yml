@@ -94,8 +94,8 @@ pgm_preserve_target_grants: true
 pgm_apply_target_grants: true
 pgm_fail_on_grant_apply_error: false
 
-# Remove o dump copiado para o host destino após o restore.
-pgm_cleanup_remote_dump_after_restore: false
+# Remove os artefatos depois do restore
+pgm_cleanup_restore_artifacts_after_success: true
 
 # Mantido por compatibilidade até confirmação de uso no restante da role.
 pgm_keep_remote_logs: false
