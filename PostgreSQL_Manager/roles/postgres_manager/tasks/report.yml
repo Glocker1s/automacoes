@@ -14,8 +14,14 @@
 - name: Publicar anexos no CIFS
   ansible.builtin.import_tasks: 85_publish_cifs.yml
 
+- name: Limpar artefatos locais dos destinos
+  ansible.builtin.import_tasks: 87_cleanup_restore_artifacts.yml
+
 - name: Limpar dump consumido do CIFS
   ansible.builtin.import_tasks: 88_cleanup_cifs_dump.yml
+
+- name: Limpar backup local criado pelo sync
+  ansible.builtin.import_tasks: 89_cleanup_local_sync_backup.yml
 
 - name: Montar relatório final
   ansible.builtin.import_tasks: 90_build_report.yml
