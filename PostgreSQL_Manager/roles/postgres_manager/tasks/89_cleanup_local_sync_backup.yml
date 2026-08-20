@@ -1,0 +1,126 @@
+---
+- name: Local cleanup | Inicializar estado
+  ansible.builtin.set_fact:
+    pgm_local_cleanup_failed: false
+    pgm_local_cleanup_error: ""
+    pgm_local_cleanup_performed: false
+    pgm_local_cleanup_errors: []
+    _pgm_local_cleanup_action: "{{ pgm_action_normalized | default(pgm_action | default('backup') | lower) }}"
+
+- name: Local cleanup | Resolver hosts do sync
+  ansible.builtin.set_fact:
+    _pgm_local_cleanup_source_hosts: "{{ groups.pgm_source_targets | default([]) }}"
+    _pgm_local_cleanup_required_hosts: "{{ ((groups.pgm_source_targets | default([])) + (groups.pgm_restore_targets | default([]))) | unique | list }}"
+    _pgm_local_cleanup_not_success_hosts: []
+  when:
+    - pgm_cleanup_local_backup_after_sync | bool
+    - _pgm_local_cleanup_action == 'sync'
+
+- name: Local cleanup | Identificar hosts sem sucesso
+  ansible.builtin.set_fact:
+    _pgm_local_cleanup_not_success_hosts: "{{ _pgm_local_cleanup_not_success_hosts + [item] }}"
+  loop: "{{ _pgm_local_cleanup_required_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - pgm_cleanup_local_backup_after_sync | bool
+    - _pgm_local_cleanup_action == 'sync'
+    - hostvars[item].pgm_host_status | default('NÃO EXECUTADO') != 'SUCESSO'
+
+- name: Local cleanup | Informar retenção por falha operacional
+  ansible.builtin.debug:
+    msg: >-
+      Backup local do sync mantido porque nem todos os hosts terminaram com SUCESSO:
+      {{ _pgm_local_cleanup_not_success_hosts | join(', ') }}.
+  when:
+    - pgm_cleanup_local_backup_after_sync | bool
+    - _pgm_local_cleanup_action == 'sync'
+    - _pgm_local_cleanup_not_success_hosts | default([]) | length > 0
+
+- name: Local cleanup | Informar retenção por falha no cleanup CIFS
+  ansible.builtin.debug:
+    msg: "Backup local do sync mantido porque o cleanup do CIFS apresentou falha."
+  when:
+    - pgm_cleanup_local_backup_after_sync | bool
+    - _pgm_local_cleanup_action == 'sync'
+    - _pgm_local_cleanup_not_success_hosts | default([]) | length == 0
+    - pgm_cifs_cleanup_failed | default(false) | bool
+
+- name: Local cleanup | Remover dump, log e latest da origem
+  ansible.builtin.shell: |
+    set -euo pipefail
+    DUMP_DIR="{{ (hostvars[item].pgm_host_summary | default({})).get('dump_dir', '') }}"
+    LOG_FILE="{{ (hostvars[item].pgm_host_summary | default({})).get('log_file', '') }}"
+    DUMP_NAME="{{ (hostvars[item].pgm_host_summary | default({})).get('dump', '') }}"
+    MANIFEST="{{ hostvars[item].pgm_latest_manifest_file | default('') }}"
+
+    if [ -z "$DUMP_DIR" ] || [ -z "$LOG_FILE" ] || [ -z "$DUMP_NAME" ]; then
+      echo "Informações insuficientes para cleanup local do host {{ item }}." >&2
+      exit 20
+    fi
+
+    if [ -d "$DUMP_DIR" ]; then
+      rm -rf "$DUMP_DIR"
+      echo "__DUMP_REMOVED__=true"
+    else
+      echo "__DUMP_ALREADY_ABSENT__=true"
+    fi
+
+    if [ -f "$LOG_FILE" ]; then
+      rm -f "$LOG_FILE"
+      echo "__LOG_REMOVED__=true"
+    else
+      echo "__LOG_ALREADY_ABSENT__=true"
+    fi
+
+    if [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ]; then
+      LATEST="$(head -n1 "$MANIFEST" | tr -d '\r' | xargs)"
+      if [ "$LATEST" = "$DUMP_NAME" ]; then
+        rm -f "$MANIFEST"
+        echo "__LATEST_REMOVED__=true"
+      else
+        echo "__LATEST_KEPT__=$LATEST"
+      fi
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ _pgm_local_cleanup_source_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _pgm_local_cleanup_exec
+  delegate_to: "{{ item }}"
+  become: true
+  failed_when: false
+  changed_when: true
+  when:
+    - pgm_cleanup_local_backup_after_sync | bool
+    - _pgm_local_cleanup_action == 'sync'
+    - _pgm_local_cleanup_not_success_hosts | default([]) | length == 0
+    - not (pgm_cifs_cleanup_failed | default(false) | bool)
+
+- name: Local cleanup | Registrar erros
+  ansible.builtin.set_fact:
+    pgm_local_cleanup_failed: true
+    pgm_local_cleanup_errors: >-
+      {{ pgm_local_cleanup_errors + [item.item ~ ': ' ~ (item.stderr | default(item.stdout | default('Falha no cleanup local.')))] }}
+  loop: "{{ _pgm_local_cleanup_exec.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('host') }}"
+  when:
+    - item.rc | default(0) | int != 0
+
+- name: Local cleanup | Publicar resultado
+  ansible.builtin.set_fact:
+    pgm_local_cleanup_performed: "{{ (_pgm_local_cleanup_exec.results | default([]) | length) > 0 }}"
+    pgm_local_cleanup_error: "{{ pgm_local_cleanup_errors | join(' | ') }}"
+
+- name: Local cleanup | Exibir resultado
+  ansible.builtin.debug:
+    msg:
+      action: "{{ _pgm_local_cleanup_action }}"
+      performed: "{{ pgm_local_cleanup_performed }}"
+      failed: "{{ pgm_local_cleanup_failed }}"
+      error: "{{ pgm_local_cleanup_error }}"
+  when:
+    - pgm_cleanup_local_backup_after_sync | bool
+    - _pgm_local_cleanup_action == 'sync'
