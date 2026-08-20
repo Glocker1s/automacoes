@@ -237,6 +237,10 @@ cifs_workgroup: "{{ pgm_cifs_workgroup }}"
 # Backup puro mantém dump, log e latest publicados no CIFS.
 pgm_cleanup_cifs_dump_after_restore: true
 
+# Remove da origem o dump criado pelo sync após conclusão com sucesso.
+# Backup puro continua mantendo dump, log e latest localmente.
+pgm_cleanup_local_backup_after_sync: true
+
 # ============================================================================
 # RELATÓRIO
 # ============================================================================
