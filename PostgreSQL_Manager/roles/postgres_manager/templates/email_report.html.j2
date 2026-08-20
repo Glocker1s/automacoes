@@ -223,24 +223,44 @@
             {% else %}
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
                 <tr>
-                  {{ th('Ambiente') }}
-                  {{ th('Host') }}
-                  {{ th('Banco') }}
-                  {{ th('Ação') }}
-                  {{ th('Modo') }}
-                  {{ th('Status') }}
-                  {{ th('Dump') }}
-                  {{ th('Log') }}
+                  <th width="7%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Ambiente</th>
+                  <th width="22%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Host</th>
+                  <th width="10%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Banco</th>
+                  <th width="9%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Ação</th>
+                  <th width="11%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Modo</th>
+                  <th width="11%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Status</th>
+                  <th width="10%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Início</th>
+                  <th width="10%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Fim</th>
+                  <th width="10%" style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Duração</th>
                 </tr>
 
                 {% for row in rows %}
                 <tr>
-                  {{ td_open() }}{{ row.env | default('—') }}</td>
-                  {{ td_open() }}<b>{{ row.host | default('—') }}</b></td>
-                  {{ td_open() }}{{ code(row.database | default('—')) }}</td>
-                  {{ td_open() }}{{ badge((row.action | default('—')) | upper, 'blue') }}</td>
-                  {{ td_open() }}{{ code(row.restore_mode | default('—') if row.action == 'restore' else '—') }}</td>
-                  {{ td_open() }}
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {{ row.env | default('—') }}
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    <b>{{ row.host | default('—') }}</b>
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {{ code(row.database | default('—')) }}
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {{ badge((row.action | default('—')) | upper, 'blue') }}
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {% if row.action | default('') == 'restore' %}
+                      {{ code(row.restore_mode | default('—')) }}
+                    {% else %}
+                      {{ code('—') }}
+                    {% endif %}
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
                     {% if row.status == 'SUCESSO' %}
                       {{ badge(row.status, 'ok') }}
                     {% elif row.status == 'SUCESSO COM AVISO' %}
@@ -251,8 +271,30 @@
                       {{ badge(row.status | default('N/A'), 'gray') }}
                     {% endif %}
                   </td>
-                  {{ td_open() }}{{ code(row.dump | default('—')) }}</td>
-                  {{ td_open() }}{{ code(row.log_file | default('—')) }}</td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {% if row.started_at | default('') | length > 0 %}
+                      <b>{{ row.started_at.split(' ')[-1] }}</b>
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {% if row.finished_at | default('') | length > 0 %}
+                      <b>{{ row.finished_at.split(' ')[-1] }}</b>
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">
+                    {% if row.duration | default('') | length > 0 %}
+                      <b>{{ row.duration }}</b>
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
                 </tr>
                 {% endfor %}
               </table>
@@ -290,6 +332,13 @@
               <div style="background-color:#fffaf0;border:1px solid #f0d49a;padding:10px;margin-top:8px;font-family:Arial,sans-serif;font-size:13px;color:#9a6700;">
                 <b>Atenção:</b> o restore foi concluído, mas houve falha ao remover o dump consumido do CIFS.
                 <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#ffffff;border:1px solid #ead2d2;padding:8px;margin-top:8px;color:#222222;">{{ pgm_cifs_cleanup_error | default('Erro não informado.') }}</pre>
+              </div>
+            {% endif %}
+
+            {% if pgm_local_cleanup_failed | default(false) | bool %}
+              <div style="background-color:#fffaf0;border:1px solid #f0d49a;padding:10px;margin-top:8px;font-family:Arial,sans-serif;font-size:13px;color:#9a6700;">
+                <b>Atenção:</b> o sync foi concluído, mas houve falha ao remover o backup local da origem.
+                <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#ffffff;border:1px solid #ead2d2;padding:8px;margin-top:8px;color:#222222;">{{ pgm_local_cleanup_error | default('Erro não informado.') }}</pre>
               </div>
             {% endif %}
           </td>
