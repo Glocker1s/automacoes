@@ -94,8 +94,9 @@ pgm_preserve_target_grants: true
 pgm_apply_target_grants: true
 pgm_fail_on_grant_apply_error: false
 
-# Remove os artefatos depois do restore
-pgm_cleanup_restore_artifacts_after_success: true
+# Remove os artefatos locais dos hosts destino após restore/sync,
+# independentemente do resultado da execução.
+pgm_cleanup_restore_artifacts: true
 
 # Mantido por compatibilidade até confirmação de uso no restante da role.
 pgm_keep_remote_logs: false
