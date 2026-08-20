@@ -8,7 +8,7 @@
     _pgm_restore_cleanup_action: "{{ pgm_action_normalized | default(pgm_action | default('backup') | lower) }}"
     _pgm_restore_cleanup_hosts: "{{ groups.pgm_restore_targets | default([]) }}"
 
-- name: Restore cleanup | Limpar artefatos dos hosts com sucesso
+- name: Restore cleanup | Limpar artefatos dos hosts destino
   ansible.builtin.shell: |
     set -euo pipefail
 
@@ -28,7 +28,6 @@
       -print \
       -exec rm -rf -- {} +
 
-    # Arquivo auxiliar de captura de grants não possui job_id.
     GRANT_CAPTURE="$ROOT/grant_capture_${DB}.sql"
     if [ -f "$GRANT_CAPTURE" ]; then
       rm -f "$GRANT_CAPTURE"
@@ -47,9 +46,8 @@
   failed_when: false
   changed_when: "'__CLEANUP_DONE__=true' in (_pgm_restore_cleanup_exec.stdout | default(''))"
   when:
-    - pgm_cleanup_restore_artifacts_after_success | bool
+    - pgm_cleanup_restore_artifacts | bool
     - _pgm_restore_cleanup_action in ['restore', 'sync']
-    - hostvars[item].pgm_host_status | default('NÃO EXECUTADO') == 'SUCESSO'
 
 - name: Restore cleanup | Registrar erros
   ansible.builtin.set_fact:
@@ -81,5 +79,5 @@
       failed: "{{ pgm_restore_cleanup_failed }}"
       error: "{{ pgm_restore_cleanup_error }}"
   when:
-    - pgm_cleanup_restore_artifacts_after_success | bool
+    - pgm_cleanup_restore_artifacts | bool
     - _pgm_restore_cleanup_action in ['restore', 'sync']
