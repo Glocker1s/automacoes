@@ -14,6 +14,10 @@
           'env': hv.pgm_env | default('-'),
           'database': hv.pgm_database_name | default('-'),
           'action': hv.pgm_host_action | default(hv.pgm_role | default('-')),
+          'started_at': (hv.pgm_host_summary | default({})).get('started_at', ''),
+          'finished_at': (hv.pgm_host_summary | default({})).get('finished_at', ''),
+          'duration_seconds': (hv.pgm_host_summary | default({})).get('duration_seconds', 0),
+          'duration': (hv.pgm_host_summary | default({})).get('duration', ''),
           'restore_mode': (hv.pgm_host_summary | default({})).get('restore_mode', ''),
           'database_state': (hv.pgm_host_summary | default({})).get('database_state', ''),
           'status': hv.pgm_host_status | default('NÃO EXECUTADO'),
@@ -48,6 +52,10 @@
         (pgm_cifs_report_upload_failed | default(false) | bool)
         or
         (pgm_cifs_cleanup_failed | default(false) | bool)
+        or
+        (pgm_local_cleanup_failed | default(false) | bool)
+        or
+        (pgm_restore_cleanup_failed | default(false) | bool)
         or
         (
           pgm_report_rows
