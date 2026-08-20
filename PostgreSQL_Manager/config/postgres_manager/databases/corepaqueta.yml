@@ -1,0 +1,183 @@
+---
+cm:
+  postgres_manager:
+    databases:
+      corepaqueta:
+        description: "corePaqueta PostgreSQL Manager"
+        # Nome real preservado conforme o procedimento manual.
+        database_name: "corePaqueta"
+
+        default_source_env: "prd"
+        default_sync_targets:
+          - "th"
+        default_restore_targets: []
+
+        backup:
+          root_dir: "/backup/postgres_manager"
+
+          jobs: 16
+
+          format: "directory"
+
+          extra_args: ""
+
+          validate_dump: true
+
+        restore:
+          mode: "promote"
+
+          target_temp_suffix: "_restoring"
+
+          old_suffix: "_old"
+
+          no_owner: true
+
+          no_privileges: true
+
+          jobs: 16
+
+          extra_args: ""
+
+          exclude_toc_patterns:
+            # O mapping é específico do destino e será recriado pelo bloco dblink.
+            - "USER MAPPING"
+
+        database_create:
+          # A automação herda owner, encoding, locale, tablespace e connection limit
+          # da base atual do destino e valida a criação.
+          inherit_from_current: true
+
+          validate_inheritance: true
+
+        grants:
+          capture_before_restore: true
+
+          apply_after_restore: true
+
+          fail_on_apply_error: false
+
+        preserve_data:
+          enabled: true
+          fail_on_error: true
+          run_on_envs:
+            - "th"
+          groups:
+            - name: "environment_configuration"
+              backup_tables:
+                - "public.tb_vm_process_config_parameters"
+                - "public.tb_laudo_ambima_parameters"
+                - "public.tb_core_contract_server"
+                - "public.tb_apic_parameters"
+                - "public.tb_dm_feature_flag"
+                - "public.tb_dm_feature_group"
+                - "public.tb_dm_feature_users"
+              truncate_tables:
+                # Esta tabela é truncada, mas não é preservada no procedimento manual.
+                - "public.tb_vm_process_config_parameters_tooltip_join"
+                - "public.tb_vm_process_config_parameters"
+                - "public.tb_laudo_ambima_parameters"
+                - "public.tb_core_contract_server"
+                - "public.tb_apic_parameters"
+                - "public.tb_dm_feature_flag"
+                - "public.tb_dm_feature_group"
+                - "public.tb_dm_feature_users"
+              restore_data_only: true
+              # O restore manual usa --disable-triggers.
+              disable_triggers: true
+              cascade: false
+              jobs: 16
+
+        post_restore:
+          # Não há truncate adicional fora do preserve_data no procedimento manual.
+          truncate_enabled: false
+          fail_on_error: true
+          run_on_envs:
+            - "th"
+          truncate_groups: []
+
+        dblink:
+          enabled: true
+          servers:
+            - name: "remote_valemobi"
+              environments:
+                th:
+                  host: "10.222.80.30"
+                  port: "5433"
+                  dbname: "valemobi"
+
+          user_mappings:
+            - server_name: "remote_valemobi"
+              # Usuário local explícito no ALTER USER MAPPING do procedimento.
+              local_user: "Valemobi"
+              # A automação recria o mapping; portanto precisa também do usuário remoto.
+              # A Credential do AAP deve fornecer o valor correto.
+              user_var: "dblink_user"
+              password_var: "dblink_password"
+
+          connections: []
+
+        masking:
+          # Executa o mascaramento após restore em ambientes não produtivos.
+          enabled: true
+          fail_on_error: true
+
+          # Ajustar conforme os ambientes existentes para o CorePaqueta.
+          run_on_envs:
+            - "tu"
+            - "th"
+            - "ti"
+            - "fix"
+
+          # Nunca permite execução do masking em PRD.
+          protected_envs:
+            - "prd"
+
+          scripts:
+            - name: "core_scramble"
+              file: "masking/fc_core_scramble_database.sql"
+              function: "public.fc_core_scramble_database"
+              execute_function: true
+
+        materialized_views:
+          # Nenhum refresh de MV foi informado no procedimento manual.
+          refresh_enabled: false
+          refresh_all: false
+          items: []
+
+        maintenance:
+          enabled: true
+          mode: "analyze"
+
+        connection_control:
+          enabled: true
+          block_new_connections: true
+          terminate_sessions: true
+          keep_old_blocked: true
+
+        validations:
+          enabled: true
+          queries:
+            - "queries/total.sql"
+            - "queries/total-by-table.sql"
+
+        hosts_env_sync:
+          prd:
+            - name: "prd-corepaqueta-01"
+              ansible_host: "PREENCHER_IP_PRD"
+              database_name: "corePaqueta"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              # Habilitar após preencher o host correto.
+              enabled: false
+
+          th:
+            - name: "th-corepaqueta-01"
+              ansible_host: "PREENCHER_IP_TH"
+              database_name: "corePaqueta"
+              # Porta explícita no procedimento manual da corePaqueta TH.
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              # Habilitar após preencher o host correto.
+              enabled: false

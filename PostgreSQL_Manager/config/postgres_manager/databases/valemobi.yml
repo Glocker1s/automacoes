@@ -1,0 +1,191 @@
+---
+cm:
+  postgres_manager:
+    databases:
+      valemobi:
+        description: "Valemobi PostgreSQL Manager"
+        database_name: "valemobi"
+
+        default_source_env: "prd"
+        default_sync_targets:
+          - "th"
+        default_restore_targets: []
+
+        backup:
+          root_dir: "/backup/postgres_manager"
+
+          jobs: 16
+
+          format: "directory"
+
+          extra_args: ""
+
+          validate_dump: true
+
+        restore:
+          mode: "promote"
+
+          target_temp_suffix: "_restoring"
+
+          old_suffix: "_old"
+
+          no_owner: true
+
+          no_privileges: true
+
+          jobs: 16
+
+          extra_args: ""
+
+          # O procedimento manual não informa recriação de User Mapping
+          # nem refresh específico de Materialized Views.
+          exclude_toc_patterns: []
+
+        database_create:
+          # A automação herda owner, encoding, locale, tablespace e connection limit
+          # da base atual do destino e valida a criação.
+          inherit_from_current: true
+
+          validate_inheritance: true
+
+        grants:
+          capture_before_restore: true
+
+          apply_after_restore: true
+
+          fail_on_apply_error: false
+
+        preserve_data:
+          enabled: true
+          fail_on_error: true
+          run_on_envs:
+            - "th"
+          groups:
+            - name: "environment_configuration"
+              backup_tables:
+                - "public.tb_direct_treasury_config"
+                - "public.tb_fix_server_configuration_flavour"
+                - "public.tb_fix_server_configuration_session"
+                - "public.tb_fix_server_configuration_default"
+              truncate_tables:
+                - "public.tb_direct_treasury_config"
+                - "public.tb_fix_server_configuration_flavour"
+                - "public.tb_fix_server_configuration_session"
+                - "public.tb_fix_server_configuration_default"
+              restore_data_only: true
+              # No procedimento manual da Valemobi não há --disable-triggers.
+              disable_triggers: false
+              cascade: false
+              jobs: 16
+
+        post_restore:
+          truncate_enabled: true
+          fail_on_error: true
+          run_on_envs:
+            - "th"
+          truncate_groups:
+            - name: "clear_push_investor_device_application"
+              tables:
+                - "public.tb_push_investor_device_application"
+              cascade: false
+
+        dblink:
+          enabled: true
+          servers:
+            - name: "remote_core"
+              environments:
+                th:
+                  host: "10.222.80.31"
+                  port: "5432"
+                  # O dbname não estava explícito no procedimento manual.
+                  # Assumido pelo relacionamento entre as bases; confirmar no cliente.
+                  dbname: "corePaqueta"
+
+            - name: "remote_fundos"
+              environments:
+                th:
+                  host: "10.222.80.27"
+                  # Porta/dbname não estavam explícitos no ALTER SERVER manual.
+                  # Mantidos com o padrão esperado; confirmar no cliente.
+                  port: "5432"
+                  dbname: "Fundos"
+
+            - name: "remote_fundos_ro"
+              environments:
+                th:
+                  host: "10.222.80.27"
+                  # Porta/dbname não estavam explícitos no ALTER SERVER manual.
+                  # Mantidos com o padrão esperado; confirmar no cliente.
+                  port: "5432"
+                  dbname: "Fundos"
+
+          # O procedimento manual apenas altera os Foreign Servers.
+          # Os User Mappings não são recriados aqui.
+          user_mappings: []
+          connections: []
+
+        masking:
+          # Executa o mascaramento após restore em ambientes não produtivos.
+          enabled: true
+          fail_on_error: true
+
+          # Ajustar conforme os ambientes existentes para a Valemobi.
+          run_on_envs:
+            - "tu"
+            - "th"
+            - "ti"
+            - "fix"
+
+          # Nunca permite execução do masking em PRD.
+          protected_envs:
+            - "prd"
+
+          scripts:
+            - name: "valemobi_scramble"
+              file: "masking/fc_valemobi_scramble_database.sql"
+              function: "public.fc_valemobi_scramble_database"
+              execute_function: true
+
+        materialized_views:
+          # Nenhum refresh de MV foi informado no procedimento manual.
+          refresh_enabled: false
+          refresh_all: false
+          items: []
+
+        maintenance:
+          enabled: true
+          mode: "analyze"
+
+        connection_control:
+          enabled: true
+          block_new_connections: true
+          terminate_sessions: true
+          keep_old_blocked: true
+
+        validations:
+          enabled: true
+          queries:
+            - "queries/total.sql"
+            - "queries/total-by-table.sql"
+
+        hosts_env_sync:
+          prd:
+            - name: "prd-valemobi-01"
+              ansible_host: "PREENCHER_IP_PRD"
+              database_name: "valemobi"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              # Habilitar após preencher o host correto.
+              enabled: false
+
+          th:
+            - name: "th-valemobi-01"
+              ansible_host: "PREENCHER_IP_TH"
+              database_name: "valemobi"
+              # Porta explícita no procedimento manual da Valemobi TH.
+              port: 5433
+              db_host: "127.0.0.1"
+              source: true
+              # Habilitar após preencher o host correto.
+              enabled: false
