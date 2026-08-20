@@ -13,6 +13,8 @@
     pgm_host_action: "backup"
     pgm_host_artifacts: []
     pgm_host_steps: []
+    pgm_activity_started_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+    pgm_activity_started_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
     pgm_backup_dir: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}"
     pgm_backup_jobs: "{{ (pgm_db_cfg.backup.jobs | default(pgm_default_jobs)) | int }}"
     pgm_dump_dir: "{{ (pgm_db_cfg.backup.root_dir | default(pgm_backup_root_dir)) }}/{{ pgm_dump_basename }}"
@@ -40,7 +42,7 @@
           Ambiente: {{ pgm_env }}
           Banco: {{ pgm_database_name }}
           Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
-          Início: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+          Início: {{ pgm_activity_started_at }}
           Dump: {{ pgm_dump_dir }}
 
       become: true
@@ -226,11 +228,25 @@
           }}
 
   always:
+
+    - name: Backup | Registrar horário final
+      ansible.builtin.set_fact:
+        pgm_activity_finished_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+        pgm_activity_finished_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+    - name: Backup | Calcular duração
+      ansible.builtin.set_fact:
+        pgm_activity_duration_seconds: "{{ (pgm_activity_finished_epoch | int) - (pgm_activity_started_epoch | int) }}"
+        pgm_activity_duration: >-
+          {%- set s = (pgm_activity_finished_epoch | int) - (pgm_activity_started_epoch | int) -%}
+          {{ '%02d:%02d:%02d' | format((s // 3600), ((s % 3600) // 60), (s % 60)) }}
+
     - name: Backup | Finalizar log de backup
       ansible.builtin.shell: |
         cat <<'EOF' >> "{{ pgm_dump_log_file }}"
 
-        Fim: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+        Fim: {{ pgm_activity_finished_at }}
+        Duração: {{ pgm_activity_duration }}
         Status: {{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}
         EOF
       args:
@@ -253,3 +269,7 @@
           dump: "{{ pgm_dump_basename }}"
           dump_dir: "{{ pgm_dump_dir }}"
           log_file: "{{ pgm_dump_log_file }}"
+          started_at: "{{ pgm_activity_started_at }}"
+          finished_at: "{{ pgm_activity_finished_at }}"
+          duration_seconds: "{{ pgm_activity_duration_seconds }}"
+          duration: "{{ pgm_activity_duration }}"
