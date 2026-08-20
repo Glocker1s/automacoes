@@ -34,6 +34,8 @@
     pgm_restore_database_state: "Restore ainda não concluído."
     pgm_connection_control_enabled: false
     pgm_connection_control_blocked: false
+    pgm_activity_started_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+    pgm_activity_started_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
 
 - name: Restore | Bloco de restore controlado
   block:
@@ -56,7 +58,7 @@
           Banco destino: {{ pgm_database_name }}
           Modo: {{ pgm_effective_restore_mode }}
           Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
-          Início: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+          Início: {{ pgm_activity_started_at }}
 
       become: true
       become_user: root
@@ -1096,6 +1098,18 @@
         - pgm_connection_control_enabled | default(false) | bool
         - not (pgm_restore_promoted | default(false) | bool)
 
+    - name: Restore | Registrar horário final
+      ansible.builtin.set_fact:
+        pgm_activity_finished_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+        pgm_activity_finished_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+    - name: Restore | Calcular duração
+      ansible.builtin.set_fact:
+        pgm_activity_duration_seconds: "{{ (pgm_activity_finished_epoch | int) - (pgm_activity_started_epoch | int) }}"
+        pgm_activity_duration: >-
+          {%- set s = (pgm_activity_finished_epoch | int) - (pgm_activity_started_epoch | int) -%}
+          {{ '%02d:%02d:%02d' | format((s // 3600), ((s % 3600) // 60), (s % 60)) }}
+
     - name: Restore | Registrar falha capturada no log
       ansible.builtin.shell: |
         cat <<'EOF' >> "{{ pgm_restore_log_file }}"
@@ -1109,7 +1123,8 @@
         Promovido: {{ pgm_restore_promoted | default(false) | bool }}
         Concluído: {{ pgm_restore_completed | default(false) | bool }}
         Estado da base: {{ pgm_restore_database_state | default('Estado não informado.') }}
-        Fim: {{ lookup('ansible.builtin.pipe', 'TZ=' ~ (pgm_report_timezone | default('America/Sao_Paulo')) ~ ' date "+%d/%m/%Y %H:%M:%S"') }}
+        Fim: {{ pgm_activity_finished_at }}
+        Duração: {{ pgm_activity_duration }}
         Status: {{ 'FALHA' if (pgm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (pgm_host_warning | default(false) | bool) else 'SUCESSO') }}
         EOF
       args:
@@ -1129,18 +1144,6 @@
       become: true
       become_user: root
       failed_when: false
-
-    - name: Restore | Remover dump remoto pós-restore quando configurado
-      ansible.builtin.file:
-        path: "{{ pgm_effective_dump_dir | default('') }}"
-        state: absent
-      become: true
-      become_user: root
-      failed_when: false
-      when:
-        - pgm_cleanup_remote_dump_after_restore | bool
-        - pgm_effective_dump_dir is defined
-        - pgm_effective_dump_dir | length > 0
 
     - name: Restore | Publicar status final do restore no host
       ansible.builtin.set_fact:
@@ -1163,6 +1166,10 @@
           database_state: "{{ pgm_restore_database_state | default('') }}"
           failed_task: "{{ pgm_host_failed_task | default('') }}"
           error_msg: "{{ pgm_host_error_msg | default('') }}"
+          started_at: "{{ pgm_activity_started_at }}"
+          finished_at: "{{ pgm_activity_finished_at }}"
+          duration_seconds: "{{ pgm_activity_duration_seconds }}"
+          duration: "{{ pgm_activity_duration }}"
 
     - name: Masking | Remover scripts temporários do host destino
       ansible.builtin.file:
