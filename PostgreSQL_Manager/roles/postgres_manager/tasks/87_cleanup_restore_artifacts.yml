@@ -1,0 +1,85 @@
+---
+- name: Restore cleanup | Inicializar estado
+  ansible.builtin.set_fact:
+    pgm_restore_cleanup_failed: false
+    pgm_restore_cleanup_error: ""
+    pgm_restore_cleanup_errors: []
+    pgm_restore_cleanup_performed: false
+    _pgm_restore_cleanup_action: "{{ pgm_action_normalized | default(pgm_action | default('backup') | lower) }}"
+    _pgm_restore_cleanup_hosts: "{{ groups.pgm_restore_targets | default([]) }}"
+
+- name: Restore cleanup | Limpar artefatos dos hosts com sucesso
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    ROOT="{{ hostvars[item].pgm_restore_root_dir | default(pgm_restore_root_dir) }}"
+    DB="{{ hostvars[item].pgm_database_name | default(pgm_database_name) }}"
+    JOB_ID="{{ awx_job_id | default(tower_job_id | default('manual')) }}"
+
+    if [ ! -d "$ROOT" ]; then
+      echo "__ROOT_ABSENT__=$ROOT"
+      exit 0
+    fi
+
+    echo "[INFO] Limpando artefatos do job ${JOB_ID} em ${ROOT}"
+
+    find "$ROOT" -mindepth 1 -maxdepth 1 \
+      -name "*job_${JOB_ID}*" \
+      -print \
+      -exec rm -rf -- {} +
+
+    # Arquivo auxiliar de captura de grants não possui job_id.
+    GRANT_CAPTURE="$ROOT/grant_capture_${DB}.sql"
+    if [ -f "$GRANT_CAPTURE" ]; then
+      rm -f "$GRANT_CAPTURE"
+      echo "__GRANT_CAPTURE_REMOVED__=true"
+    fi
+
+    echo "__CLEANUP_DONE__=true"
+  args:
+    executable: /bin/bash
+  loop: "{{ _pgm_restore_cleanup_hosts }}"
+  loop_control:
+    label: "{{ item }}"
+  delegate_to: "{{ item }}"
+  become: true
+  register: _pgm_restore_cleanup_exec
+  failed_when: false
+  changed_when: "'__CLEANUP_DONE__=true' in (_pgm_restore_cleanup_exec.stdout | default(''))"
+  when:
+    - pgm_cleanup_restore_artifacts_after_success | bool
+    - _pgm_restore_cleanup_action in ['restore', 'sync']
+    - hostvars[item].pgm_host_status | default('NÃO EXECUTADO') == 'SUCESSO'
+
+- name: Restore cleanup | Registrar erros
+  ansible.builtin.set_fact:
+    pgm_restore_cleanup_failed: true
+    pgm_restore_cleanup_errors: >-
+      {{
+        pgm_restore_cleanup_errors
+        + [
+          item.item ~ ': '
+          ~ (item.stderr | default(item.stdout | default('Falha no cleanup dos artefatos de restore.')))
+        ]
+      }}
+  loop: "{{ _pgm_restore_cleanup_exec.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('host') }}"
+  when:
+    - item.rc | default(0) | int != 0
+
+- name: Restore cleanup | Publicar resultado
+  ansible.builtin.set_fact:
+    pgm_restore_cleanup_performed: "{{ (_pgm_restore_cleanup_exec.results | default([]) | length) > 0 }}"
+    pgm_restore_cleanup_error: "{{ pgm_restore_cleanup_errors | join(' | ') }}"
+
+- name: Restore cleanup | Exibir resultado
+  ansible.builtin.debug:
+    msg:
+      action: "{{ _pgm_restore_cleanup_action }}"
+      performed: "{{ pgm_restore_cleanup_performed }}"
+      failed: "{{ pgm_restore_cleanup_failed }}"
+      error: "{{ pgm_restore_cleanup_error }}"
+  when:
+    - pgm_cleanup_restore_artifacts_after_success | bool
+    - _pgm_restore_cleanup_action in ['restore', 'sync']
