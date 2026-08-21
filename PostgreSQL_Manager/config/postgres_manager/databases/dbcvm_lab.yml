@@ -37,8 +37,7 @@ cm:
         # BACKUP
         # --------------------------------------------------------------------
         backup:
-          
-          root_dir: "/backup/postgres_manager_restore"
+
           # Diretório local do host PostgreSQL onde o pg_dump é criado.
           root_dir: "/backup/postgres_manager"
 
@@ -59,7 +58,8 @@ cm:
         # RESTORE
         # --------------------------------------------------------------------
         restore:
-
+          
+          root_dir: "/backup/postgres_manager_restore"
           # Estratégia padrão do restore.
           # Pode ser sobrescrita por host com restore_mode.
           mode: "promote"
