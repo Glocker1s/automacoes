@@ -37,7 +37,8 @@ cm:
         # BACKUP
         # --------------------------------------------------------------------
         backup:
-
+          
+          root_dir: "/backup/postgres_manager_restore"
           # Diretório local do host PostgreSQL onde o pg_dump é criado.
           root_dir: "/backup/postgres_manager"
 
