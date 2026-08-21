@@ -13,7 +13,7 @@
     pgm_host_action: "restore"
     pgm_host_artifacts: []
     pgm_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
-    pgm_restore_dir_root: "{{ pgm_restore_root_dir }}"
+    pgm_restore_dir_root: "{{ pgm_db_cfg.restore.root_dir | default(pgm_restore_root_dir) }}"
     pgm_restore_jobs: "{{ (pgm_db_cfg.restore.jobs | default(pgm_default_jobs)) | int }}"
     pgm_effective_restore_mode: >-
       {{
@@ -23,10 +23,10 @@
       }}
     pgm_target_temp_db: "{{ pgm_database_name ~ (pgm_db_cfg.restore.target_temp_suffix | default(pgm_restore_temp_suffix)) }}"
     pgm_target_old_db: "{{ pgm_database_name ~ (pgm_db_cfg.restore.old_suffix | default(pgm_restore_old_suffix)) }}"
-    pgm_restore_log_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
-    pgm_host_log_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
-    pgm_grants_file: "{{ pgm_restore_root_dir }}/grants_before_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.sql"
-    pgm_restore_list_file: "{{ pgm_restore_root_dir }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.lst"
+    pgm_restore_log_file: "{{ pgm_restore_dir_root }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    pgm_host_log_file: "{{ pgm_restore_dir_root }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    pgm_grants_file: "{{ pgm_restore_dir_root }}/grants_before_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.sql"
+    pgm_restore_list_file: "{{ pgm_restore_dir_root }}/pg_restore_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.lst"
     pgm_restore_promoted: false
     pgm_restore_completed: false
     pgm_drop_in_place_started: false
