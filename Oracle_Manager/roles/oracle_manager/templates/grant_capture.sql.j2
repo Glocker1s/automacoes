@@ -1,0 +1,10 @@
+whenever sqlerror exit sql.sqlcode
+set pages 0 feedback off verify off heading off echo off lines 32767 trimspool on
+select 'grant '||privilege||' on '||lower(owner)||'.'||lower(table_name)||' to '||grantee||
+       decode(grantable,'YES',' with grant option',NULL)||';'
+  from sys.dba_tab_privs
+ where lower(owner) not in ('mdsys','xdb','olapsys','oe','wmsys','dmsys','ordplugins','ordsys','exfsys','ctxsys')
+   and (upper(grantee) in ({{ orm_schemas | map('upper') | map('regex_replace', '^(.*)$', "'\\1'") | join(',') }})
+        or upper(owner) in ({{ orm_schemas | map('upper') | map('regex_replace', '^(.*)$', "'\\1'") | join(',') }}))
+ order by grantee, privilege;
+exit

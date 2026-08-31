@@ -1,0 +1,8 @@
+---
+- name: Data Pump | Gerar parfile do expdp
+  ansible.builtin.template:
+    src: expdp.par.j2
+    dest: "{{ orm_expdp_parfile }}"
+    mode: "0600"
+  become: true
+  become_user: "{{ orm_os_user_effective }}"

@@ -1,0 +1,39 @@
+---
+- name: Controller | Inicializar status do planejamento
+  ansible.builtin.set_fact:
+    orm_controller_failed: false
+    orm_controller_failed_task: ""
+    orm_controller_error_msg: ""
+
+- name: Controller | Bloco controlado do planejamento
+  block:
+    - name: Normalizar entradas
+      ansible.builtin.import_tasks: 00_normalize_inputs.yml
+
+    - name: Carregar configuração do profile
+      ansible.builtin.import_tasks: 10_load_profile_config.yml
+
+    - name: Resolver plano de execução
+      ansible.builtin.import_tasks: 20_resolve_plan.yml
+
+    - name: Criar inventário dinâmico
+      ansible.builtin.import_tasks: 25_create_dynamic_hosts.yml
+
+  rescue:
+    - name: Controller | Registrar falha do planejamento
+      ansible.builtin.set_fact:
+        orm_controller_failed: true
+        orm_controller_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+        orm_controller_error_msg: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result.stdout
+            | default('Falha não detalhada no planejamento.')))
+          }}
+
+    - name: Controller | Exibir falha controlada
+      ansible.builtin.debug:
+        msg:
+          task: "{{ orm_controller_failed_task }}"
+          error: "{{ orm_controller_error_msg }}"

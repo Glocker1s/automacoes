@@ -1,0 +1,72 @@
+---
+- name: Data Pump | Executar impdp
+  ansible.builtin.command:
+    argv:
+      - "{{ orm_oracle_home_effective }}/bin/impdp"
+      - '"/ as sysdba"'
+      - "parfile={{ orm_impdp_parfile }}"
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    ORACLE_PDB_SID: "{{ orm_pdb_effective if (orm_is_cdb | bool and orm_pdb_effective | length > 0) else '' }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+    TZ: "{{ orm_report_timezone | default('America/Sao_Paulo') }}"
+  async: "{{ orm_restore_async_timeout }}"
+  poll: "{{ orm_restore_async_poll }}"
+  register: _orm_impdp_exec
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Data Pump | Registrar retorno do impdp no log de controle
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+    IMPDP RC: {{ _orm_impdp_exec.rc | default('N/A') }}
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+  failed_when: false
+
+- name: Data Pump | Registrar saída de erro do impdp no log de controle
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+    === IMPDP STDOUT ===
+    {{ _orm_impdp_exec.stdout | default('') }}
+
+    === IMPDP STDERR ===
+    {{ _orm_impdp_exec.stderr | default(_orm_impdp_exec.msg | default('')) }}
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+  failed_when: false
+  when:
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+
+- name: Data Pump | Registrar falha do impdp
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Executar impdp"
+    orm_host_error_msg: >-
+      impdp falhou ou não concluiu corretamente. rc={{ _orm_impdp_exec.rc | default('N/A') }}.
+      Verifique {{ orm_impdp_log_file }} e {{ orm_control_log_file }}.
+    orm_restore_database_state: >-
+      O schema anterior já pode ter sido removido e o impdp não concluiu. Recuperação manual deve usar o dump {{ orm_effective_dump_file }}.
+  when:
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+
+- name: Data Pump | Registrar import concluído
+  ansible.builtin.set_fact:
+    orm_restore_import_completed: true
+    orm_restore_database_state: "impdp concluído; iniciando pós-restore."
+  when:
+    - not (orm_host_failed | bool)
+    - _orm_impdp_exec.rc | default(1) | int == 0

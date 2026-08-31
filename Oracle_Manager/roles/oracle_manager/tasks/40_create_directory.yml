@@ -1,0 +1,22 @@
+---
+- name: Oracle DIRECTORY | Criar ou atualizar DIRECTORY da operação
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    create or replace directory {{ orm_directory_name_effective }} as '{{ orm_directory_path_effective }}';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_directory_create
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"

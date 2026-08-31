@@ -1,0 +1,6 @@
+SCHEMAS={{ orm_schemas | join(',') }}
+DIRECTORY={{ orm_directory_name_effective }}
+DUMPFILE={{ orm_effective_dump_name }}
+LOGFILE={{ orm_impdp_log_basename }}
+{% if orm_restore_extra_args | trim | length > 0 %}{{ orm_restore_extra_args | trim }}
+{% endif %}

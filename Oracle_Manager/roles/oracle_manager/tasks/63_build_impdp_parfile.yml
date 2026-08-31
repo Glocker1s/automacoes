@@ -1,0 +1,9 @@
+---
+- name: Data Pump | Gerar parfile do impdp
+  ansible.builtin.template:
+    src: impdp.par.j2
+    dest: "{{ orm_impdp_parfile }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0600"
+  become: true

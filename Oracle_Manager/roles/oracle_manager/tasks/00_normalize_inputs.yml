@@ -1,0 +1,91 @@
+---
+- name: Normalizar ação e profile
+  ansible.builtin.set_fact:
+    orm_action_normalized: "{{ orm_action | default('backup') | string | lower | trim }}"
+    orm_profile_key_normalized: "{{ orm_profile_key | default('') | string | lower | trim }}"
+    orm_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    orm_job_template_name_effective: "{{ tower_job_template_name | default(awx_job_template_name | default('Oracle Manager')) }}"
+    orm_run_timestamp: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date +%Y%m%d_%H%M%S') }}"
+
+- name: Validar ação
+  ansible.builtin.assert:
+    that:
+      - orm_action_normalized in ['backup', 'restore', 'sync']
+    fail_msg: "orm_action inválida: {{ orm_action }}. Valores aceitos: backup, restore, sync."
+
+- name: Validar profile informado
+  ansible.builtin.assert:
+    that:
+      - orm_profile_key_normalized | length > 0
+    fail_msg: "Informe orm_profile_key, por exemplo: riskmanager."
+
+- name: Normalizar target_envs bruto do survey
+  ansible.builtin.set_fact:
+    _orm_target_envs_json: >-
+      {%- set raw = orm_target_envs | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | to_json }}
+      {%- else -%}
+        {%- set s = raw | string | trim -%}
+        {%- if s | length == 0 -%}
+          {{ [] | to_json }}
+        {%- elif s.startswith('[') and s.endswith(']') -%}
+          {{ (s | from_yaml) | list | to_json }}
+        {%- else -%}
+          {{ s.split(',') | list | to_json }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Normalizar target_hosts bruto do survey
+  ansible.builtin.set_fact:
+    _orm_target_hosts_json: >-
+      {%- set raw = orm_target_hosts | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | to_json }}
+      {%- else -%}
+        {%- set s = raw | string | trim -%}
+        {%- if s | length == 0 -%}
+          {{ [] | to_json }}
+        {%- elif s.startswith('[') and s.endswith(']') -%}
+          {{ (s | from_yaml) | list | to_json }}
+        {%- else -%}
+          {{ s.split(',') | list | to_json }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Normalizar schemas bruto do survey
+  ansible.builtin.set_fact:
+    _orm_schemas_json: >-
+      {%- set raw = orm_schemas | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | to_json }}
+      {%- else -%}
+        {%- set s = raw | string | trim -%}
+        {%- if s | length == 0 -%}
+          {{ [] | to_json }}
+        {%- elif s.startswith('[') and s.endswith(']') -%}
+          {{ (s | from_yaml) | list | to_json }}
+        {%- else -%}
+          {{ s.split(',') | list | to_json }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Publicar entradas normalizadas
+  ansible.builtin.set_fact:
+    orm_selected_target_envs: >-
+      {{ _orm_target_envs_json | from_json | map('string') | map('trim') | map('lower') | reject('equalto', '') | list }}
+    orm_selected_target_hosts: >-
+      {{ _orm_target_hosts_json | from_json | map('string') | map('trim') | map('lower') | reject('equalto', '') | list }}
+    orm_selected_schemas: >-
+      {{ _orm_schemas_json | from_json | map('string') | map('trim') | map('upper') | reject('equalto', '') | list }}
+    orm_source_env_normalized: "{{ orm_source_env | default('') | string | lower | trim }}"
+    orm_source_host_normalized: "{{ orm_source_host | default('') | string | lower | trim }}"
+
+- name: Validar confirmação para restore/sync
+  ansible.builtin.assert:
+    that:
+      - orm_confirm_restore | default('nao') | string | lower in ['sim', 's', 'yes', 'true', '1']
+    fail_msg: >-
+      A ação {{ orm_action_normalized }} altera schema(s) Oracle de destino.
+      Informe orm_confirm_restore=sim para confirmar.
+  when: orm_action_normalized in ['restore', 'sync']

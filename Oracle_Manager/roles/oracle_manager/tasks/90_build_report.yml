@@ -1,0 +1,113 @@
+---
+- name: Report | Resolver hosts do relatório
+  ansible.builtin.set_fact:
+    orm_report_hosts: "{{ ((groups.orm_source_targets | default([])) + (groups.orm_restore_targets | default([]))) | unique | list }}"
+
+- name: Report | Montar linhas do relatório
+  ansible.builtin.set_fact:
+    _orm_report_rows_json: >-
+      {%- set out = [] -%}
+      {%- for h in orm_report_hosts | default([]) -%}
+        {%- set hv = hostvars[h] -%}
+        {%- set summary = hv.orm_host_summary | default({}) -%}
+        {%- set status = hv.orm_host_status | default('NÃO EXECUTADO') -%}
+        {%- set err = hv.orm_host_error_msg | default('') -%}
+        {%- if status == 'NÃO EXECUTADO' and (orm_sync_backup_blocked | default(false) | bool) and (h in (groups.orm_restore_targets | default([]))) -%}
+          {%- set err = orm_sync_restore_skip_reason | default('Restore não iniciado pela barreira do sync.') -%}
+        {%- endif -%}
+        {%- set item = {
+          'host': h,
+          'env': hv.orm_env | default('-'),
+          'profile': hv.orm_profile_key | default(orm_profile_key_normalized | default(orm_profile_key | default('-'))),
+          'action': hv.orm_host_action | default(hv.orm_role | default('-')),
+          'status': status,
+          'failed_task': hv.orm_host_failed_task | default(''),
+          'error': err,
+          'error_excerpt': hv.orm_host_error_excerpt | default(''),
+          'sid': summary.get('sid', hv.orm_sid | default('')),
+          'pdb': summary.get('pdb', hv.orm_pdb | default('')),
+          'service_name': summary.get('service_name', hv.orm_service_name | default('')),
+          'directory_name': summary.get('directory_name', hv.orm_directory_name | default('')),
+          'schemas': summary.get('schemas', hv.orm_schemas | default([])),
+          'dump': summary.get('dump', ''),
+          'dump_file': summary.get('dump_file', ''),
+          'dump_source': summary.get('dump_source', ''),
+          'dump_size_bytes': summary.get('dump_size_bytes', 0),
+          'root_dir': summary.get('root_dir', ''),
+          'database_state': summary.get('database_state', ''),
+          'sessions_before': summary.get('sessions_before', ''),
+          'sessions_after': summary.get('sessions_after', ''),
+          'invalid_objects': summary.get('invalid_objects', ''),
+          'destructive_started': summary.get('destructive_started', false),
+          'schema_dropped': summary.get('schema_dropped', false),
+          'import_completed': summary.get('import_completed', false),
+          'restore_completed': summary.get('restore_completed', false),
+          'password_warning': hv.orm_restore_password_warning | default(''),
+          'grants_warning': hv.orm_restore_grants_warning | default(''),
+          'invalid_objects_warning': hv.orm_restore_invalid_objects_warning | default(''),
+          'started_at': summary.get('started_at', ''),
+          'finished_at': summary.get('finished_at', ''),
+          'duration_seconds': summary.get('duration_seconds', 0),
+          'duration': summary.get('duration', '')
+        } -%}
+        {%- set _ = out.append(item) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report | Publicar linhas do relatório
+  ansible.builtin.set_fact:
+    orm_report_rows: "{{ _orm_report_rows_json | from_json }}"
+
+- name: Report | Calcular contadores
+  ansible.builtin.set_fact:
+    orm_report_success_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'SUCESSO') | list | length }}"
+    orm_report_warning_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'SUCESSO COM AVISO') | list | length }}"
+    orm_report_failed_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'FALHA') | list | length }}"
+    orm_report_not_run_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'NÃO EXECUTADO') | list | length }}"
+
+- name: Report | Definir status geral
+  ansible.builtin.set_fact:
+    orm_overall_failed: >-
+      {{
+        (orm_controller_failed | default(false) | bool)
+        or (orm_sync_backup_blocked | default(false) | bool)
+        or (orm_report_failed_count | int > 0)
+        or (orm_report_not_run_count | int > 0)
+      }}
+    orm_overall_warning: >-
+      {{
+        (orm_report_warning_count | int > 0)
+        or (orm_report_artifact_warning | default(false) | bool)
+        or (orm_cifs_report_upload_failed | default(false) | bool)
+        or (orm_cifs_cleanup_failed | default(false) | bool)
+        or (orm_local_cleanup_failed | default(false) | bool)
+        or (orm_restore_cleanup_failed | default(false) | bool)
+      }}
+
+- name: Report | Definir status textual geral
+  ansible.builtin.set_fact:
+    orm_overall_status: "{{ 'FALHA' if orm_overall_failed | bool else ('SUCESSO COM AVISO' if orm_overall_warning | bool else 'SUCESSO') }}"
+    orm_report_attachments: "{{ send_mail_attachments | default([]) }}"
+    orm_report_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    orm_report_job_template: "{{ tower_job_template_name | default(awx_job_template_name | default('Oracle Manager')) }}"
+
+- name: Report | Renderizar HTML do relatório
+  ansible.builtin.set_fact:
+    orm_report_html: "{{ lookup('ansible.builtin.template', 'email_report.html.j2') }}"
+
+- name: Report | Publicar set_stats para e-mail
+  ansible.builtin.set_stats:
+    aggregate: false
+    per_host: false
+    data:
+      send_mail_subject: >-
+        {{ orm_report_subject_prefix }} - Job #{{ orm_report_job_id }} -
+        {{ orm_report_job_template }} - {{ orm_overall_status }}
+      send_mail_body: "{{ orm_report_html }}"
+      send_mail_cifs: "{{ orm_cifs_label | default(send_mail_cifs | default('')) }}"
+      send_mail_cifs_path: "{{ orm_cifs_attachment_path | default(send_mail_cifs_path | default('')) }}"
+      send_mail_cifs_address: "{{ orm_cifs_addresses | default(send_mail_cifs_address | default({})) }}"
+      cifs_workgroup: "{{ orm_cifs_workgroup | default(cifs_workgroup | default('WORKGROUP')) }}"
+      send_mail_cifs_remote_files: "{{ send_mail_cifs_remote_files | default([]) }}"
+      send_mail_attachments: "{{ send_mail_attachments | default(send_mail_cifs_remote_files | default([])) }}"
+      tmp_path_local: "{{ orm_controller_tmp_dir }}"

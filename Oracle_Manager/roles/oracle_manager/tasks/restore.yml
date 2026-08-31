@@ -1,0 +1,398 @@
+---
+- name: Restore | Normalizar configuração carregada no host dinâmico
+  ansible.builtin.set_fact:
+    orm_profile_cfg: "{{ orm_profile_cfg | from_yaml if orm_profile_cfg is string else orm_profile_cfg }}"
+    orm_schemas: "{{ orm_schemas | from_yaml if orm_schemas is string else orm_schemas }}"
+
+- name: Restore | Inicializar status e configuração efetiva
+  ansible.builtin.set_fact:
+    orm_host_failed: false
+    orm_host_warning: false
+    orm_host_error_msg: ""
+    orm_host_error_excerpt: ""
+    orm_host_failed_task: ""
+    orm_host_status: "EM EXECUÇÃO"
+    orm_host_action: "restore"
+    orm_host_artifacts: []
+    orm_activity_started_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+    orm_activity_started_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+    orm_restore_dir: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}"
+    orm_restore_parallel: "{{ orm_profile_cfg.restore.parallel | default(orm_restore_parallel_default) | int }}"
+    orm_restore_extra_args: "{{ orm_profile_cfg.restore.extra_args | default(orm_restore_extra_args_default) }}"
+    orm_restore_capture_grants: "{{ orm_profile_cfg.restore.capture_grants | default(orm_restore_capture_grants_default) | bool }}"
+    orm_restore_apply_grants: "{{ orm_profile_cfg.restore.apply_grants | default(orm_restore_apply_grants_default) | bool }}"
+    orm_restore_kill_sessions: "{{ orm_profile_cfg.restore.kill_sessions | default(orm_restore_kill_sessions_default) | bool }}"
+    orm_restore_lock_users: "{{ orm_profile_cfg.restore.lock_users | default(orm_restore_lock_users_default) | bool }}"
+    orm_restore_drop_users: "{{ orm_profile_cfg.restore.drop_users | default(orm_restore_drop_users_default) | bool }}"
+    orm_restore_unlock_users: "{{ orm_profile_cfg.restore.unlock_users | default(orm_restore_unlock_users_default) | bool }}"
+    orm_restore_fail_on_grant_error: "{{ orm_profile_cfg.restore.fail_on_grant_error | default(orm_restore_fail_on_grant_error_default) | bool }}"
+    orm_restore_require_password: "{{ orm_profile_cfg.restore.require_password | default(orm_restore_require_password_default) | bool }}"
+    orm_restore_session_wait_retries: "{{ orm_profile_cfg.restore.session_wait_retries | default(orm_restore_session_wait_retries_default) | int }}"
+    orm_restore_session_wait_delay: "{{ orm_profile_cfg.restore.session_wait_delay | default(orm_restore_session_wait_delay_default) | int }}"
+    orm_restore_async_timeout: "{{ orm_profile_cfg.restore.async_timeout | default(orm_restore_async_timeout_default) | int }}"
+    orm_restore_async_poll: "{{ orm_profile_cfg.restore.async_poll | default(orm_restore_async_poll_default) | int }}"
+    orm_restore_validate_schemas: "{{ orm_profile_cfg.restore.validate_schemas | default(orm_restore_validate_schemas_default) | bool }}"
+    orm_restore_validate_invalid_objects: "{{ orm_profile_cfg.restore.validate_invalid_objects | default(orm_restore_validate_invalid_objects_default) | bool }}"
+    orm_restore_fail_on_invalid_objects: "{{ orm_profile_cfg.restore.fail_on_invalid_objects | default(orm_restore_fail_on_invalid_objects_default) | bool }}"
+    orm_control_log_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/restore_{{ orm_profile_key }}_{{ orm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_host_log_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/restore_{{ orm_profile_key }}_{{ orm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_impdp_log_basename: "impdp_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_impdp_log_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/impdp_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_impdp_parfile: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/impdp_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.par"
+    orm_grant_capture_query_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/grant_capture_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.sql"
+    orm_grants_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/grants_before_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.sql"
+    orm_grants_apply_log_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/grants_apply_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_sessions_log_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/sessions_before_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_validation_log_file: "{{ (orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir))) }}/validation_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_effective_dump_name: ""
+    orm_effective_dump_file: ""
+    orm_restore_dump_source: ""
+    orm_restore_dump_size_bytes: 0
+    orm_datapump_binary_required: "impdp"
+    orm_require_existing_schemas: false
+    orm_users_locked: false
+    orm_restore_destructive_started: false
+    orm_restore_schema_dropped: false
+    orm_restore_import_completed: false
+    orm_restore_completed: false
+    orm_restore_database_state: "Prechecks do restore ainda não concluídos."
+    orm_sessions_before: 0
+    orm_sessions_after: 0
+    orm_invalid_objects_count: 0
+
+- name: Restore | Bloco controlado
+  block:
+    - name: Restore | Criar diretório físico de restore
+      ansible.builtin.file:
+        path: "{{ orm_restore_dir }}"
+        state: directory
+        owner: "{{ orm_os_user | default(orm_default_os_user) }}"
+        group: "{{ orm_os_group | default(orm_default_os_group) }}"
+        mode: "0775"
+      become: true
+
+    - name: Restore | Preparar ambiente Oracle
+      ansible.builtin.import_tasks: 35_oracle_environment.yml
+
+    - name: Restore | Validar suporte de parallel na V1
+      ansible.builtin.assert:
+        that:
+          - orm_restore_parallel | int == 1
+          - orm_restore_async_timeout | int > 0
+          - orm_restore_async_poll | int > 0
+        fail_msg: >-
+          Oracle Manager V1 exige restore.parallel=1, restore.async_timeout>0 e restore.async_poll>0.
+
+    - name: Restore | Inicializar log de controle
+      ansible.builtin.copy:
+        dest: "{{ orm_control_log_file }}"
+        owner: "{{ orm_os_user_effective }}"
+        group: "{{ orm_os_group_effective }}"
+        mode: "0640"
+        content: |
+          Oracle Manager - Restore
+          Host: {{ inventory_hostname }}
+          Ambiente: {{ orm_env }}
+          Profile: {{ orm_profile_key }}
+          Schemas: {{ orm_schemas | join(', ') }}
+          SID: {{ orm_sid_effective }}
+          PDB: {{ orm_pdb_effective | default('') }}
+          Service: {{ orm_service_name_effective | default('') }}
+          ORACLE_HOME: {{ orm_oracle_home_effective }}
+          DIRECTORY: {{ orm_directory_name_effective }}
+          Root dir: {{ orm_restore_dir }}
+          Dump solicitado: {{ orm_restore_dump_name | default('latest') }}
+          Motivo: {{ orm_execution_reason | default('') }}
+          Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
+          Início: {{ orm_activity_started_at }}
+      become: true
+
+    - name: Restore | Resolver e validar dump antes da fase destrutiva
+      ansible.builtin.import_tasks: 55_resolve_restore_dump.yml
+
+    - name: Restore | Definir path do Oracle DIRECTORY
+      ansible.builtin.set_fact:
+        orm_directory_path_effective: "{{ orm_restore_dir }}"
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Criar Oracle DIRECTORY
+      ansible.builtin.import_tasks: 40_create_directory.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Validar credenciais de destino
+      ansible.builtin.import_tasks: 59_validate_restore_credentials.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Gerar parfile do impdp antes da fase destrutiva
+      ansible.builtin.import_tasks: 63_build_impdp_parfile.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Capturar grants atuais do destino
+      ansible.builtin.import_tasks: 60_capture_grants.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Controlar conexões e bloquear usuários
+      ansible.builtin.import_tasks: 61_connection_control.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Preparar schema para import
+      ansible.builtin.import_tasks: 62_prepare_schema.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Executar impdp
+      ansible.builtin.import_tasks: 64_execute_impdp.yml
+      when: not (orm_host_failed | bool)
+
+    - name: Restore | Restaurar senha e desbloquear usuários
+      ansible.builtin.import_tasks: 65_restore_password.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+
+    - name: Restore | Reaplicar grants capturados
+      ansible.builtin.import_tasks: 66_apply_grants.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+
+    - name: Restore | Executar validações finais
+      ansible.builtin.import_tasks: 67_validate_restore.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+
+    - name: Restore | Executar validações SQL customizadas
+      ansible.builtin.import_tasks: 68_custom_validations.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+        - orm_profile_cfg.validations.enabled | default(false) | bool
+        - orm_profile_cfg.validations.queries | default([]) | length > 0
+
+    - name: Restore | Marcar restore concluído
+      ansible.builtin.set_fact:
+        orm_restore_completed: true
+        orm_restore_database_state: "Restore concluído e validações pós-restore executadas."
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+
+  rescue:
+    - name: Restore | Marcar falha inesperada
+      ansible.builtin.set_fact:
+        orm_host_failed: true
+        orm_host_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+        orm_host_error_msg: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result.stdout
+            | default('Falha não detalhada durante o restore Oracle.')))
+          }}
+
+  always:
+    - name: Restore | Desbloquear usuários se falhou antes do DROP
+      ansible.builtin.shell: |
+        PDB="{{ orm_pdb_effective | default('') }}"
+        if [ -n "$PDB" ]; then
+          export ORACLE_PDB_SID="$PDB"
+        else
+          unset ORACLE_PDB_SID
+        fi
+        "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+        whenever sqlerror continue
+        begin
+          for r in (select username from dba_users where upper(username) in ({{ _orm_schema_sql_list }})) loop
+            execute immediate 'alter user "'||r.username||'" account unlock';
+          end loop;
+        end;
+        /
+        exit
+        SQL
+      environment:
+        ORACLE_SID: "{{ orm_sid_effective | default(orm_sid | default('')) }}"
+        ORACLE_HOME: "{{ orm_oracle_home_effective | default(orm_oracle_home | default('')) }}"
+        PATH: "{{ (orm_oracle_home_effective | default(orm_oracle_home | default(''))) }}/bin:/usr/local/bin:/usr/bin:/bin"
+      changed_when: true
+      failed_when: false
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      when:
+        - orm_host_failed | default(false) | bool
+        - orm_users_locked | default(false) | bool
+        - not (orm_restore_destructive_started | default(false) | bool)
+        - orm_oracle_home_effective | default('') | length > 0
+
+    - name: Restore | Complementar estado quando falhou após DROP
+      ansible.builtin.set_fact:
+        orm_restore_database_state: >-
+          Falha após início da fase destrutiva. O schema anterior pode ter sido removido.
+          Recuperação deve ser feita a partir de {{ orm_effective_dump_file | default('dump de restore') }}.
+      when:
+        - orm_host_failed | default(false) | bool
+        - orm_restore_destructive_started | default(false) | bool
+        - not (orm_restore_completed | default(false) | bool)
+
+    - name: Restore | Coletar trecho dos logs quando houver falha
+      ansible.builtin.shell: |
+        echo "=== CONTROL LOG ==="
+        tail -n 100 "{{ orm_control_log_file }}" 2>/dev/null || true
+        echo
+        echo "=== IMPDP LOG ==="
+        tail -n 100 "{{ orm_impdp_log_file }}" 2>/dev/null || true
+        echo
+        echo "=== GRANTS APPLY LOG ==="
+        tail -n 60 "{{ orm_grants_apply_log_file }}" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: _orm_restore_error_excerpt
+      changed_when: false
+      failed_when: false
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      when: orm_host_failed | default(false) | bool
+
+    - name: Restore | Publicar trecho de erro
+      ansible.builtin.set_fact:
+        orm_host_error_excerpt: "{{ _orm_restore_error_excerpt.stdout | default('') }}"
+      when: orm_host_failed | default(false) | bool
+
+    - name: Restore | Registrar horário final
+      ansible.builtin.set_fact:
+        orm_activity_finished_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+        orm_activity_finished_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+    - name: Restore | Calcular duração
+      ansible.builtin.set_fact:
+        orm_activity_duration_seconds: "{{ (orm_activity_finished_epoch | int) - (orm_activity_started_epoch | int) }}"
+        orm_activity_duration: >-
+          {%- set s = (orm_activity_finished_epoch | int) - (orm_activity_started_epoch | int) -%}
+          {{ '%02d:%02d:%02d' | format((s // 3600), ((s % 3600) // 60), (s % 60)) }}
+
+    - name: Restore | Consolidar artefatos técnicos no log
+      ansible.builtin.shell: |
+        {
+          echo
+          echo "============================================================"
+          echo "IMPDP PARFILE"
+          echo "============================================================"
+          if [ -f "{{ orm_impdp_parfile }}" ]; then
+            cat "{{ orm_impdp_parfile }}"
+          else
+            echo "Parfile não encontrado: {{ orm_impdp_parfile }}"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "IMPDP LOG"
+          echo "============================================================"
+          if [ -f "{{ orm_impdp_log_file }}" ]; then
+            cat "{{ orm_impdp_log_file }}"
+          else
+            echo "Log não encontrado: {{ orm_impdp_log_file }}"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "SESSÕES ANTES DO RESTORE"
+          echo "============================================================"
+          if [ -s "{{ orm_sessions_log_file }}" ]; then
+            cat "{{ orm_sessions_log_file }}"
+          else
+            echo "Nenhuma sessão encontrada antes do restore."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "REAPLICAÇÃO DE GRANTS"
+          echo "============================================================"
+          if [ -s "{{ orm_grants_apply_log_file }}" ]; then
+            cat "{{ orm_grants_apply_log_file }}"
+          else
+            echo "Reaplicação de grants concluída sem saída adicional."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "VALIDAÇÃO PÓS-RESTORE"
+          echo "============================================================"
+          if [ -f "{{ orm_validation_log_file }}" ]; then
+            cat "{{ orm_validation_log_file }}"
+          else
+            echo "Log de validação não encontrado: {{ orm_validation_log_file }}"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "GRANTS CAPTURADOS"
+          echo "============================================================"
+          echo "Arquivo anexo separado: {{ orm_grants_file }}"
+        } >> "{{ orm_control_log_file }}"
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Restore | Finalizar log de controle
+      ansible.builtin.shell: |
+        cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+        Dump efetivo: {{ orm_effective_dump_file | default('') }}
+        Origem do dump: {{ orm_restore_dump_source | default('') }}
+        Estado final: {{ orm_restore_database_state | default('') }}
+        Fim: {{ orm_activity_finished_at }}
+        Duração: {{ orm_activity_duration }}
+        Status: {{ 'FALHA' if (orm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (orm_host_warning | default(false) | bool) else 'SUCESSO') }}
+        EOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Restore | Publicar status final no host
+      ansible.builtin.set_fact:
+        orm_host_status: "{{ 'FALHA' if (orm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (orm_host_warning | default(false) | bool) else 'SUCESSO') }}"
+        orm_host_artifacts: >-
+          {{
+            [orm_control_log_file]
+            +
+            (
+              [orm_grants_file]
+              if (orm_restore_capture_grants | default(false) | bool)
+              else []
+            )
+          }}
+        orm_host_summary:
+          env: "{{ orm_env }}"
+          host: "{{ inventory_hostname }}"
+          profile: "{{ orm_profile_key }}"
+          action: "restore"
+          schemas: "{{ orm_schemas }}"
+          sid: "{{ orm_sid_effective | default(orm_sid | default('')) }}"
+          pdb: "{{ orm_pdb_effective | default(orm_pdb | default('')) }}"
+          service_name: "{{ orm_service_name_effective | default(orm_service_name | default('')) }}"
+          directory_name: "{{ orm_directory_name_effective | default(orm_directory_name | default('')) }}"
+          root_dir: "{{ orm_restore_dir }}"
+          dump: "{{ orm_effective_dump_name | default('') }}"
+          dump_file: "{{ orm_effective_dump_file | default('') }}"
+          dump_source: "{{ orm_restore_dump_source | default('') }}"
+          dump_size_bytes: "{{ orm_restore_dump_size_bytes | default(0) }}"
+          datapump_log: "{{ orm_impdp_log_file }}"
+          control_log: "{{ orm_control_log_file }}"
+          grants_file: "{{ orm_grants_file }}"
+          sessions_before: "{{ orm_sessions_before | default(0) }}"
+          sessions_after: "{{ orm_sessions_after | default(0) }}"
+          invalid_objects: "{{ orm_invalid_objects_count | default(0) }}"
+          destructive_started: "{{ orm_restore_destructive_started | default(false) }}"
+          schema_dropped: "{{ orm_restore_schema_dropped | default(false) }}"
+          import_completed: "{{ orm_restore_import_completed | default(false) }}"
+          restore_completed: "{{ orm_restore_completed | default(false) }}"
+          database_state: "{{ orm_restore_database_state | default('') }}"
+          started_at: "{{ orm_activity_started_at }}"
+          finished_at: "{{ orm_activity_finished_at }}"
+          duration_seconds: "{{ orm_activity_duration_seconds }}"
+          duration: "{{ orm_activity_duration }}"

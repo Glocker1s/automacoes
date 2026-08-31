@@ -1,0 +1,34 @@
+---
+- name: Report | Preparar diretório local do relatório
+  ansible.builtin.file:
+    path: "{{ orm_controller_tmp_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Report | Coletar logs e artefatos dos hosts
+  ansible.builtin.import_tasks: 80_collect_logs.yml
+
+- name: Report | Publicar anexos no CIFS
+  ansible.builtin.import_tasks: 85_publish_cifs.yml
+
+- name: Report | Limpar artefatos locais dos destinos
+  ansible.builtin.import_tasks: 87_cleanup_restore_artifacts.yml
+
+- name: Report | Limpar dump consumido do CIFS
+  ansible.builtin.import_tasks: 88_cleanup_cifs_dump.yml
+
+- name: Report | Limpar backup local criado pelo sync
+  ansible.builtin.import_tasks: 89_cleanup_local_sync_backup.yml
+
+- name: Report | Montar relatório final
+  ansible.builtin.import_tasks: 90_build_report.yml
+
+- name: Report | Falhar job quando houve erro operacional
+  ansible.builtin.fail:
+    msg: "Oracle Manager finalizou com falha. Verifique o e-mail/relatório gerado."
+  when:
+    - orm_fail_job_on_error | bool
+    - orm_overall_failed | default(false) | bool

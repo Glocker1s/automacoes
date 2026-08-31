@@ -1,0 +1,351 @@
+---
+- name: Backup | Normalizar configuração carregada no host dinâmico
+  ansible.builtin.set_fact:
+    orm_profile_cfg: "{{ orm_profile_cfg | from_yaml if orm_profile_cfg is string else orm_profile_cfg }}"
+    orm_schemas: "{{ orm_schemas | from_yaml if orm_schemas is string else orm_schemas }}"
+
+- name: Backup | Inicializar status e configuração efetiva
+  ansible.builtin.set_fact:
+    orm_host_failed: false
+    orm_host_warning: false
+    orm_host_error_msg: ""
+    orm_host_error_excerpt: ""
+    orm_host_failed_task: ""
+    orm_host_status: "EM EXECUÇÃO"
+    orm_host_action: "backup"
+    orm_host_artifacts: []
+    orm_activity_started_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+    orm_activity_started_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+    orm_backup_dir: "{{ orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir)) }}"
+    orm_backup_compression: "{{ orm_profile_cfg.backup.compression | default(orm_backup_compression_default) | string | upper }}"
+    orm_backup_parallel: "{{ orm_profile_cfg.backup.parallel | default(orm_backup_parallel_default) | int }}"
+    orm_backup_exclude: "{{ orm_profile_cfg.backup.exclude | default(orm_backup_exclude_default) }}"
+    orm_backup_extra_args: "{{ orm_profile_cfg.backup.extra_args | default(orm_backup_extra_args_default) }}"
+    orm_backup_validate_dump: "{{ orm_profile_cfg.backup.validate_dump | default(orm_backup_validate_dump_default) | bool }}"
+    orm_dump_file: "{{ (orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir))) }}/{{ orm_dump_basename }}"
+    orm_datapump_log_basename: "{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.expdp.log"
+    orm_datapump_log_file: "{{ (orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir))) }}/{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.expdp.log"
+    orm_control_log_file: "{{ (orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir))) }}/{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.backup.log"
+    orm_host_log_file: "{{ (orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir))) }}/{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.backup.log"
+    orm_expdp_parfile: "{{ (orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir))) }}/{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.expdp.par"
+    orm_latest_manifest_file: "{{ (orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir))) }}/{{ orm_latest_manifest_name }}"
+    orm_dump_size_bytes: 0
+    orm_datapump_binary_required: "expdp"
+    orm_require_existing_schemas: true
+
+- name: Backup | Bloco controlado
+  block:
+    - name: Backup | Preparar ambiente Oracle
+      ansible.builtin.import_tasks: 35_oracle_environment.yml
+
+    - name: Backup | Validar suporte de parallel na V1
+      ansible.builtin.assert:
+        that:
+          - orm_backup_parallel | int == 1
+        fail_msg: >-
+          Oracle Manager V1 trabalha com um único arquivo .dmp e exige backup.parallel=1.
+          Parallel > 1 será habilitado quando suportarmos dump set com %U.
+
+    - name: Backup | Criar diretório físico de backup
+      ansible.builtin.file:
+        path: "{{ orm_backup_dir }}"
+        state: directory
+        owner: "{{ orm_os_user_effective }}"
+        group: "{{ orm_os_group_effective }}"
+        mode: "0775"
+      become: true
+
+    - name: Backup | Inicializar log de controle
+      ansible.builtin.copy:
+        dest: "{{ orm_control_log_file }}"
+        owner: "{{ orm_os_user_effective }}"
+        group: "{{ orm_os_group_effective }}"
+        mode: "0640"
+        content: |
+          Oracle Manager - Backup
+          Host: {{ inventory_hostname }}
+          Ambiente: {{ orm_env }}
+          Profile: {{ orm_profile_key }}
+          Schemas: {{ orm_schemas | join(', ') }}
+          SID: {{ orm_sid_effective }}
+          PDB: {{ orm_pdb_effective | default('') }}
+          Service: {{ orm_service_name_effective | default('') }}
+          ORACLE_HOME: {{ orm_oracle_home_effective }}
+          DIRECTORY: {{ orm_directory_name_effective }}
+          Root dir: {{ orm_backup_dir }}
+          Dump: {{ orm_dump_basename }}
+          Motivo: {{ orm_execution_reason | default('') }}
+          Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
+          Início: {{ orm_activity_started_at }}
+      become: true
+
+    - name: Backup | Definir path do Oracle DIRECTORY
+      ansible.builtin.set_fact:
+        orm_directory_path_effective: "{{ orm_backup_dir }}"
+
+    - name: Backup | Criar Oracle DIRECTORY
+      ansible.builtin.import_tasks: 40_create_directory.yml
+
+    - name: Backup | Gerar parfile do expdp
+      ansible.builtin.import_tasks: 45_build_expdp_parfile.yml
+
+    - name: Backup | Remover dump/log anteriores com mesmo nome
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ orm_dump_file }}"
+        - "{{ orm_datapump_log_file }}"
+      become: true
+      become_user: "{{ orm_os_user_effective }}"
+
+    - name: Backup | Executar expdp
+      ansible.builtin.command:
+        argv:
+          - "{{ orm_oracle_home_effective }}/bin/expdp"
+          - '"/ as sysdba"'
+          - "parfile={{ orm_expdp_parfile }}"
+      environment:
+        ORACLE_SID: "{{ orm_sid_effective }}"
+        ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+        ORACLE_PDB_SID: "{{ orm_pdb_effective if (orm_is_cdb | bool and orm_pdb_effective | length > 0) else '' }}"
+        PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+      register: _orm_expdp_exec
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: "{{ orm_os_user_effective }}"
+
+    - name: Backup | Registrar saída do expdp no log de controle
+      ansible.builtin.shell: |
+        cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+        === EXPDP STDOUT ===
+        {{ _orm_expdp_exec.stdout | default('') }}
+
+        === EXPDP STDERR ===
+        {{ _orm_expdp_exec.stderr | default('') }}
+
+        expdp rc={{ _orm_expdp_exec.rc | default('N/A') }}
+        EOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ orm_os_user_effective }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Backup | Registrar falha do expdp
+      ansible.builtin.set_fact:
+        orm_host_failed: true
+        orm_host_failed_task: "Executar expdp"
+        orm_host_error_msg: >-
+          expdp retornou rc={{ _orm_expdp_exec.rc | default('N/A') }}.
+          Verifique {{ orm_control_log_file }} e {{ orm_datapump_log_file }}.
+      when: _orm_expdp_exec.rc | default(1) | int != 0
+
+    - name: Backup | Validar dump
+      ansible.builtin.import_tasks: 50_validate_dump.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_backup_validate_dump | bool
+
+    - name: Backup | Criar manifesto latest local
+      ansible.builtin.copy:
+        dest: "{{ orm_latest_manifest_file }}"
+        owner: "{{ orm_os_user_effective }}"
+        group: "{{ orm_os_group_effective }}"
+        content: "{{ orm_dump_basename }}\n"
+        mode: "0644"
+      become: true
+      when: not (orm_host_failed | bool)
+
+    - name: Backup | Publicar dump no CIFS
+      when:
+        - orm_cifs_enabled | bool
+        - not (orm_host_failed | bool)
+      block:
+        - name: Backup | Resolver endereço CIFS
+          ansible.builtin.set_fact:
+            _orm_cifs_server: "{{ (orm_cifs_addresses | default({})).get(orm_cifs_label | default('') | lower, '') }}"
+
+        - name: Backup | Validar endereço CIFS
+          ansible.builtin.fail:
+            msg: "CIFS não mapeado: orm_cifs_label={{ orm_cifs_label }}"
+          when: _orm_cifs_server | length == 0
+
+        - name: Backup | Criar diretório de montagem CIFS
+          ansible.builtin.file:
+            path: "{{ orm_cifs_mount_dir }}"
+            state: directory
+            mode: "0755"
+          become: true
+
+        - name: Backup | Criar arquivo temporário de senha CIFS
+          ansible.builtin.copy:
+            dest: "{{ orm_cifs_password_file }}"
+            content: "{{ ansible_password | default('') }}"
+            mode: "0600"
+          become: true
+          no_log: true
+
+        - name: Backup | Montar CIFS
+          ansible.builtin.shell: |
+            set -euo pipefail
+            if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
+              umount "{{ orm_cifs_mount_dir }}" || true
+            fi
+            mount -t cifs "{{ _orm_cifs_server }}" "{{ orm_cifs_mount_dir }}" \
+              -o username="{{ ansible_user }}",password="$(cat {{ orm_cifs_password_file }})",domain="{{ orm_cifs_domain }}",rw,vers="{{ orm_cifs_vers }}"
+          args:
+            executable: /bin/bash
+          become: true
+          
+
+        - name: Backup | Copiar dump, log e manifesto para CIFS
+          ansible.builtin.shell: |
+            set -euo pipefail
+            DST="{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
+            mkdir -p "$DST"
+            cp -f "{{ orm_dump_file }}" "$DST/"
+            cp -f "{{ orm_datapump_log_file }}" "$DST/"
+            cp -f "{{ orm_latest_manifest_file }}" "$DST/"
+            sync
+          args:
+            executable: /bin/bash
+          become: true
+
+      rescue:
+        - name: Backup | Registrar falha de publicação CIFS
+          ansible.builtin.set_fact:
+            orm_host_warning: true
+            orm_cifs_upload_failed: true
+            orm_cifs_upload_error: >-
+              {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default(ansible_failed_result | to_json)) }}
+            orm_host_failed: "{{ orm_fail_on_cifs_error | bool }}"
+            orm_host_failed_task: "Publicar dump no CIFS"
+            orm_host_error_msg: >-
+              {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Falha ao publicar dump no CIFS.')) }}
+
+      always:
+        - name: Backup | Desmontar CIFS
+          ansible.builtin.shell: "umount {{ orm_cifs_mount_dir }} || true"
+          become: true
+          changed_when: false
+          failed_when: false
+
+        - name: Backup | Remover senha temporária CIFS
+          ansible.builtin.file:
+            path: "{{ orm_cifs_password_file }}"
+            state: absent
+          become: true
+          failed_when: false
+          no_log: true
+
+  rescue:
+    - name: Backup | Marcar falha inesperada
+      ansible.builtin.set_fact:
+        orm_host_failed: true
+        orm_host_failed_task: "{{ ansible_failed_task.name | default('desconhecida') }}"
+        orm_host_error_msg: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result.stdout
+            | default('Falha não detalhada durante o backup Oracle.')))
+          }}
+
+  always:
+    - name: Backup | Coletar trecho dos logs quando houver falha
+      ansible.builtin.shell: |
+        echo "=== CONTROL LOG ==="
+        tail -n 100 "{{ orm_control_log_file }}" 2>/dev/null || true
+        echo
+        echo "=== DATAPUMP LOG ==="
+        tail -n 100 "{{ orm_datapump_log_file }}" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: _orm_backup_error_excerpt
+      changed_when: false
+      failed_when: false
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      when: orm_host_failed | default(false) | bool
+
+    - name: Backup | Publicar trecho de erro
+      ansible.builtin.set_fact:
+        orm_host_error_excerpt: "{{ _orm_backup_error_excerpt.stdout | default('') }}"
+      when: orm_host_failed | default(false) | bool
+
+    - name: Backup | Registrar horário final
+      ansible.builtin.set_fact:
+        orm_activity_finished_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
+        orm_activity_finished_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+    - name: Backup | Calcular duração
+      ansible.builtin.set_fact:
+        orm_activity_duration_seconds: "{{ (orm_activity_finished_epoch | int) - (orm_activity_started_epoch | int) }}"
+        orm_activity_duration: >-
+          {%- set s = (orm_activity_finished_epoch | int) - (orm_activity_started_epoch | int) -%}
+          {{ '%02d:%02d:%02d' | format((s // 3600), ((s % 3600) // 60), (s % 60)) }}
+
+    - name: Backup | Consolidar configuração do Data Pump no log
+      ansible.builtin.shell: |
+        {
+          echo
+          echo "============================================================"
+          echo "EXPDP PARFILE"
+          echo "============================================================"
+          if [ -f "{{ orm_expdp_parfile }}" ]; then
+            cat "{{ orm_expdp_parfile }}"
+          else
+            echo "Parfile não encontrado: {{ orm_expdp_parfile }}"
+          fi
+        } >> "{{ orm_control_log_file }}"
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Backup | Finalizar log de controle
+      ansible.builtin.shell: |
+        cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+        Fim: {{ orm_activity_finished_at }}
+        Duração: {{ orm_activity_duration }}
+        Status: {{ 'FALHA' if (orm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (orm_host_warning | default(false) | bool) else 'SUCESSO') }}
+        EOF
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ orm_os_user_effective | default(orm_os_user | default(orm_default_os_user)) }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Backup | Publicar status final no host
+      ansible.builtin.set_fact:
+        orm_host_status: "{{ 'FALHA' if (orm_host_failed | default(false) | bool) else ('SUCESSO COM AVISO' if (orm_host_warning | default(false) | bool) else 'SUCESSO') }}"
+        orm_host_artifacts:
+          - "{{ orm_control_log_file }}"
+        orm_host_summary:
+          env: "{{ orm_env }}"
+          host: "{{ inventory_hostname }}"
+          profile: "{{ orm_profile_key }}"
+          action: "backup"
+          schemas: "{{ orm_schemas }}"
+          sid: "{{ orm_sid_effective | default(orm_sid | default('')) }}"
+          pdb: "{{ orm_pdb_effective | default(orm_pdb | default('')) }}"
+          service_name: "{{ orm_service_name_effective | default(orm_service_name | default('')) }}"
+          directory_name: "{{ orm_directory_name_effective | default(orm_directory_name | default('')) }}"
+          root_dir: "{{ orm_backup_dir }}"
+          dump: "{{ orm_dump_basename }}"
+          dump_file: "{{ orm_dump_file }}"
+          dump_size_bytes: "{{ orm_dump_size_bytes | default(0) }}"
+          datapump_log: "{{ orm_datapump_log_file }}"
+          control_log: "{{ orm_control_log_file }}"
+          started_at: "{{ orm_activity_started_at }}"
+          finished_at: "{{ orm_activity_finished_at }}"
+          duration_seconds: "{{ orm_activity_duration_seconds }}"
+          duration: "{{ orm_activity_duration }}"

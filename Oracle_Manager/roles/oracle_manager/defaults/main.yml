@@ -1,0 +1,202 @@
+---
+# ============================================================================
+# Oracle Manager
+# ============================================================================
+# Ações aceitas: backup | restore | sync
+
+orm_action: "backup"
+orm_profile_key: ""
+orm_execution_reason: ""
+
+# ============================================================================
+# SELEÇÃO DE ORIGEM / DESTINO
+# ============================================================================
+
+orm_source_env: ""
+orm_source_host: ""             # aceita name ou ansible_host
+orm_target_envs: ""             # lista/comma-separated: tu, ti, th, fix
+orm_target_hosts: ""            # lista/comma-separated: nome ou ansible_host
+orm_restore_dump_name: "latest" # latest ou nome do .dmp
+orm_schemas: ""                 # vazio = usa schemas do profile
+
+# ============================================================================
+# CONFIRMAÇÕES E SEGURANÇA
+# ============================================================================
+
+orm_confirm_restore: "nao"
+orm_confirm_multi_target_restore: "nao"
+orm_fail_job_on_error: true
+
+# ============================================================================
+# CONFIGURAÇÃO
+# ============================================================================
+
+orm_config_root: "{{ playbook_dir }}/config/oracle_manager"
+orm_databases_dir: "{{ orm_config_root }}/databases"
+
+# ============================================================================
+# ORACLE - DEFAULTS TÉCNICOS
+# ============================================================================
+
+orm_default_os_user: "oracle"
+orm_default_os_group: "oinstall"
+orm_default_sid: ""
+orm_default_pdb: ""
+orm_default_service_name: ""
+orm_default_oracle_home: ""
+orm_default_directory_name: "DB_MANAGER"
+
+# ============================================================================
+# DIRETÓRIOS
+# ============================================================================
+
+orm_backup_root_dir: "/backup/oracle_manager"
+orm_restore_root_dir: "/backup/oracle_manager_restore"
+orm_controller_tmp_dir: "/tmp/oracle-manager-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# ============================================================================
+# INVENTÁRIO DINÂMICO / CONECTIVIDADE
+# ============================================================================
+
+orm_ssh_port: 22
+orm_wait_timeout: 5
+orm_probe_ssh_enabled: true
+orm_fail_on_unreachable: true
+
+# ============================================================================
+# DATA PUMP - BACKUP
+# ============================================================================
+# V1 trabalha com um único arquivo .dmp; por isso parallel=1.
+# Quando evoluirmos para dump set (%U), poderemos liberar parallel > 1.
+
+orm_backup_compression_default: "none"
+orm_backup_parallel_default: 1
+orm_backup_exclude_default:
+  - "STATISTICS"
+orm_backup_extra_args_default: ""
+orm_backup_validate_dump_default: true
+
+# ============================================================================
+# DATA PUMP - RESTORE
+# ============================================================================
+
+orm_restore_parallel_default: 1
+orm_restore_extra_args_default: ""
+orm_restore_capture_grants_default: true
+orm_restore_apply_grants_default: true
+orm_restore_kill_sessions_default: true
+orm_restore_lock_users_default: true
+orm_restore_drop_users_default: true
+orm_restore_unlock_users_default: true
+orm_restore_fail_on_grant_error_default: false
+orm_restore_require_password_default: true
+orm_restore_session_wait_retries_default: 12
+orm_restore_session_wait_delay_default: 5
+orm_restore_async_timeout_default: 14400
+orm_restore_async_poll_default: 15
+orm_restore_validate_schemas_default: true
+orm_restore_validate_invalid_objects_default: true
+orm_restore_fail_on_invalid_objects_default: false
+
+# ============================================================================
+# CIFS - usado somente para dump/manifesto
+# ============================================================================
+
+orm_cifs_enabled: true
+orm_cifs_label: "producao"
+# Diretório usado pelos dumps do Oracle Manager.
+orm_cifs_path: "/Ansible/oracle_manager"
+
+# Diretório usado exclusivamente pelos anexos do relatório/e-mail.
+orm_cifs_attachment_path: "/Ansible/mail_attachments"
+orm_cifs_mount_dir: "/opt/ansiblefiles/oracle_manager"
+orm_cifs_addresses:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.149/certs"
+orm_cifs_workgroup: "agorasenior.corp"
+orm_cifs_domain: "{{ orm_cifs_workgroup }}"
+orm_cifs_vers: "3.0"
+orm_cifs_password_file: "/tmp/.oracle-manager-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+orm_fail_on_cifs_error: false
+# Host que possui smbclient e realiza a publicação dos anexos.
+# No lab, utilizar o mesmo host executor do fluxo de e-mail.
+orm_cifs_delegate_host: "192.168.0.149"
+# ============================================================================
+# CLEANUP
+# ============================================================================
+
+# Remove os artefatos locais dos hosts destino após restore/sync,
+# independentemente do resultado da execução.
+orm_cleanup_restore_artifacts: true
+
+# Remove do CIFS o dump consumido após restore/sync concluído com sucesso.
+# Backup puro mantém dump, log e latest publicados no CIFS.
+orm_cleanup_cifs_dump_after_restore: true
+
+# Remove da origem os artefatos do backup criado pelo sync após conclusão com sucesso.
+# Backup puro continua mantendo os artefatos localmente.
+orm_cleanup_local_backup_after_sync: true
+
+# ============================================================================
+# REPORT
+# ============================================================================
+
+orm_report_timezone: "America/Sao_Paulo"
+orm_report_title: "Oracle Manager"
+orm_report_subject_prefix: "Ansible-Report"
+orm_report_max_error_chars: 12000
+ansible_url: ""
+
+# ============================================================================
+# DEFAULTS DE PROFILE
+# ============================================================================
+
+orm_profile_defaults:
+  description: ""
+  schemas: []
+  default_source_env: "prd"
+  default_sync_targets: []
+  default_restore_targets: []
+
+  oracle:
+    os_user: "{{ orm_default_os_user }}"
+    os_group: "{{ orm_default_os_group }}"
+    sid: "{{ orm_default_sid }}"
+    pdb: "{{ orm_default_pdb }}"
+    service_name: "{{ orm_default_service_name }}"
+    oracle_home: "{{ orm_default_oracle_home }}"
+    directory_name: "{{ orm_default_directory_name }}"
+
+  backup:
+    root_dir: "{{ orm_backup_root_dir }}"
+    compression: "{{ orm_backup_compression_default }}"
+    parallel: "{{ orm_backup_parallel_default }}"
+    exclude: "{{ orm_backup_exclude_default }}"
+    extra_args: "{{ orm_backup_extra_args_default }}"
+    validate_dump: "{{ orm_backup_validate_dump_default }}"
+
+  restore:
+    root_dir: "{{ orm_restore_root_dir }}"
+    parallel: "{{ orm_restore_parallel_default }}"
+    extra_args: "{{ orm_restore_extra_args_default }}"
+    capture_grants: "{{ orm_restore_capture_grants_default }}"
+    apply_grants: "{{ orm_restore_apply_grants_default }}"
+    kill_sessions: "{{ orm_restore_kill_sessions_default }}"
+    lock_users: "{{ orm_restore_lock_users_default }}"
+    drop_users: "{{ orm_restore_drop_users_default }}"
+    unlock_users: "{{ orm_restore_unlock_users_default }}"
+    fail_on_grant_error: "{{ orm_restore_fail_on_grant_error_default }}"
+    require_password: "{{ orm_restore_require_password_default }}"
+    session_wait_retries: "{{ orm_restore_session_wait_retries_default }}"
+    session_wait_delay: "{{ orm_restore_session_wait_delay_default }}"
+    async_timeout: "{{ orm_restore_async_timeout_default }}"
+    async_poll: "{{ orm_restore_async_poll_default }}"
+    validate_schemas: "{{ orm_restore_validate_schemas_default }}"
+    validate_invalid_objects: "{{ orm_restore_validate_invalid_objects_default }}"
+    fail_on_invalid_objects: "{{ orm_restore_fail_on_invalid_objects_default }}"
+
+  users: {}
+  validations:
+    enabled: false
+    queries: []
+  hosts_env_sync: {}

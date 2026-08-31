@@ -1,0 +1,94 @@
+---
+- name: Restore cleanup | Inicializar estado
+  ansible.builtin.set_fact:
+    orm_restore_cleanup_failed: false
+    orm_restore_cleanup_error: ""
+    orm_restore_cleanup_errors: []
+    orm_restore_cleanup_performed: false
+    _orm_restore_cleanup_action: "{{ orm_action_normalized | default(orm_action | default('backup') | lower) }}"
+    _orm_restore_cleanup_hosts: "{{ groups.orm_restore_targets | default([]) }}"
+
+- name: Restore cleanup | Limpar artefatos dos hosts destino
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    ROOT="{{ hostvars[item].orm_restore_dir | default(hostvars[item].orm_restore_root_dir_effective | default(orm_restore_root_dir)) }}"
+    DUMP_FILE="{{ hostvars[item].orm_effective_dump_file | default('') }}"
+    JOB_ID="{{ awx_job_id | default(tower_job_id | default('manual')) }}"
+
+    if [ ! -d "$ROOT" ]; then
+      echo "__ROOT_ABSENT__=$ROOT"
+      exit 0
+    fi
+
+    echo "[INFO] Limpando artefatos do job ${JOB_ID} em ${ROOT}"
+
+    if [ -n "$DUMP_FILE" ]; then
+      case "$DUMP_FILE" in
+        "$ROOT"/*)
+          if [ -f "$DUMP_FILE" ]; then
+            rm -f -- "$DUMP_FILE"
+            echo "__DUMP_REMOVED__=true"
+          else
+            echo "__DUMP_ALREADY_ABSENT__=true"
+          fi
+          ;;
+        *)
+          echo "Dump fora do restore.root_dir; cleanup recusado: $DUMP_FILE" >&2
+          exit 20
+          ;;
+      esac
+    fi
+
+    find "$ROOT" -mindepth 1 -maxdepth 1 \
+      -name "*job_${JOB_ID}*" \
+      -print \
+      -exec rm -rf -- {} +
+
+    echo "__CLEANUP_DONE__=true"
+  args:
+    executable: /bin/bash
+  loop: "{{ _orm_restore_cleanup_hosts }}"
+  loop_control:
+    label: "{{ item }}"
+  delegate_to: "{{ item }}"
+  become: true
+  register: _orm_restore_cleanup_exec
+  failed_when: false
+  changed_when: "'__CLEANUP_DONE__=true' in (_orm_restore_cleanup_exec.stdout | default(''))"
+  when:
+    - orm_cleanup_restore_artifacts | bool
+    - _orm_restore_cleanup_action in ['restore', 'sync']
+
+- name: Restore cleanup | Registrar erros
+  ansible.builtin.set_fact:
+    orm_restore_cleanup_failed: true
+    orm_restore_cleanup_errors: >-
+      {{
+        orm_restore_cleanup_errors
+        + [
+          item.item ~ ': '
+          ~ (item.stderr | default(item.stdout | default('Falha no cleanup dos artefatos de restore.')))
+        ]
+      }}
+  loop: "{{ _orm_restore_cleanup_exec.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('host') }}"
+  when:
+    - item.rc | default(0) | int != 0
+
+- name: Restore cleanup | Publicar resultado
+  ansible.builtin.set_fact:
+    orm_restore_cleanup_performed: "{{ (_orm_restore_cleanup_exec.results | default([]) | length) > 0 }}"
+    orm_restore_cleanup_error: "{{ orm_restore_cleanup_errors | join(' | ') }}"
+
+- name: Restore cleanup | Exibir resultado
+  ansible.builtin.debug:
+    msg:
+      action: "{{ _orm_restore_cleanup_action }}"
+      performed: "{{ orm_restore_cleanup_performed }}"
+      failed: "{{ orm_restore_cleanup_failed }}"
+      error: "{{ orm_restore_cleanup_error }}"
+  when:
+    - orm_cleanup_restore_artifacts | bool
+    - _orm_restore_cleanup_action in ['restore', 'sync']

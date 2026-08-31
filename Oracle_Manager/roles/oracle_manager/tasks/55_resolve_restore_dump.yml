@@ -1,0 +1,187 @@
+---
+- name: Restore dump | Resolver dump via CIFS
+  when:
+    - orm_cifs_enabled | bool
+    - not (orm_host_failed | bool)
+  block:
+    - name: Restore dump | Resolver endereço CIFS
+      ansible.builtin.set_fact:
+        _orm_restore_cifs_server: "{{ (orm_cifs_addresses | default({})).get(orm_cifs_label | default('') | lower, '') }}"
+
+    - name: Restore dump | Validar endereço CIFS
+      ansible.builtin.fail:
+        msg: "CIFS não mapeado: orm_cifs_label={{ orm_cifs_label }}"
+      when: _orm_restore_cifs_server | length == 0
+
+    - name: Restore dump | Criar diretório de montagem CIFS
+      ansible.builtin.file:
+        path: "{{ orm_cifs_mount_dir }}"
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: Restore dump | Criar arquivo temporário de senha CIFS
+      ansible.builtin.copy:
+        dest: "{{ orm_cifs_password_file }}"
+        content: "{{ ansible_password | default('') }}"
+        mode: "0600"
+      become: true
+      no_log: true
+
+    - name: Restore dump | Montar CIFS
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
+          umount "{{ orm_cifs_mount_dir }}" || true
+        fi
+        mount -t cifs "{{ _orm_restore_cifs_server }}" "{{ orm_cifs_mount_dir }}" \
+          -o username="{{ ansible_user }}",password="$(cat {{ orm_cifs_password_file }})",domain="{{ orm_cifs_domain }}",rw,vers="{{ orm_cifs_vers }}"
+      args:
+        executable: /bin/bash
+      become: true
+      no_log: true
+
+    - name: Restore dump | Resolver nome efetivo no CIFS
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CIFS_DIR="{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
+        REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
+        if [ "$REQUESTED" = "latest" ]; then
+          MANIFEST="$CIFS_DIR/{{ orm_latest_manifest_name }}"
+          [ -s "$MANIFEST" ] || { echo "Manifest latest não encontrado: $MANIFEST" >&2; exit 10; }
+          head -n1 "$MANIFEST" | tr -d '\r\n'
+        else
+          case "$REQUESTED" in
+            *.dmp) printf '%s\n' "$REQUESTED" ;;
+            *) printf '%s.dmp\n' "$REQUESTED" ;;
+          esac
+        fi
+      args:
+        executable: /bin/bash
+      register: _orm_restore_dump_name_resolved
+      changed_when: false
+      become: true
+
+    - name: Restore dump | Validar nome retornado pelo manifesto/Survey
+      ansible.builtin.assert:
+        that:
+          - _orm_restore_dump_name_resolved.stdout | trim | length > 0
+          - (_orm_restore_dump_name_resolved.stdout | trim | basename) == (_orm_restore_dump_name_resolved.stdout | trim)
+          - _orm_restore_dump_name_resolved.stdout | trim is match('^[A-Za-z0-9_.-]+\\.dmp$')
+        fail_msg: "Nome de dump inválido: {{ _orm_restore_dump_name_resolved.stdout | default('') | trim }}"
+
+    - name: Restore dump | Definir paths do dump CIFS
+      ansible.builtin.set_fact:
+        orm_effective_dump_name: "{{ _orm_restore_dump_name_resolved.stdout | trim }}"
+        orm_effective_dump_file: "{{ orm_restore_dir }}/{{ _orm_restore_dump_name_resolved.stdout | trim }}"
+        orm_restore_dump_source: "CIFS"
+
+    - name: Restore dump | Validar dump no CIFS
+      ansible.builtin.stat:
+        path: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}/{{ orm_effective_dump_name }}"
+      register: _orm_restore_cifs_dump_stat
+      become: true
+
+    - name: Restore dump | Confirmar dump válido no CIFS
+      ansible.builtin.assert:
+        that:
+          - _orm_restore_cifs_dump_stat.stat.exists | default(false)
+          - _orm_restore_cifs_dump_stat.stat.isreg | default(false)
+          - _orm_restore_cifs_dump_stat.stat.size | default(0) | int > 0
+        fail_msg: >-
+          Dump não encontrado ou vazio no CIFS:
+          {{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}/{{ orm_effective_dump_name }}.
+
+    - name: Restore dump | Copiar dump do CIFS para restore.root_dir
+      ansible.builtin.copy:
+        src: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}/{{ orm_effective_dump_name }}"
+        dest: "{{ orm_effective_dump_file }}"
+        remote_src: true
+        owner: "{{ orm_os_user_effective }}"
+        group: "{{ orm_os_group_effective }}"
+        mode: "0640"
+      become: true
+
+  rescue:
+    - name: Restore dump | Registrar falha de resolução/cópia CIFS
+      ansible.builtin.set_fact:
+        orm_host_failed: true
+        orm_host_failed_task: "Resolver/copiar dump do CIFS"
+        orm_host_error_msg: >-
+          {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Falha ao resolver/copiar dump do CIFS.')) }}
+
+  always:
+    - name: Restore dump | Desmontar CIFS
+      ansible.builtin.shell: "umount {{ orm_cifs_mount_dir }} || true"
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: Restore dump | Remover senha temporária CIFS
+      ansible.builtin.file:
+        path: "{{ orm_cifs_password_file }}"
+        state: absent
+      become: true
+      failed_when: false
+      no_log: true
+
+- name: Restore dump | Resolver dump local quando CIFS desabilitado
+  when:
+    - not (orm_cifs_enabled | bool)
+    - not (orm_host_failed | bool)
+  block:
+    - name: Restore dump | Resolver nome local
+      ansible.builtin.shell: |
+        set -euo pipefail
+        REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
+        if [ "$REQUESTED" = "latest" ]; then
+          find "{{ orm_restore_dir }}" -maxdepth 1 -type f -name '*.dmp' -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2-
+        else
+          case "$REQUESTED" in
+            *.dmp) printf '%s\n' "$REQUESTED" ;;
+            *) printf '%s.dmp\n' "$REQUESTED" ;;
+          esac
+        fi
+      args:
+        executable: /bin/bash
+      register: _orm_restore_local_name
+      changed_when: false
+      become: true
+      become_user: "{{ orm_os_user_effective }}"
+
+    - name: Restore dump | Validar nome local resolvido
+      ansible.builtin.assert:
+        that:
+          - _orm_restore_local_name.stdout | trim | length > 0
+          - (_orm_restore_local_name.stdout | trim | basename) == (_orm_restore_local_name.stdout | trim)
+          - _orm_restore_local_name.stdout | trim is match('^[A-Za-z0-9_.-]+\\.dmp$')
+        fail_msg: "Nenhum dump .dmp foi encontrado em {{ orm_restore_dir }} para o restore."
+
+    - name: Restore dump | Definir dump local efetivo
+      ansible.builtin.set_fact:
+        orm_effective_dump_name: "{{ _orm_restore_local_name.stdout | trim }}"
+        orm_effective_dump_file: "{{ orm_restore_dir }}/{{ _orm_restore_local_name.stdout | trim }}"
+        orm_restore_dump_source: "LOCAL"
+
+- name: Restore dump | Validar dump final antes de qualquer ação destrutiva
+  ansible.builtin.stat:
+    path: "{{ orm_effective_dump_file }}"
+  register: _orm_restore_dump_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: not (orm_host_failed | bool)
+
+- name: Restore dump | Registrar falha quando dump final não for válido
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar dump para restore"
+    orm_host_error_msg: >-
+      Dump de restore não existe, não é arquivo regular ou está vazio: {{ orm_effective_dump_file | default('não resolvido') }}.
+  when:
+    - not (orm_host_failed | bool)
+    - not (_orm_restore_dump_stat.stat.exists | default(false) and _orm_restore_dump_stat.stat.isreg | default(false) and (_orm_restore_dump_stat.stat.size | default(0) | int > 0))
+
+- name: Restore dump | Publicar tamanho do dump
+  ansible.builtin.set_fact:
+    orm_restore_dump_size_bytes: "{{ _orm_restore_dump_stat.stat.size | default(0) | int }}"
+  when: not (orm_host_failed | bool)

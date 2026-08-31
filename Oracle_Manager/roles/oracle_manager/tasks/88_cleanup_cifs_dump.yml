@@ -1,0 +1,226 @@
+---
+- name: CIFS cleanup | Inicializar estado
+  ansible.builtin.set_fact:
+    orm_cifs_cleanup_failed: false
+    orm_cifs_cleanup_error: ""
+    orm_cifs_cleanup_dump_removed: false
+    orm_cifs_cleanup_log_removed: false
+    orm_cifs_cleanup_latest_removed: false
+    orm_cifs_cleanup_performed: false
+    _orm_cleanup_action: "{{ orm_action_normalized | default(orm_action | default('backup') | lower) }}"
+
+- name: CIFS cleanup | Resolver hosts obrigatórios
+  ansible.builtin.set_fact:
+    _orm_cleanup_required_hosts: >-
+      {{
+        ((groups.orm_source_targets | default([])) + (groups.orm_restore_targets | default([]))) | unique | list
+        if _orm_cleanup_action == 'sync'
+        else (groups.orm_restore_targets | default([]))
+      }}
+    _orm_cleanup_restore_hosts: "{{ groups.orm_restore_targets | default([]) }}"
+    _orm_cleanup_delegate_host: "{{ ((groups.orm_restore_targets | default([])) | first) | default('') }}"
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']
+
+- name: CIFS cleanup | Inicializar validação de hosts
+  ansible.builtin.set_fact:
+    _orm_cleanup_not_success_hosts: []
+    _orm_cleanup_dump_names: []
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']
+
+- name: CIFS cleanup | Identificar hosts sem sucesso
+  ansible.builtin.set_fact:
+    _orm_cleanup_not_success_hosts: "{{ _orm_cleanup_not_success_hosts + [item] }}"
+  loop: "{{ _orm_cleanup_required_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - hostvars[item].orm_host_status | default('NÃO EXECUTADO') != 'SUCESSO'
+
+- name: CIFS cleanup | Resolver dump utilizado pelos destinos
+  ansible.builtin.set_fact:
+    _orm_cleanup_dump_names: "{{ _orm_cleanup_dump_names + [hostvars[item].orm_effective_dump_name] }}"
+  loop: "{{ _orm_cleanup_restore_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - hostvars[item].orm_effective_dump_name | default('') | length > 0
+
+- name: CIFS cleanup | Publicar dumps únicos
+  ansible.builtin.set_fact:
+    _orm_cleanup_dump_names_unique: "{{ _orm_cleanup_dump_names | unique | list }}"
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']
+
+- name: CIFS cleanup | Informar cleanup não executado por falha operacional
+  ansible.builtin.debug:
+    msg: >-
+      Cleanup do dump no CIFS não executado porque nem todos os hosts terminaram com SUCESSO:
+      {{ _orm_cleanup_not_success_hosts | join(', ') }}.
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']
+    - _orm_cleanup_not_success_hosts | default([]) | length > 0
+
+- name: CIFS cleanup | Registrar inconsistência no dump resolvido
+  ansible.builtin.set_fact:
+    orm_cifs_cleanup_failed: true
+    orm_cifs_cleanup_error: >-
+      Cleanup do CIFS não executado. Era esperado exatamente um dump utilizado pelos destinos,
+      mas foram resolvidos: {{ _orm_cleanup_dump_names_unique | default([]) | join(', ') }}.
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']
+    - _orm_cleanup_not_success_hosts | default([]) | length == 0
+    - _orm_cleanup_dump_names_unique | default([]) | length != 1
+
+- name: CIFS cleanup | Remover dump consumido
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']
+    - _orm_cleanup_not_success_hosts | default([]) | length == 0
+    - _orm_cleanup_dump_names_unique | default([]) | length == 1
+    - _orm_cleanup_delegate_host | default('') | length > 0
+  block:
+    - name: CIFS cleanup | Resolver parâmetros
+      ansible.builtin.set_fact:
+        _orm_cleanup_dump_name: "{{ _orm_cleanup_dump_names_unique | first }}"
+        _orm_cleanup_dump_log_name: "{{ (_orm_cleanup_dump_names_unique | first) | regex_replace('\\.dmp$', '.expdp.log') }}"
+        _orm_cleanup_cifs_server: "{{ (orm_cifs_addresses | default({})).get(orm_cifs_label | default('') | lower, '') }}"
+
+    - name: CIFS cleanup | Validar endereço CIFS
+      ansible.builtin.fail:
+        msg: "CIFS não mapeado para cleanup: orm_cifs_label={{ orm_cifs_label }}"
+      when: _orm_cleanup_cifs_server | length == 0
+
+    - name: CIFS cleanup | Criar diretório de montagem
+      ansible.builtin.file:
+        path: "{{ orm_cifs_mount_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: "{{ _orm_cleanup_delegate_host }}"
+      become: true
+
+    - name: CIFS cleanup | Criar arquivo temporário de senha
+      ansible.builtin.copy:
+        dest: "{{ orm_cifs_password_file }}"
+        content: "{{ hostvars[_orm_cleanup_delegate_host].ansible_password | default(ansible_password | default('')) }}"
+        mode: "0600"
+      delegate_to: "{{ _orm_cleanup_delegate_host }}"
+      become: true
+      no_log: true
+
+    - name: CIFS cleanup | Montar CIFS
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
+          umount "{{ orm_cifs_mount_dir }}" || true
+        fi
+        mount -t cifs "{{ _orm_cleanup_cifs_server }}" "{{ orm_cifs_mount_dir }}" \
+          -o username="{{ hostvars[_orm_cleanup_delegate_host].ansible_user | default(ansible_user | default('')) }}",password="$(cat {{ orm_cifs_password_file }})",domain="{{ orm_cifs_domain }}",rw,vers="{{ orm_cifs_vers }}"
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ _orm_cleanup_delegate_host }}"
+      become: true
+      no_log: true
+
+    - name: CIFS cleanup | Remover dump, log e latest relacionado
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CIFS_DIR="{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
+        DUMP_NAME="{{ _orm_cleanup_dump_name }}"
+        LOG_NAME="{{ _orm_cleanup_dump_log_name }}"
+        MANIFEST="$CIFS_DIR/{{ orm_latest_manifest_name }}"
+
+        if [ ! -d "$CIFS_DIR" ]; then
+          echo "Diretório CIFS não encontrado: $CIFS_DIR" >&2
+          exit 20
+        fi
+
+        if [ -f "$CIFS_DIR/$DUMP_NAME" ]; then
+          rm -f "$CIFS_DIR/$DUMP_NAME"
+          echo "__DUMP_REMOVED__=true"
+        else
+          echo "__DUMP_ALREADY_ABSENT__=true"
+        fi
+
+        if [ -f "$CIFS_DIR/$LOG_NAME" ]; then
+          rm -f "$CIFS_DIR/$LOG_NAME"
+          echo "__LOG_REMOVED__=true"
+        else
+          echo "__LOG_ALREADY_ABSENT__=true"
+        fi
+
+        if [ -f "$MANIFEST" ]; then
+          LATEST="$(head -n1 "$MANIFEST" | tr -d '\r' | xargs)"
+          if [ "$LATEST" = "$DUMP_NAME" ]; then
+            rm -f "$MANIFEST"
+            echo "__LATEST_REMOVED__=true"
+          else
+            echo "__LATEST_KEPT__=$LATEST"
+          fi
+        fi
+
+        sync
+      args:
+        executable: /bin/bash
+      register: _orm_cleanup_exec
+      delegate_to: "{{ _orm_cleanup_delegate_host }}"
+      become: true
+      changed_when: true
+
+    - name: CIFS cleanup | Publicar resultado
+      ansible.builtin.set_fact:
+        orm_cifs_cleanup_performed: true
+        orm_cifs_cleanup_dump_removed: "{{ '__DUMP_REMOVED__=true' in (_orm_cleanup_exec.stdout | default('')) }}"
+        orm_cifs_cleanup_log_removed: "{{ '__LOG_REMOVED__=true' in (_orm_cleanup_exec.stdout | default('')) }}"
+        orm_cifs_cleanup_latest_removed: "{{ '__LATEST_REMOVED__=true' in (_orm_cleanup_exec.stdout | default('')) }}"
+
+  rescue:
+    - name: CIFS cleanup | Registrar falha
+      ansible.builtin.set_fact:
+        orm_cifs_cleanup_failed: true
+        orm_cifs_cleanup_error: >-
+          {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('Falha ao remover dump consumido do CIFS.')) }}
+
+  always:
+    - name: CIFS cleanup | Desmontar CIFS
+      ansible.builtin.shell: "umount {{ orm_cifs_mount_dir }} || true"
+      delegate_to: "{{ _orm_cleanup_delegate_host }}"
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: CIFS cleanup | Remover senha temporária
+      ansible.builtin.file:
+        path: "{{ orm_cifs_password_file }}"
+        state: absent
+      delegate_to: "{{ _orm_cleanup_delegate_host }}"
+      become: true
+      failed_when: false
+      no_log: true
+
+- name: CIFS cleanup | Exibir resultado
+  ansible.builtin.debug:
+    msg:
+      action: "{{ _orm_cleanup_action }}"
+      performed: "{{ orm_cifs_cleanup_performed }}"
+      dump_removed: "{{ orm_cifs_cleanup_dump_removed }}"
+      log_removed: "{{ orm_cifs_cleanup_log_removed }}"
+      latest_removed: "{{ orm_cifs_cleanup_latest_removed }}"
+      failed: "{{ orm_cifs_cleanup_failed }}"
+      error: "{{ orm_cifs_cleanup_error }}"
+  when:
+    - orm_cleanup_cifs_dump_after_restore | bool
+    - orm_cifs_enabled | bool
+    - _orm_cleanup_action in ['restore', 'sync']

@@ -1,0 +1,314 @@
+---
+- name: Oracle env | Inicializar configuração efetiva
+  ansible.builtin.set_fact:
+    orm_sid_effective: "{{ orm_sid | default('') | string | trim }}"
+    orm_pdb_effective: "{{ orm_pdb | default('') | string | trim }}"
+    orm_service_name_effective: "{{ orm_service_name | default('') | string | trim }}"
+    orm_oracle_home_effective: "{{ orm_oracle_home | default('') | string | trim }}"
+    orm_os_user_effective: "{{ orm_os_user | default(orm_default_os_user) }}"
+    orm_os_group_effective: "{{ orm_os_group | default(orm_default_os_group) }}"
+    orm_directory_name_effective: "{{ orm_directory_name | default(orm_default_directory_name) }}"
+    _orm_schema_sql_list: "{{ orm_schemas | map('upper') | map('regex_replace', '^(.*)$', \"'\\1'\") | join(',') }}"
+
+- name: Oracle env | Descobrir SIDs via PMON quando SID não foi configurado
+  ansible.builtin.shell: |
+    ps -eo args= 2>/dev/null |
+      sed -nE 's/.*([o]ra|[d]b)_pmon_([[:alnum:]_$#]+).*/\2/p' |
+      grep -Ev '^ASM$' |
+      sort -u || true
+  args:
+    executable: /bin/bash
+  register: _orm_sid_discovery
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_sid_effective | length == 0
+
+- name: Oracle env | Publicar SIDs descobertos
+  ansible.builtin.set_fact:
+    _orm_sid_candidates: "{{ _orm_sid_discovery.stdout_lines | default([]) | map('trim') | reject('equalto', '') | list }}"
+  when: orm_sid_effective | length == 0
+
+- name: Oracle env | Validar descoberta automática do SID
+  ansible.builtin.assert:
+    that:
+      - _orm_sid_candidates | default([]) | length == 1
+    fail_msg: >-
+      Não foi possível determinar um único ORACLE_SID automaticamente no host {{ inventory_hostname }}.
+      SIDs encontrados: {{ _orm_sid_candidates | default([]) }}. Configure sid no host/profile.
+  when: orm_sid_effective | length == 0
+
+- name: Oracle env | Fixar SID descoberto
+  ansible.builtin.set_fact:
+    orm_sid_effective: "{{ _orm_sid_candidates | first }}"
+  when: orm_sid_effective | length == 0
+
+- name: Oracle env | Descobrir ORACLE_HOME via oratab
+  ansible.builtin.shell: |
+    F="/etc/oratab"
+    [ -f /var/opt/oracle/oratab ] && F="/var/opt/oracle/oratab"
+    [ -f "$F" ] || exit 0
+    awk -F: -v sid="{{ orm_sid_effective }}" '$1 == sid {print $2; exit}' "$F"
+  register: _orm_oracle_home_discovery
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_oracle_home_effective | length == 0
+
+- name: Oracle env | Fixar ORACLE_HOME descoberto
+  ansible.builtin.set_fact:
+    orm_oracle_home_effective: "{{ _orm_oracle_home_discovery.stdout | default('') | trim }}"
+  when: orm_oracle_home_effective | length == 0
+
+- name: Oracle env | Validar SID e ORACLE_HOME
+  ansible.builtin.assert:
+    that:
+      - orm_sid_effective | length > 0
+      - orm_oracle_home_effective | length > 0
+    fail_msg: >-
+      Ambiente Oracle incompleto no host {{ inventory_hostname }}.
+      SID='{{ orm_sid_effective }}', ORACLE_HOME='{{ orm_oracle_home_effective }}'.
+
+- name: Oracle env | Verificar executáveis necessários
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ orm_oracle_home_effective }}/bin/sqlplus"
+    - "{{ orm_oracle_home_effective }}/bin/{{ orm_datapump_binary_required | default('expdp') }}"
+  register: _orm_oracle_bins
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Oracle env | Validar executáveis necessários
+  ansible.builtin.assert:
+    that:
+      - _orm_oracle_bins.results | selectattr('stat.exists', 'equalto', true) | list | length == 2
+    fail_msg: >-
+      sqlplus/{{ orm_datapump_binary_required | default('expdp') }} não encontrados em
+      {{ orm_oracle_home_effective }}/bin no host {{ inventory_hostname }}.
+
+- name: Oracle env | Identificar se o banco é CDB
+  ansible.builtin.shell: |
+    unset ORACLE_PDB_SID
+    unset TWO_TASK
+    unset LOCAL
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<'SQL'
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off termout on
+    select 'ORM_CDB=' || upper(trim(cdb))
+      from v$database;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_cdb_check
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Oracle env | Publicar retorno da identificação CDB
+  ansible.builtin.set_fact:
+    _orm_cdb_lines: "{{ _orm_cdb_check.stdout_lines | default([]) | map('trim') | map('upper') | reject('equalto', '') | list }}"
+
+- name: Oracle env | Validar detecção do modo CDB
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          (_orm_cdb_lines | select('equalto', 'ORM_CDB=YES') | list | length)
+          +
+          (_orm_cdb_lines | select('equalto', 'ORM_CDB=NO') | list | length)
+        ) == 1
+    fail_msg: >-
+      Não foi possível determinar com segurança se o SID {{ orm_sid_effective }}
+      é CDB no host {{ inventory_hostname }}.
+      Retorno SQLPlus: {{ _orm_cdb_check.stdout | default('sem retorno') | trim }}.
+
+- name: Oracle env | Publicar modo CDB
+  ansible.builtin.set_fact:
+    orm_is_cdb: "{{ 'ORM_CDB=YES' in _orm_cdb_lines }}"
+
+- name: Oracle env | Validar coerência de PDB configurada
+  ansible.builtin.assert:
+    that:
+      - orm_is_cdb | bool
+    fail_msg: >-
+      O host {{ inventory_hostname }} possui PDB configurada ('{{ orm_pdb_effective }}'),
+      porém o SID {{ orm_sid_effective }} foi identificado como banco não-CDB.
+  when: orm_pdb_effective | length > 0
+
+- name: Oracle env | Resolver PDB pelo service_name quando configurado
+  ansible.builtin.shell: |
+    unset ORACLE_PDB_SID
+    unset TWO_TASK
+    unset LOCAL
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select distinct c.name
+      from v\$services s
+      join v\$containers c on c.con_id = s.con_id
+     where upper(s.name) = upper('{{ orm_service_name_effective }}')
+       and c.con_id > 2
+     order by c.name;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_pdb_by_service
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length == 0
+    - orm_service_name_effective | length > 0
+
+- name: Oracle env | Fixar PDB resolvida pelo service_name
+  ansible.builtin.set_fact:
+    orm_pdb_effective: "{{ (_orm_pdb_by_service.stdout_lines | default([]) | map('trim') | reject('equalto', '') | unique | list | first) | default('') }}"
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length == 0
+    - orm_service_name_effective | length > 0
+
+- name: Oracle env | Descobrir PDB dos schemas quando necessário
+  ansible.builtin.shell: |
+    unset ORACLE_PDB_SID
+    unset TWO_TASK
+    unset LOCAL
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select distinct c.name
+      from cdb_users u
+      join v\$containers c on c.con_id = u.con_id
+     where upper(u.username) in ({{ _orm_schema_sql_list }})
+       and c.con_id > 2
+       and c.open_mode = 'READ WRITE'
+     order by c.name;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_pdb_discovery
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length == 0
+
+- name: Oracle env | Publicar PDBs descobertas
+  ansible.builtin.set_fact:
+    _orm_pdb_candidates: "{{ _orm_pdb_discovery.stdout_lines | default([]) | map('trim') | reject('equalto', '') | unique | list }}"
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length == 0
+
+- name: Oracle env | Validar descoberta automática da PDB
+  ansible.builtin.assert:
+    that:
+      - _orm_pdb_candidates | default([]) | length == 1
+    fail_msg: >-
+      O host {{ inventory_hostname }} usa CDB e não foi possível determinar uma única PDB para
+      os schemas {{ orm_schemas }}. PDBs encontradas: {{ _orm_pdb_candidates | default([]) }}.
+      Configure pdb ou service_name no host/profile.
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length == 0
+
+- name: Oracle env | Fixar PDB descoberta
+  ansible.builtin.set_fact:
+    orm_pdb_effective: "{{ _orm_pdb_candidates | first }}"
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length == 0
+
+- name: Oracle env | Validar PDB configurada/descoberta
+  ansible.builtin.shell: |
+    unset ORACLE_PDB_SID
+    unset TWO_TASK
+    unset LOCAL
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off termout on
+    select case
+             when count(*) = 1 then 'OK'
+             else 'NOK'
+           end
+      from v\$pdbs
+     where upper(name) = upper('{{ orm_pdb_effective }}')
+       and open_mode = 'READ WRITE';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_pdb_check
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length > 0
+
+- name: Oracle env | Confirmar PDB disponível
+  ansible.builtin.assert:
+    that:
+      - "'OK' in (_orm_pdb_check.stdout_lines | default([]) | map('trim') | list)"
+    fail_msg: >-
+      PDB {{ orm_pdb_effective }} não encontrada ou não está READ WRITE
+      no host {{ inventory_hostname }}.
+      Retorno SQLPlus: {{ _orm_pdb_check.stdout | default('sem retorno') | trim }}
+  when:
+    - orm_is_cdb | bool
+    - orm_pdb_effective | length > 0
+
+- name: Oracle env | Consultar schemas no container efetivo
+  ansible.builtin.shell: |
+    unset TWO_TASK
+    unset LOCAL
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select username from dba_users
+     where upper(username) in ({{ _orm_schema_sql_list }})
+     order by username;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_schema_check
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Oracle env | Publicar schemas encontrados e ausentes
+  ansible.builtin.set_fact:
+    orm_schemas_found: "{{ _orm_schema_check.stdout_lines | default([]) | map('trim') | map('upper') | reject('equalto', '') | list }}"
+    orm_schemas_missing: "{{ orm_schemas | map('upper') | list | difference(_orm_schema_check.stdout_lines | default([]) | map('trim') | map('upper') | reject('equalto', '') | list) }}"
+
+- name: Oracle env | Validar schemas no container efetivo
+  ansible.builtin.assert:
+    that:
+      - orm_schemas_missing | length == 0
+    fail_msg: >-
+      Schema(s) não encontrado(s) no host {{ inventory_hostname }}, SID={{ orm_sid_effective }},
+      PDB={{ orm_pdb_effective | default('') }}: {{ orm_schemas_missing | join(', ') }}.
+  when: orm_require_existing_schemas | default(true) | bool

@@ -1,0 +1,185 @@
+---
+- name: Restore validation | Verificar log do impdp
+  ansible.builtin.stat:
+    path: "{{ orm_impdp_log_file }}"
+  register: _orm_impdp_log_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Restore validation | Registrar falha quando log do impdp não existe
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar log do impdp"
+    orm_host_error_msg: "Log do impdp não encontrado ou vazio: {{ orm_impdp_log_file }}."
+  when:
+    - not (_orm_impdp_log_stat.stat.exists | default(false) and (_orm_impdp_log_stat.stat.size | default(0) | int > 0))
+
+- name: Restore validation | Consultar schemas após import
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select username from dba_users where upper(username) in ({{ _orm_schema_sql_list }}) order by username;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_schema_after_restore
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_restore_validate_schemas | bool
+
+- name: Restore validation | Publicar schemas ausentes após import
+  ansible.builtin.set_fact:
+    orm_schemas_after_restore: "{{ _orm_schema_after_restore.stdout_lines | default([]) | map('trim') | map('upper') | reject('equalto', '') | list }}"
+    orm_schemas_missing_after_restore: "{{ orm_schemas | map('upper') | list | difference(_orm_schema_after_restore.stdout_lines | default([]) | map('trim') | map('upper') | reject('equalto', '') | list) }}"
+  when: orm_restore_validate_schemas | bool
+
+- name: Restore validation | Registrar falha de schemas ausentes
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar schemas após import"
+    orm_host_error_msg: "Schema(s) ausente(s) após impdp: {{ orm_schemas_missing_after_restore | join(', ') }}."
+  when:
+    - orm_restore_validate_schemas | bool
+    - orm_schemas_missing_after_restore | default([]) | length > 0
+
+- name: Restore validation | Consultar status das contas
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set pages 200 lines 200 feedback off verify off
+    column username format a30
+    column account_status format a35
+    select username, account_status from dba_users where upper(username) in ({{ _orm_schema_sql_list }}) order by username;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_account_status_after
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Restore validation | Verificar contas abertas quando unlock está habilitado
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*) from dba_users
+     where upper(username) in ({{ _orm_schema_sql_list }})
+       and account_status <> 'OPEN';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_accounts_not_open
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_restore_unlock_users | bool
+
+- name: Restore validation | Registrar falha quando conta não está OPEN
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar status das contas"
+    orm_host_error_msg: >-
+      {{ _orm_accounts_not_open.stdout | trim }} conta(s) não estão com ACCOUNT_STATUS=OPEN após o restore.
+  when:
+    - orm_restore_unlock_users | bool
+    - _orm_accounts_not_open.stdout | default('0') | trim | int > 0
+
+- name: Restore validation | Contar objetos inválidos
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*) from dba_objects
+     where upper(owner) in ({{ _orm_schema_sql_list }})
+       and status = 'INVALID';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_invalid_objects
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_restore_validate_invalid_objects | bool
+
+- name: Restore validation | Publicar quantidade de objetos inválidos
+  ansible.builtin.set_fact:
+    orm_invalid_objects_count: "{{ _orm_invalid_objects.stdout | default('0') | trim | int }}"
+  when: orm_restore_validate_invalid_objects | bool
+
+- name: Restore validation | Registrar falha por objetos inválidos
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar objetos inválidos"
+    orm_host_error_msg: "Foram encontrados {{ orm_invalid_objects_count }} objetos INVALID após o restore."
+  when:
+    - orm_restore_validate_invalid_objects | bool
+    - orm_restore_fail_on_invalid_objects | bool
+    - orm_invalid_objects_count | int > 0
+
+- name: Restore validation | Registrar aviso por objetos inválidos
+  ansible.builtin.set_fact:
+    orm_host_warning: true
+    orm_restore_invalid_objects_warning: "Foram encontrados {{ orm_invalid_objects_count }} objetos INVALID após o restore."
+  when:
+    - orm_restore_validate_invalid_objects | bool
+    - not (orm_restore_fail_on_invalid_objects | bool)
+    - orm_invalid_objects_count | int > 0
+
+- name: Restore validation | Gravar log de validação
+  ansible.builtin.copy:
+    dest: "{{ orm_validation_log_file }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+    content: |
+      Oracle Manager - Validação pós-restore
+      Host: {{ inventory_hostname }}
+      Ambiente: {{ orm_env }}
+      SID: {{ orm_sid_effective }}
+      PDB: {{ orm_pdb_effective | default('') }}
+      Schemas esperados: {{ orm_schemas | join(', ') }}
+      Schemas encontrados: {{ orm_schemas_after_restore | default([]) | join(', ') }}
+      Objetos INVALID: {{ orm_invalid_objects_count | default('não verificado') }}
+
+      Status das contas:
+      {{ _orm_account_status_after.stdout | default('') }}
+  become: true

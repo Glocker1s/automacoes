@@ -1,0 +1,246 @@
+---
+cm:
+  oracle_manager:
+    databases:
+      riskmanager:
+        description: "PRA Risk Manager"
+
+        # Primeira versão trabalha somente com schema completo.
+        schemas:
+          - "PRA_RISKMANAGER"
+
+        # Ambiente padrão de origem.
+        default_source_env: "prd"
+
+        # Destinos usados quando orm_action=sync e nenhum destino
+        # for informado explicitamente no Survey.
+        default_sync_targets:
+          - "tu"
+          - "ti"
+
+        # Para restore puro, nenhum destino é assumido por padrão.
+        default_restore_targets: []
+
+        # Configurações Oracle comuns ao profile.
+        # Os mesmos parâmetros também podem ser sobrescritos individualmente
+        # em cada host dentro de hosts_env_sync.
+        oracle:
+          os_user: "oracle"
+          os_group: "oinstall"
+          directory_name: "DB_MANAGER"
+          sid: ""
+          pdb: ""
+          service_name: ""
+          oracle_home: ""
+
+        # Configurações de backup.
+        backup:
+          # Diretório físico local onde o expdp gera dump/log/parfile.
+          root_dir: "/backup/oracle_manager"
+
+          # No Oracle Database Free 23ai do lab,
+          # COMPRESSION=ALL não é suportado.
+          compression: "none"
+
+          # A V1 trabalha com um único arquivo .dmp.
+          parallel: 1
+
+          # Objetos excluídos do Data Pump Export.
+          exclude:
+            - "STATISTICS"
+
+          # Parâmetros adicionais opcionais para expdp.
+          extra_args: ""
+
+          # Valida existência e tamanho dos artefatos gerados.
+          validate_dump: true
+
+        # Configurações de restore.
+        restore:
+          # Diretório físico usado no host destino para receber o dump
+          # e armazenar artefatos temporários do restore.
+          root_dir: "/backup/oracle_manager_restore"
+
+          # A V1 trabalha com um único arquivo .dmp.
+          parallel: 1
+
+          # Parâmetros adicionais opcionais para impdp.
+          extra_args: ""
+
+          # Preservação de grants do schema existente no destino.
+          capture_grants: true
+          apply_grants: true
+
+          # Controle de conexões antes da fase destrutiva.
+          kill_sessions: true
+          lock_users: true
+
+          # Remove o usuário/schema atual antes do impdp.
+          drop_users: true
+
+          # Desbloqueia o usuário após import e ajuste de senha.
+          unlock_users: true
+
+          # Se false, erro ao reaplicar grant gera aviso.
+          # Se true, o restore é marcado como falha.
+          fail_on_grant_error: false
+
+          # Exige que a senha do schema destino esteja disponível
+          # antes de iniciar DROP USER.
+          require_password: true
+
+          # Espera por sessões remanescentes após o kill.
+          session_wait_retries: 12
+          session_wait_delay: 5
+
+          # Tempo máximo do impdp e intervalo de acompanhamento.
+          async_timeout: 14400
+          async_poll: 15
+
+          # Validações pós-restore.
+          validate_schemas: true
+          validate_invalid_objects: true
+
+          # Se false, objetos INVALID geram aviso.
+          # Se true, tornam o restore uma falha.
+          fail_on_invalid_objects: false
+
+        # Senhas dos schemas.
+        #
+        # password_var informa o nome da variável secreta que deve ser
+        # injetada pelo AAP.
+        #
+        # Essa senha não é usada para a conexão administrativa do Manager.
+        # A automação usa / as sysdba.
+        #
+        # Ela é aplicada após o impdp:
+        # ALTER USER ... IDENTIFIED BY ... ACCOUNT UNLOCK;
+        users:
+          PRA_RISKMANAGER:
+            password_var: "oracle_pra_riskmanager_password"
+
+        # Validações específicas adicionais do profile.
+        # Podem receber SQLs customizados futuramente.
+        validations:
+          enabled: true
+          queries:
+            - "queries/riskmanager_lab.sql"
+
+        # Mapeamento de ambientes e hosts.
+        #
+        # Mesmo quando uma propriedade é igual ao bloco oracle acima,
+        # ela está explicitada aqui para o arquivo servir como exemplo
+        # completo de configuração por host.
+        hosts_env_sync:
+
+          prd:
+            - name: "prd-riskmanager-01"
+              ansible_host: "192.168.122.252"
+
+              # Identificação Oracle.
+              sid: ""
+              pdb: ""
+              service_name: ""
+              oracle_home: ""
+
+              # Usuário/grupo do SO usados para execução Oracle.
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              # Nome do objeto DIRECTORY dentro do Oracle.
+              directory_name: "DB_MANAGER"
+
+              # Overrides locais dos diretórios.
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              # Marca este host como possível origem de backup/sync.
+              source: true
+
+              # Host habilitado para execução.
+              enabled: true
+
+          tu:
+            - name: "tu-riskmanager-01"
+              ansible_host: "192.168.122.67"
+
+              sid: ""
+              pdb: ""
+              service_name: ""
+              oracle_home: ""
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              source: true
+              enabled: true
+
+          ti:
+            - name: "ti-riskmanager-01"
+              ansible_host: "192.168.122.163"
+
+              sid: "FREE"
+              pdb: "FREEPDB1"
+              service_name: ""
+              oracle_home: "/opt/oracle/product/23ai/dbhomeFree"
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              source: true
+              enabled: true
+
+          th:
+            - name: "th-riskmanager-01"
+              ansible_host: "PREENCHER_HOST_TH"
+
+              # Exemplo de host com configuração própria.
+              sid: "PREENCHER_SID_TH"
+              pdb: "PREENCHER_PDB_TH"
+              service_name: "PREENCHER_SERVICE_TH"
+              oracle_home: "/u01/app/oracle/product/19c/dbhome_1"
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              source: false
+              enabled: false
+
+          fix:
+            - name: "fix-riskmanager-01"
+              ansible_host: "PREENCHER_HOST_FIX"
+
+              # Exemplo baseado no procedimento original,
+              # onde FIX utilizava outro SID.
+              sid: "AGRFIX1"
+              pdb: "PREENCHER_PDB_FIX"
+              service_name: "PREENCHER_SERVICE_FIX"
+              oracle_home: "/u01/app/oracle/product/19c/dbhome_1"
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              # Exemplo de override caso o filesystem do ambiente
+              # seja diferente dos demais.
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/u01/app/oracle/dump"
+
+              source: false
+              enabled: false
