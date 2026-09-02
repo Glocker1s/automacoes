@@ -8,6 +8,22 @@ orm_action: "backup"
 orm_profile_key: ""
 orm_execution_reason: ""
 
+
+#ALTER USER
+
+# Senha de restore/sync recebida em runtime
+orm_restore_password_default_var: "orm_password"
+orm_restore_password_env_vars: {}
+
+# Política padrão da senha
+orm_restore_password_min_length: 12
+orm_restore_password_require_upper: true
+orm_restore_password_require_lower: true
+orm_restore_password_require_digit: true
+
+# Segurança: por padrão não aplica uma única senha a vários schemas
+orm_restore_password_allow_multi_schema: false
+
 # ============================================================================
 # SELEÇÃO DE ORIGEM / DESTINO
 # ============================================================================
