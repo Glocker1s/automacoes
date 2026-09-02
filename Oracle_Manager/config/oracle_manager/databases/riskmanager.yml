@@ -105,19 +105,8 @@ cm:
           # Se true, tornam o restore uma falha.
           fail_on_invalid_objects: false
 
-        # Senhas dos schemas.
-        #
-        # password_var informa o nome da variável secreta que deve ser
-        # injetada pelo AAP.
-        #
-        # Essa senha não é usada para a conexão administrativa do Manager.
-        # A automação usa / as sysdba.
-        #
-        # Ela é aplicada após o impdp:
-        # ALTER USER ... IDENTIFIED BY ... ACCOUNT UNLOCK;
-        users:
-          PRA_RISKMANAGER:
-            password_var: "oracle_pra_riskmanager_password"
+          password:
+            default_var: "orm_password"
 
         # Validações específicas adicionais do profile.
         # Podem receber SQLs customizados futuramente.
