@@ -1,184 +1,216 @@
 ---
 - name: DBLink | Resolver configuração
   ansible.builtin.set_fact:
+    pgm_dblink_enabled: "{{ (pgm_db_cfg.dblink | default({})).get('enabled', false) | bool }}"
+    pgm_dblink_run_on_envs: "{{ (pgm_db_cfg.dblink | default({})).get('run_on_envs', []) | map('lower') | list }}"
     pgm_dblink_servers: "{{ (pgm_db_cfg.dblink | default({})).get('servers', []) }}"
     pgm_dblink_user_mappings: "{{ (pgm_db_cfg.dblink | default({})).get('user_mappings', []) }}"
     pgm_dblink_connections: "{{ (pgm_db_cfg.dblink | default({})).get('connections', []) }}"
 
-- name: DBLink | Resolver nomes dos servers
+- name: DBLink | Resolver execução no ambiente
   ansible.builtin.set_fact:
-    pgm_dblink_server_names: "{{ pgm_dblink_servers | map(attribute='name') | list }}"
+    pgm_dblink_should_run: >-
+      {{
+        (pgm_dblink_enabled | bool)
+        and
+        (
+          (pgm_dblink_run_on_envs | length == 0)
+          or
+          ((pgm_env | lower) in pgm_dblink_run_on_envs)
+        )
+      }}
 
-- name: DBLink | Validar Foreign Servers
-  ansible.builtin.assert:
-    that:
-      - item.name is defined
-      - item.name | string | trim | length > 0
-      - item.name is match('^[A-Za-z0-9_.-]+$')
-      - item.environments is defined
-      - (pgm_env | lower) in item.environments
-      - item.environments[pgm_env | lower] is mapping
-    fail_msg: >-
-      Configuração inválida para Foreign Server
-      {{ item.name | default('sem nome') }} no ambiente {{ pgm_env }}.
-  loop: "{{ pgm_dblink_servers }}"
-  loop_control:
-    label: "{{ item.name | default('sem nome') }}"
-
-- name: DBLink | Validar User Mappings
-  ansible.builtin.assert:
-    that:
-      - item.server_name is defined
-      - item.server_name in pgm_dblink_server_names
-      - item.local_user is defined
-      - item.local_user | string | trim | length > 0
-      - item.user_var is defined
-      - item.password_var is defined
-      - lookup('ansible.builtin.vars', item.user_var, default='') | string | length > 0
-      - lookup('ansible.builtin.vars', item.password_var, default='') | string | length > 0
-    fail_msg: >-
-      User Mapping inválido para
-      {{ item.local_user | default('usuário não informado') }}
-      -> {{ item.server_name | default('server não informado') }}.
-  loop: "{{ pgm_dblink_user_mappings }}"
-  loop_control:
-    label: "{{ item.local_user | default('?') }} -> {{ item.server_name | default('?') }}"
-
-- name: DBLink | Validar conexões nomeadas
-  ansible.builtin.assert:
-    that:
-      - item.name is defined
-      - item.name | string | trim | length > 0
-      - item.name is match('^[A-Za-z0-9_.-]+$')
-      - item.server_name is defined
-      - item.server_name in pgm_dblink_server_names
-    fail_msg: >-
-      Conexão DBLink inválida:
-      {{ item.name | default('sem nome') }}
-      -> {{ item.server_name | default('server não informado') }}.
-  loop: "{{ pgm_dblink_connections }}"
-  loop_control:
-    label: "{{ item.name | default('?') }} -> {{ item.server_name | default('?') }}"
-
-- name: DBLink | Configurar Foreign Servers
-  ansible.builtin.shell: |
-    set -o pipefail
-
-    SERVER_NAME="{{ item.name }}"
-    SERVER_HOST="{{ item.environments[pgm_env | lower].host | default('') }}"
-    SERVER_PORT="{{ item.environments[pgm_env | lower].port | default('') }}"
-    SERVER_DBNAME="{{ item.environments[pgm_env | lower].dbname | default('') }}"
-
-    echo "" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] Configurando Foreign Server ${SERVER_NAME}" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] Ambiente: {{ pgm_env }}" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] Host: ${SERVER_HOST}" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] Port: ${SERVER_PORT}" >> "{{ pgm_restore_log_file }}"
-    echo "[INFO] DBName: ${SERVER_DBNAME}" >> "{{ pgm_restore_log_file }}"
-
-    psql -X -w -v ON_ERROR_STOP=1 \
-      -v server_name="${SERVER_NAME}" \
-      -v server_host="${SERVER_HOST}" \
-      -v server_port="${SERVER_PORT}" \
-      -v server_dbname="${SERVER_DBNAME}" \
-      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
-      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
-      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
-      -d "{{ pgm_restore_target_db }}" <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
-    ALTER SERVER :"server_name"
-      OPTIONS (
-        SET dbname :'server_dbname',
-        SET host :'server_host',
-        SET port :'server_port'
-      );
-    SQL
-
-    rc=$?
-    echo "[INFO] Configurar Foreign Server ${SERVER_NAME} rc=${rc}" >> "{{ pgm_restore_log_file }}"
-    exit ${rc}
-  args:
-    executable: /bin/bash
-  environment:
-    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
-    PGPASSWORD: "{{ pgm_db_password | default('') }}"
-  loop: "{{ pgm_dblink_servers }}"
-  loop_control:
-    label: "{{ item.name }}"
-  register: _pgm_dblink_servers_exec
-  failed_when: false
-  changed_when: true
-  become: true
-  become_user: root
-
-- name: DBLink | Registrar falha em Foreign Server
-  ansible.builtin.set_fact:
-    pgm_host_failed: true
-    pgm_host_failed_task: "Configurar Foreign Servers"
-    pgm_host_error_msg: "Falha ao configurar um ou mais Foreign Servers. Verifique {{ pgm_restore_log_file }}."
+- name: DBLink | Informar ambiente fora do escopo
+  ansible.builtin.debug:
+    msg: >-
+      DBLink habilitado, mas não configurado para o ambiente {{ pgm_env }}.
+      Etapa ignorada.
   when:
-    - _pgm_dblink_servers_exec is defined
-    - _pgm_dblink_servers_exec.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+    - pgm_dblink_enabled | bool
+    - not (pgm_dblink_should_run | bool)
 
-- name: DBLink | Configurar User Mappings
-  ansible.builtin.shell: |
-    set -o pipefail
-
-    SERVER_NAME="{{ item.server_name }}"
-    LOCAL_USER="{{ item.local_user }}"
-    REMOTE_USER="${PGM_REMOTE_USER}"
-    REMOTE_PASSWORD="${PGM_REMOTE_PASSWORD}"
-
-    echo "[INFO] Configurando User Mapping ${LOCAL_USER} -> ${SERVER_NAME}" >> "{{ pgm_restore_log_file }}"
-
-    psql -X -w -v ON_ERROR_STOP=1 \
-      -v server_name="${SERVER_NAME}" \
-      -v local_user="${LOCAL_USER}" \
-      -v remote_user="${REMOTE_USER}" \
-      -v remote_password="${REMOTE_PASSWORD}" \
-      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
-      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
-      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
-      -d "{{ pgm_restore_target_db }}" <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
-    DROP USER MAPPING IF EXISTS
-      FOR :"local_user"
-      SERVER :"server_name";
-
-    CREATE USER MAPPING
-      FOR :"local_user"
-      SERVER :"server_name"
-      OPTIONS (
-        user :'remote_user',
-        password :'remote_password'
-      );
-    SQL
-
-    rc=$?
-    echo "[INFO] Configurar User Mapping ${LOCAL_USER} -> ${SERVER_NAME} rc=${rc}" >> "{{ pgm_restore_log_file }}"
-    exit ${rc}
-  args:
-    executable: /bin/bash
-  environment:
-    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
-    PGPASSWORD: "{{ pgm_db_password | default('') }}"
-    PGM_REMOTE_USER: "{{ lookup('ansible.builtin.vars', item.user_var, default='') }}"
-    PGM_REMOTE_PASSWORD: "{{ lookup('ansible.builtin.vars', item.password_var, default='') }}"
-  loop: "{{ pgm_dblink_user_mappings }}"
-  loop_control:
-    label: "{{ item.local_user }} -> {{ item.server_name }}"
-  register: _pgm_dblink_mappings_exec
-  failed_when: false
-  changed_when: true
-  become: true
-  become_user: root
-  no_log: true
+- name: DBLink | Processar configuração
   when:
-    - not (pgm_host_failed | bool)
+    - pgm_dblink_should_run | bool
+  block:
 
-- name: DBLink | Registrar falha em User Mapping
-  ansible.builtin.set_fact:
-    pgm_host_failed: true
-    pgm_host_failed_task: "Configurar User Mappings"
-    pgm_host_error_msg: "Falha ao configurar um ou mais User Mappings. Verifique {{ pgm_restore_log_file }}."
-  when:
-    - _pgm_dblink_mappings_exec is defined
-    - _pgm_dblink_mappings_exec.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+    - name: DBLink | Resolver nomes dos servers
+      ansible.builtin.set_fact:
+        pgm_dblink_server_names: "{{ pgm_dblink_servers | map(attribute='name') | list }}"
+
+    - name: DBLink | Validar Foreign Servers
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.name | string | trim | length > 0
+          - item.name is match('^[A-Za-z0-9_.-]+$')
+          - item.environments is defined
+          - (pgm_env | lower) in item.environments
+          - item.environments[pgm_env | lower] is mapping
+          - item.environments[pgm_env | lower].host | default('') | string | trim | length > 0
+          - item.environments[pgm_env | lower].port | default('') | string | trim | length > 0
+          - item.environments[pgm_env | lower].dbname | default('') | string | trim | length > 0
+        fail_msg: >-
+          Configuração inválida para Foreign Server
+          {{ item.name | default('sem nome') }} no ambiente {{ pgm_env }}.
+      loop: "{{ pgm_dblink_servers }}"
+      loop_control:
+        label: "{{ item.name | default('sem nome') }}"
+
+    - name: DBLink | Validar User Mappings
+      ansible.builtin.assert:
+        that:
+          - item.server_name is defined
+          - item.server_name in pgm_dblink_server_names
+          - item.local_user is defined
+          - item.local_user | string | trim | length > 0
+          - item.user_var is defined
+          - item.password_var is defined
+          - lookup('ansible.builtin.vars', item.user_var, default='') | string | length > 0
+          - lookup('ansible.builtin.vars', item.password_var, default='') | string | length > 0
+        fail_msg: >-
+          User Mapping inválido para
+          {{ item.local_user | default('usuário não informado') }}
+          -> {{ item.server_name | default('server não informado') }}.
+      loop: "{{ pgm_dblink_user_mappings }}"
+      loop_control:
+        label: "{{ item.local_user | default('?') }} -> {{ item.server_name | default('?') }}"
+
+    - name: DBLink | Validar conexões nomeadas
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.name | string | trim | length > 0
+          - item.name is match('^[A-Za-z0-9_.-]+$')
+          - item.server_name is defined
+          - item.server_name in pgm_dblink_server_names
+        fail_msg: >-
+          Conexão DBLink inválida:
+          {{ item.name | default('sem nome') }}
+          -> {{ item.server_name | default('server não informado') }}.
+      loop: "{{ pgm_dblink_connections }}"
+      loop_control:
+        label: "{{ item.name | default('?') }} -> {{ item.server_name | default('?') }}"
+
+    - name: DBLink | Configurar Foreign Servers
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SERVER_NAME="{{ item.name }}"
+        SERVER_HOST="{{ item.environments[pgm_env | lower].host | default('') }}"
+        SERVER_PORT="{{ item.environments[pgm_env | lower].port | default('') }}"
+        SERVER_DBNAME="{{ item.environments[pgm_env | lower].dbname | default('') }}"
+
+        echo "" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Configurando Foreign Server ${SERVER_NAME}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Ambiente: {{ pgm_env }}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Host: ${SERVER_HOST}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Port: ${SERVER_PORT}" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] DBName: ${SERVER_DBNAME}" >> "{{ pgm_restore_log_file }}"
+
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -v server_name="${SERVER_NAME}" \
+          -v server_host="${SERVER_HOST}" \
+          -v server_port="${SERVER_PORT}" \
+          -v server_dbname="${SERVER_DBNAME}" \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d "{{ pgm_restore_target_db }}" <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
+        ALTER SERVER :"server_name"
+          OPTIONS (
+            SET dbname :'server_dbname',
+            SET host :'server_host',
+            SET port :'server_port'
+          );
+        SQL
+
+        rc=$?
+        echo "[INFO] Configurar Foreign Server ${SERVER_NAME} rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+      loop: "{{ pgm_dblink_servers }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _pgm_dblink_servers_exec
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+
+    - name: DBLink | Registrar falha em Foreign Server
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Configurar Foreign Servers"
+        pgm_host_error_msg: "Falha ao configurar um ou mais Foreign Servers. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_dblink_servers_exec is defined
+        - _pgm_dblink_servers_exec.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+
+    - name: DBLink | Configurar User Mappings
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        SERVER_NAME="{{ item.server_name }}"
+        LOCAL_USER="{{ item.local_user }}"
+        REMOTE_USER="${PGM_REMOTE_USER}"
+        REMOTE_PASSWORD="${PGM_REMOTE_PASSWORD}"
+
+        echo "[INFO] Configurando User Mapping ${LOCAL_USER} -> ${SERVER_NAME}" >> "{{ pgm_restore_log_file }}"
+
+        psql -X -w -v ON_ERROR_STOP=1 \
+          -v server_name="${SERVER_NAME}" \
+          -v local_user="${LOCAL_USER}" \
+          -v remote_user="${REMOTE_USER}" \
+          -v remote_password="${REMOTE_PASSWORD}" \
+          -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+          -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+          -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+          -d "{{ pgm_restore_target_db }}" <<'SQL' >> "{{ pgm_restore_log_file }}" 2>&1
+        DROP USER MAPPING IF EXISTS
+          FOR :"local_user"
+          SERVER :"server_name";
+
+        CREATE USER MAPPING
+          FOR :"local_user"
+          SERVER :"server_name"
+          OPTIONS (
+            user :'remote_user',
+            password :'remote_password'
+          );
+        SQL
+
+        rc=$?
+        echo "[INFO] Configurar User Mapping ${LOCAL_USER} -> ${SERVER_NAME} rc=${rc}" >> "{{ pgm_restore_log_file }}"
+        exit ${rc}
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+        PGPASSWORD: "{{ pgm_db_password | default('') }}"
+        PGM_REMOTE_USER: "{{ lookup('ansible.builtin.vars', item.user_var, default='') }}"
+        PGM_REMOTE_PASSWORD: "{{ lookup('ansible.builtin.vars', item.password_var, default='') }}"
+      loop: "{{ pgm_dblink_user_mappings }}"
+      loop_control:
+        label: "{{ item.local_user }} -> {{ item.server_name }}"
+      register: _pgm_dblink_mappings_exec
+      failed_when: false
+      changed_when: true
+      become: true
+      become_user: root
+      no_log: true
+      when:
+        - not (pgm_host_failed | bool)
+
+    - name: DBLink | Registrar falha em User Mapping
+      ansible.builtin.set_fact:
+        pgm_host_failed: true
+        pgm_host_failed_task: "Configurar User Mappings"
+        pgm_host_error_msg: "Falha ao configurar um ou mais User Mappings. Verifique {{ pgm_restore_log_file }}."
+      when:
+        - _pgm_dblink_mappings_exec is defined
+        - _pgm_dblink_mappings_exec.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
