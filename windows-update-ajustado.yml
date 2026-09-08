@@ -1,0 +1,179 @@
+- name: Cria um inventário dinamicamente com a máquina selecionada
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+  - name: Adiciona a máquina ao grupo "to_be_updated"
+    ansible.builtin.add_host:
+      name: '{{ vm_fqdn | trim }}'
+      groups: to_be_updated
+
+- name: Atualiza o Windows através da ISO
+  hosts: to_be_updated
+  become: true
+  become_method: enable
+  gather_facts: false
+
+  vars:
+    win_next_version: 2025
+    win_update_copy_iso: false
+    win_update_iso_path: '\\rjowinprd004.agorasenior.corp\ISOs\Microsoft\Win2025.iso'
+    win_update_info_path: 'C:\Temp\network_config'
+    win_update_image_index:
+      ServerStandard: 2
+      ServerDatacenter: 4
+
+  tasks:
+
+  - block:
+
+    - name: A máquina pode estar reinicializando, esperar no máximo 30 minutos
+      ansible.builtin.wait_for_connection:
+        sleep: 5
+        timeout: 1800
+
+    - name: Verifica se o Ansible consegue se conectar na máquina
+      ansible.builtin.win_ping:
+      ignore_unreachable: true
+      register: win_ping
+
+    - name: Falha a playbook caso a máquina não tenha respondido
+      ansible.builtin.fail:
+        msg: '{{ win_ping.msg }}'
+      when: '"unreachable" in win_ping'
+
+    - name: Cria o diretório para salvar os resultados dos comandos a seguir
+      ansible.builtin.win_file:
+        path: '{{ win_update_info_path }}'
+        state: directory
+
+    - name: Extrai informações do Windows antes da atualização para comparação
+      ansible.builtin.win_shell: '{{ item }}'
+      args:
+        chdir: '{{ win_update_info_path }}'
+      loop:
+      - ipconfig /all | tee -filepath "$(hostname).txt"
+      - route print | tee -append -filepath "$(hostname).txt"
+      - wmic logicaldisk get deviceid,volumename,description,size,filesystem,freespace,volumeserialnumber | tee -filepath "$(hostname)_disk.txt"
+      - netsh -c interface dump | tee -filepath "$(hostname)_net.txt"
+      register: win_infos
+
+    - name: Copia a imagem para a máquina local
+      ansible.builtin.win_copy:
+        src: '{{ win_update_iso_path }}'
+        dest: C:\Windows\Temp\win.iso
+        remote_src: true
+      when: win_update_copy_iso|bool == true
+
+    - name: Garante que a ISO esteja montada
+      community.windows.win_disk_image:
+        image_path: '{{ win_update_iso_path if win_update_copy_iso|bool == false else "C:\Windows\Temp\win.iso" }}'
+        state: present
+      register: win_update_iso_out
+
+    - name: Extrai a edição do Windows
+      ansible.builtin.win_shell: Get-WindowsEdition -Online
+      register: win_update_edition
+
+    - name: Inicia o processo de atualização (setup.exe)
+      ansible.windows.win_shell: >-
+        {{ win_update_iso_out.mount_paths[0] }}\setup.exe
+        /Auto upgrade
+        /EULA accept
+        /DynamicUpdate disable
+        /Compat ignorewarning
+        /DiagnosticPrompt Disable
+        /CopyLogs C:\Temp\windows-upgrade-logs.zip
+        /ImageIndex {{ win_update_image_index[win_update_edition.stdout | regex_search("ServerStandard|ServerDatacenter")] }}
+      ignore_unreachable: true
+      ignore_errors: true
+      register: setup_output
+
+    - name: Falha a playbook caso o setup retorne um erro inesperado
+      ansible.builtin.fail:
+        msg: '{{ setup_output.msg | default("Um erro aconteceu ao iniciar o Windows Setup.") }}'
+      when:
+      - setup_output.failed | default(false)
+      - "'input parameter' not in (setup_output.msg | default(''))"
+      - "'Connection refused' not in (setup_output.msg | default(''))"
+      - "'Read timed out' not in (setup_output.msg | default(''))"
+      - "'Connection reset' not in (setup_output.msg | default(''))"
+
+    - name: Espera o WinRM ficar indisponível durante o reinício
+      ansible.builtin.wait_for:
+        host: '{{ inventory_hostname }}'
+        port: '{{ ansible_port | default(5985) }}'
+        state: stopped
+        connect_timeout: 5
+        sleep: 5
+        timeout: 3600
+      delegate_to: localhost
+      become: false
+      when: >-
+        not (
+          setup_output.failed | default(false)
+          and (
+            'Connection refused' in (setup_output.msg | default(''))
+            or 'Read timed out' in (setup_output.msg | default(''))
+            or 'Connection reset' in (setup_output.msg | default(''))
+          )
+        )
+
+    - name: Tenta reestabelecer a conexão após a atualização
+      ansible.builtin.wait_for_connection:
+        delay: 60
+        sleep: 10
+        timeout: 10800
+
+    - name: Valida a versão do Windows após a atualização
+      ansible.windows.win_shell: (Get-WmiObject -class Win32_OperatingSystem).Caption
+      register: win_version_after
+      changed_when: false
+
+    - name: Falha a playbook caso a versão esperada não tenha sido instalada
+      ansible.builtin.fail:
+        msg: >-
+          A atualização não foi concluída. Versão esperada: {{ win_next_version }}.
+          Versão encontrada: {{ win_version_after.stdout | trim }}.
+      when: (win_next_version | string) not in win_version_after.stdout
+
+    - name: Remove a ISO caso tenha sido copiada
+      ansible.builtin.win_file:
+        path: C:\Windows\Temp\win.iso
+        state: absent
+      when: win_update_copy_iso | bool
+
+    - name: Inclui tarefas posteriores à atualização
+      ansible.builtin.import_tasks: windows-update-wsus.yml
+
+    - name: Define o título e corpo do email
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: 'Ansible - Windows Update - Job #{{ awx_job_id }} - {{ awx_job_template_name }}'
+          send_mail_body: |
+            O windows {{ inventory_hostname }} foi atualizado com sucesso para {{ win_version_after.stdout | trim }}!
+            {% for r in win_infos.results %}
+            <p><b>{{ r.cmd }}</b></p>
+            <pre>{{ r.stdout }}</pre>
+            {% endfor %}
+
+    rescue:
+
+    - name: Define o título e corpo do email de erro
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: 'Ansible - Windows Update - Job #{{ awx_job_id }} - {{ awx_job_template_name }}'
+          send_mail_body: |
+            <p>A atualização da máquina <b>{{ inventory_hostname }}</b> falhou.</p>
+            <p><b>Tarefa que apresentou erro:</b> {{ ansible_failed_task.name | default('Não identificada') }}</p>
+            <p><b>Mensagem de erro:</b></p>
+            <pre>{{ ansible_failed_result.msg | default('Erro não identificado') }}</pre>
+            {% if win_version_after is defined %}
+            <p><b>Versão encontrada após o processo:</b></p>
+            <pre>{{ win_version_after.stdout | default('Não foi possível identificar a versão') | trim }}</pre>
+            {% endif %}
+
+    - name: Força a falha da playbook com o erro anterior
+      ansible.builtin.fail:
+        msg: '{{ ansible_failed_result.msg | default("A atualização do Windows falhou. Consulte os logs do job e do Windows Setup.") }}'
