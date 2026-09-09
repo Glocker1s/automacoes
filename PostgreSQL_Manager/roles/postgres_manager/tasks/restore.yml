@@ -525,22 +525,100 @@
 
     - name: Masking | Resolver configuração
       ansible.builtin.set_fact:
-        pgm_masking_enabled: "{{ pgm_db_cfg.masking.enabled | default(pgm_masking_enabled_default) | bool }}"
-        pgm_masking_fail_on_error: "{{ pgm_db_cfg.masking.fail_on_error | default(pgm_masking_fail_on_error_default) | bool }}"
-        pgm_masking_run_on_envs: "{{ pgm_db_cfg.masking.run_on_envs | default([]) | map('string') | map('lower') | list }}"
-        pgm_masking_protected_envs: "{{ pgm_db_cfg.masking.protected_envs | default(pgm_masking_protected_envs_default) | map('string') | map('lower') | list }}"
-        pgm_masking_scripts: "{{ pgm_db_cfg.masking.scripts | default([]) }}"
+        pgm_masking_enabled: >-
+          {{
+            (pgm_db_cfg.masking | default({}))
+            .get('enabled', pgm_masking_enabled_default)
+            | bool
+          }}
+        pgm_apply_masking_bool: >-
+          {{
+            (pgm_apply_masking | default('sim') | string | lower | trim)
+            in ['sim', 's', 'yes', 'true', '1']
+          }}
+        pgm_masking_fail_on_error: >-
+          {{
+            (pgm_db_cfg.masking | default({}))
+            .get('fail_on_error', pgm_masking_fail_on_error_default)
+            | bool
+          }}
+        pgm_masking_run_on_envs: >-
+          {{
+            (pgm_db_cfg.masking | default({}))
+            .get('run_on_envs', [])
+            | map('string')
+            | map('lower')
+            | list
+          }}
+        pgm_masking_protected_envs: >-
+          {{
+            (pgm_db_cfg.masking | default({}))
+            .get('protected_envs', pgm_masking_protected_envs_default)
+            | map('string')
+            | map('lower')
+            | list
+          }}
+        pgm_masking_scripts: >-
+          {{
+            (pgm_db_cfg.masking | default({}))
+            .get('scripts', [])
+          }}
       when:
         - not (pgm_host_failed | bool)
+
+    - name: Masking | Resolver execução
+      ansible.builtin.set_fact:
+        pgm_masking_should_run: >-
+          {{
+            (pgm_masking_enabled | bool)
+            and
+            (pgm_apply_masking_bool | bool)
+            and
+            (
+              (pgm_masking_run_on_envs | length == 0)
+              or
+              ((pgm_env | lower) in pgm_masking_run_on_envs)
+            )
+            and
+            ((pgm_env | lower) not in pgm_masking_protected_envs)
+          }}
+      when:
+        - not (pgm_host_failed | bool)
+
+    - name: Masking | Informar desativação pelo Survey
+      ansible.builtin.debug:
+        msg: >-
+          Mascaramento habilitado no profile, mas desabilitado para esta
+          execução pelo Survey.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_masking_enabled | default(false) | bool
+        - not (pgm_apply_masking_bool | default(true) | bool)
+
+    - name: Masking | Informar ambiente fora do escopo
+      ansible.builtin.debug:
+        msg: >-
+          Mascaramento habilitado, mas o ambiente {{ pgm_env }}
+          não está configurado em run_on_envs. Etapa ignorada.
+      when:
+        - not (pgm_host_failed | bool)
+        - pgm_masking_enabled | default(false) | bool
+        - pgm_apply_masking_bool | default(true) | bool
+        - pgm_env | lower not in pgm_masking_protected_envs | default([])
+        - pgm_masking_run_on_envs | default([]) | length > 0
+        - pgm_env | lower not in pgm_masking_run_on_envs
 
     - name: Masking | Bloquear execução em ambiente protegido
       ansible.builtin.set_fact:
         pgm_host_failed: true
         pgm_host_failed_task: "Mascaramento em ambiente protegido"
-        pgm_host_error_msg: "Mascaramento habilitado para ambiente protegido: {{ pgm_env }}. Execução bloqueada por segurança."
+        pgm_host_error_msg: >-
+          Mascaramento habilitado para ambiente protegido: {{ pgm_env }}.
+          Execução bloqueada por segurança.
       when:
         - not (pgm_host_failed | bool)
         - pgm_masking_enabled | default(false) | bool
+        - pgm_apply_masking_bool | default(true) | bool
         - pgm_env | lower in pgm_masking_protected_envs | default([])
 
     - name: Masking | Criar diretório remoto dos scripts
@@ -552,9 +630,8 @@
       become_user: root
       when:
         - not (pgm_host_failed | bool)
-        - pgm_masking_enabled | default(false) | bool
+        - pgm_masking_should_run | default(false) | bool
         - pgm_masking_scripts | default([]) | length > 0
-        - pgm_masking_run_on_envs | default([]) | length == 0 or pgm_env | lower in pgm_masking_run_on_envs
 
     - name: Masking | Copiar scripts para o destino
       ansible.builtin.copy:
@@ -568,9 +645,8 @@
       become_user: root
       when:
         - not (pgm_host_failed | bool)
-        - pgm_masking_enabled | default(false) | bool
+        - pgm_masking_should_run | default(false) | bool
         - pgm_masking_scripts | default([]) | length > 0
-        - pgm_masking_run_on_envs | default([]) | length == 0 or pgm_env | lower in pgm_masking_run_on_envs
 
     - name: Masking | Executar scripts de mascaramento
       ansible.builtin.shell: |
@@ -641,9 +717,8 @@
       become_user: root
       when:
         - not (pgm_host_failed | bool)
-        - pgm_masking_enabled | default(false) | bool
+        - pgm_masking_should_run | default(false) | bool
         - pgm_masking_scripts | default([]) | length > 0
-        - pgm_masking_run_on_envs | default([]) | length == 0 or pgm_env | lower in pgm_masking_run_on_envs
 
     - name: Masking | Registrar falha/aviso de mascaramento
       ansible.builtin.set_fact:
