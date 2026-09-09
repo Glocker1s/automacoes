@@ -135,6 +135,7 @@ pgm_database_create_validate_inheritance_default: true
 # Por padrão fica desligado e só executa quando habilitado no profile do banco.
 
 pgm_masking_enabled_default: false
+pgm_apply_masking: "sim"
 
 # Falha de masking impede o promote quando a feature estiver habilitada.
 pgm_masking_fail_on_error_default: true
