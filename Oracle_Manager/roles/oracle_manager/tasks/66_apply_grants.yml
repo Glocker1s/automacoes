@@ -1,0 +1,63 @@
+---
+- name: Grants | Aplicar grants capturados
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL > "{{ orm_grants_apply_log_file }}" 2>&1 > "{{ orm_grants_apply_log_file }}" 2>&1
+    set echo on feedback on
+    whenever sqlerror continue
+    @"{{ orm_grants_file }}"
+    exit
+    SQL
+  args:
+    executable: /bin/bash
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_grants_apply
+  changed_when: true
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_apply_grants | bool
+    - orm_restore_capture_grants | bool
+    - _orm_grants_file_stat.stat.exists | default(false)
+
+- name: Grants | Procurar erros na reaplicação
+  ansible.builtin.shell: |
+    grep -E 'ORA-[0-9]+|SP2-[0-9]+' "{{ orm_grants_apply_log_file }}" || true
+  register: _orm_grants_apply_errors
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_apply_grants | bool
+    - orm_restore_capture_grants | bool
+    - _orm_grants_file_stat.stat.exists | default(false)
+
+- name: Grants | Registrar erro crítico de reaplicação
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Reaplicar grants"
+    orm_host_error_msg: >-
+      Foram encontrados erros ao reaplicar grants. Verifique {{ orm_grants_apply_log_file }}.
+  when:
+    - orm_restore_apply_grants | bool
+    - orm_restore_fail_on_grant_error | bool
+    - _orm_grants_apply_errors.stdout | default('') | trim | length > 0
+
+- name: Grants | Registrar aviso de reaplicação
+  ansible.builtin.set_fact:
+    orm_host_warning: true
+    orm_restore_grants_warning: >-
+      Alguns grants retornaram erro durante a reaplicação. Verifique {{ orm_grants_apply_log_file }}.
+  when:
+    - orm_restore_apply_grants | bool
+    - not (orm_restore_fail_on_grant_error | bool)
+    - _orm_grants_apply_errors.stdout | default('') | trim | length > 0

@@ -1,0 +1,54 @@
+---
+- name: Definir arquivo de configuração do profile
+  ansible.builtin.set_fact:
+    orm_profile_file: "{{ orm_databases_dir }}/{{ orm_profile_key_normalized }}.yml"
+
+- name: Validar existência do arquivo do profile
+  ansible.builtin.stat:
+    path: "{{ orm_profile_file }}"
+  register: _orm_profile_file_stat
+  delegate_to: localhost
+
+- name: Falhar quando arquivo do profile não existir
+  ansible.builtin.fail:
+    msg: "Arquivo de profile Oracle não encontrado: {{ orm_profile_file }}"
+  when: not (_orm_profile_file_stat.stat.exists | default(false))
+
+- name: Carregar arquivo do profile
+  ansible.builtin.include_vars:
+    file: "{{ orm_profile_file }}"
+    name: _orm_profile_raw
+
+- name: Extrair configuração do profile
+  ansible.builtin.set_fact:
+    orm_profile_loaded_cfg: >-
+      {{ _orm_profile_raw.cm.oracle_manager.databases[orm_profile_key_normalized] | default({}) }}
+
+- name: Validar bloco do profile no arquivo
+  ansible.builtin.assert:
+    that:
+      - orm_profile_loaded_cfg | length > 0
+    fail_msg: >-
+      O arquivo {{ orm_profile_file }} foi encontrado, mas não contém
+      cm.oracle_manager.databases.{{ orm_profile_key_normalized }}.
+
+- name: Consolidar configuração efetiva do profile
+  ansible.builtin.set_fact:
+    orm_profile_cfg: "{{ orm_profile_defaults | combine(orm_profile_loaded_cfg, recursive=True) }}"
+
+- name: Validar hosts_env_sync
+  ansible.builtin.assert:
+    that:
+      - orm_profile_cfg.hosts_env_sync | default({}) | length > 0
+    fail_msg: >-
+      O profile {{ orm_profile_key_normalized }} não possui hosts_env_sync configurado.
+      Configure os ambientes/hosts em {{ orm_profile_file }}.
+
+- name: Exibir configuração carregada
+  ansible.builtin.debug:
+    msg:
+      profile_file: "{{ orm_profile_file }}"
+      profile_key: "{{ orm_profile_key_normalized }}"
+      description: "{{ orm_profile_cfg.description | default('') }}"
+      action: "{{ orm_action_normalized }}"
+      environments: "{{ orm_profile_cfg.hosts_env_sync.keys() | list | sort }}"

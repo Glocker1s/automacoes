@@ -1,0 +1,49 @@
+---
+- name: Prepare schema | Marcar início da fase destrutiva
+  ansible.builtin.set_fact:
+    orm_restore_destructive_started: true
+    orm_restore_database_state: >-
+      Fase destrutiva iniciada para {{ orm_schemas | join(', ') }} em SID={{ orm_sid_effective }}{% if orm_pdb_effective | length > 0 %}, PDB={{ orm_pdb_effective }}{% endif %}.
+  when:
+    - orm_restore_drop_users | bool
+    - orm_schemas_found | default([]) | length > 0
+
+- name: Prepare schema | Dropar usuários existentes com CASCADE
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set feedback off verify off
+    begin
+      for r in (select username from dba_users where upper(username) in ({{ _orm_schema_sql_list }})) loop
+        execute immediate 'drop user "'||r.username||'" cascade';
+      end loop;
+    end;
+    /
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_drop_users
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_drop_users | bool
+    - orm_schemas_found | default([]) | length > 0
+
+- name: Prepare schema | Registrar schemas removidos
+  ansible.builtin.set_fact:
+    orm_restore_schema_dropped: true
+    orm_restore_database_state: >-
+      Schema(s) anterior(es) removido(s) com DROP USER CASCADE. O restore depende agora do dump {{ orm_effective_dump_name }}.
+  when:
+    - orm_restore_drop_users | bool
+    - orm_schemas_found | default([]) | length > 0

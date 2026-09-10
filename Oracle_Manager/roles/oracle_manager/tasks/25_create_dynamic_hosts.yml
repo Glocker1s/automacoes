@@ -1,0 +1,121 @@
+---
+- name: Inicializar lista de hosts do plano
+  ansible.builtin.set_fact:
+    orm_plan_hosts: "{{ (orm_source_candidates | default([])) + (orm_target_candidates | default([])) }}"
+    orm_unreachable_hosts: []
+
+- name: Testar SSH dos hosts resolvidos
+  ansible.builtin.wait_for:
+    host: "{{ item.ansible_host }}"
+    port: "{{ orm_ssh_port | default(22) }}"
+    timeout: "{{ orm_wait_timeout | default(5) }}"
+    state: started
+  register: _orm_ssh_probe
+  failed_when: false
+  changed_when: false
+  loop: "{{ orm_plan_hosts }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.ansible_host }}:{{ orm_ssh_port | default(22) }}"
+  delegate_to: localhost
+  when: orm_probe_ssh_enabled | bool
+
+- name: Publicar hosts sem SSH
+  ansible.builtin.set_fact:
+    orm_unreachable_hosts: >-
+      {{
+        _orm_ssh_probe.results | default([])
+        | selectattr('failed', 'defined')
+        | selectattr('failed')
+        | map(attribute='item.name')
+        | list
+      }}
+  when: orm_probe_ssh_enabled | bool
+
+- name: Falhar se houver host sem SSH
+  ansible.builtin.fail:
+    msg: "Hosts sem SSH acessível: {{ orm_unreachable_hosts | join(', ') }}"
+  when:
+    - orm_fail_on_unreachable | bool
+    - orm_unreachable_hosts | default([]) | length > 0
+
+- name: Adicionar hosts de origem dinamicamente
+  ansible.builtin.add_host:
+    name: "{{ item.name }}"
+    groups:
+      - orm_source_targets
+      - orm_all_targets
+    ansible_host: "{{ item.ansible_host }}"
+    ansible_connection: ssh
+    ansible_port: "{{ orm_ssh_port | default(22) }}"
+    ansible_user: "{{ ansible_user | default(omit) }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ linux_key | default(ansible_ssh_private_key_file | default(omit)) }}"
+    ansible_ssh_common_args: "{{ ansible_ssh_common_args | default('-o StrictHostKeyChecking=no') }}"
+    orm_env: "{{ item.env }}"
+    orm_role: "source"
+    orm_profile_key: "{{ orm_profile_key_normalized }}"
+    orm_profile_cfg: "{{ orm_profile_cfg }}"
+    orm_schemas: "{{ orm_schemas_effective }}"
+    orm_sid: "{{ item.sid | default('') }}"
+    orm_pdb: "{{ item.pdb | default('') }}"
+    orm_service_name: "{{ item.service_name | default('') }}"
+    orm_oracle_home: "{{ item.oracle_home | default('') }}"
+    orm_os_user: "{{ item.os_user | default(orm_default_os_user) }}"
+    orm_os_group: "{{ item.os_group | default(orm_default_os_group) }}"
+    orm_directory_name: "{{ item.directory_name | default(orm_default_directory_name) }}"
+    orm_backup_root_dir_effective: "{{ item.backup_root_dir | default(orm_backup_root_dir) }}"
+    orm_restore_root_dir_effective: "{{ item.restore_root_dir | default(orm_restore_root_dir) }}"
+    orm_dump_basename: "{{ orm_dump_basename }}"
+    orm_latest_manifest_name: "{{ orm_latest_manifest_name }}"
+    orm_source_env_effective: "{{ orm_source_env_effective }}"
+    orm_action_normalized: "{{ orm_action_normalized }}"
+    orm_restore_dump_name: "{{ orm_restore_dump_name }}"
+    orm_execution_reason: "{{ orm_execution_reason | default('') }}"
+  loop: "{{ orm_source_candidates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: orm_action_normalized in ['backup', 'sync']
+
+- name: Adicionar hosts de destino dinamicamente
+  ansible.builtin.add_host:
+    name: "{{ item.name }}"
+    groups:
+      - orm_restore_targets
+      - orm_all_targets
+    ansible_host: "{{ item.ansible_host }}"
+    ansible_connection: ssh
+    ansible_port: "{{ orm_ssh_port | default(22) }}"
+    ansible_user: "{{ ansible_user | default(omit) }}"
+    ansible_password: "{{ ansible_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ linux_key | default(ansible_ssh_private_key_file | default(omit)) }}"
+    ansible_ssh_common_args: "{{ ansible_ssh_common_args | default('-o StrictHostKeyChecking=no') }}"
+    orm_env: "{{ item.env }}"
+    orm_role: "target"
+    orm_profile_key: "{{ orm_profile_key_normalized }}"
+    orm_profile_cfg: "{{ orm_profile_cfg }}"
+    orm_schemas: "{{ orm_schemas_effective }}"
+    orm_sid: "{{ item.sid | default('') }}"
+    orm_pdb: "{{ item.pdb | default('') }}"
+    orm_service_name: "{{ item.service_name | default('') }}"
+    orm_oracle_home: "{{ item.oracle_home | default('') }}"
+    orm_os_user: "{{ item.os_user | default(orm_default_os_user) }}"
+    orm_os_group: "{{ item.os_group | default(orm_default_os_group) }}"
+    orm_directory_name: "{{ item.directory_name | default(orm_default_directory_name) }}"
+    orm_backup_root_dir_effective: "{{ item.backup_root_dir | default(orm_backup_root_dir) }}"
+    orm_restore_root_dir_effective: "{{ item.restore_root_dir | default(orm_restore_root_dir) }}"
+    orm_dump_basename: "{{ orm_dump_basename }}"
+    orm_latest_manifest_name: "{{ orm_latest_manifest_name }}"
+    orm_source_env_effective: "{{ orm_source_env_effective }}"
+    orm_action_normalized: "{{ orm_action_normalized }}"
+    orm_restore_dump_name: "{{ orm_restore_dump_name }}"
+    orm_execution_reason: "{{ orm_execution_reason | default('') }}"
+  loop: "{{ orm_target_candidates }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: orm_action_normalized in ['restore', 'sync']
+
+- name: Exibir grupos dinâmicos criados
+  ansible.builtin.debug:
+    msg:
+      source_targets: "{{ groups.orm_source_targets | default([]) }}"
+      restore_targets: "{{ groups.orm_restore_targets | default([]) }}"

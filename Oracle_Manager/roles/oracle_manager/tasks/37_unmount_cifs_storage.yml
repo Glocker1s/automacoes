@@ -1,0 +1,23 @@
+---
+- name: CIFS storage | Desmontar compartilhamento
+  ansible.builtin.shell: |
+    if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
+      umount "{{ orm_cifs_mount_dir }}" || true
+    fi
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+  failed_when: false
+
+- name: CIFS storage | Remover arquivo temporário de senha CIFS
+  ansible.builtin.file:
+    path: "{{ orm_cifs_password_file }}"
+    state: absent
+  become: true
+  failed_when: false
+  no_log: true
+
+- name: CIFS storage | Registrar montagem encerrada
+  ansible.builtin.set_fact:
+    orm_cifs_storage_mounted: false

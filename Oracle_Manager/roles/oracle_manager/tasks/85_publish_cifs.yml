@@ -1,0 +1,128 @@
+---
+- name: Report CIFS | Inicializar publicação de anexos
+  ansible.builtin.set_fact:
+    orm_cifs_report_upload_failed: false
+    orm_cifs_report_upload_error: ""
+    send_mail_cifs_remote_files: []
+    send_mail_attachments: []
+
+- name: Report CIFS | Publicar anexos no CIFS
+  when:
+    - orm_cifs_enabled | bool
+    - orm_collected_local_files | default([]) | length > 0
+  block:
+    - name: Report CIFS | Resolver configuração
+      ansible.builtin.set_fact:
+        _orm_report_cifs_server: "{{ (orm_cifs_addresses | default({})).get(orm_cifs_label | default('') | lower, '') }}"
+        _orm_report_cifs_dir: "{{ orm_cifs_attachment_path | default('/Ansible/mail_attachments') }}"
+        _orm_report_cifs_delegate: "{{ orm_cifs_delegate_host | default('localhost') }}"
+        _orm_report_cifs_pass_file: "{{ orm_controller_tmp_dir }}/.cifs-report-pass"
+      no_log: true
+
+    - name: Report CIFS | Validar endereço CIFS
+      ansible.builtin.fail:
+        msg: "CIFS não mapeado para relatório: orm_cifs_label={{ orm_cifs_label }}"
+      when: _orm_report_cifs_server | length == 0
+
+    - name: Report CIFS | Criar diretório temporário no host delegado
+      ansible.builtin.file:
+        path: "{{ orm_controller_tmp_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: "{{ _orm_report_cifs_delegate }}"
+      become: false
+
+    - name: Report CIFS | Copiar anexos para host delegado
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ orm_controller_tmp_dir }}/{{ item | basename }}"
+        mode: "0644"
+      loop: "{{ orm_collected_local_files | default([]) }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      delegate_to: "{{ _orm_report_cifs_delegate }}"
+      become: false
+
+    - name: Report CIFS | Criar arquivo temporário de senha
+      ansible.builtin.copy:
+        dest: "{{ _orm_report_cifs_pass_file }}"
+        content: "{{ ansible_password | default('') }}"
+        mode: "0600"
+      delegate_to: "{{ _orm_report_cifs_delegate }}"
+      become: false
+      no_log: true
+
+    - name: Report CIFS | Testar acesso ao diretório de anexos
+      ansible.builtin.shell: >
+        smbclient "{{ _orm_report_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ _orm_report_cifs_pass_file }})"
+        -W "{{ orm_cifs_workgroup }}"
+        -c "cd {{ _orm_report_cifs_dir }} ; ls"
+      register: _orm_report_cifs_probe
+      retries: 5
+      delay: 10
+      until: _orm_report_cifs_probe.rc == 0
+      changed_when: false
+      delegate_to: "{{ _orm_report_cifs_delegate }}"
+      become: false
+      no_log: true
+
+    - name: Report CIFS | Enviar anexos para CIFS
+      ansible.builtin.shell: >
+        smbclient "{{ _orm_report_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ _orm_report_cifs_pass_file }})"
+        -W "{{ orm_cifs_workgroup }}"
+        -c 'cd {{ _orm_report_cifs_dir }} ; put {{ orm_controller_tmp_dir }}/{{ item | basename }} {{ item | basename }}'
+      loop: "{{ orm_collected_local_files | default([]) }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      register: _orm_report_cifs_put
+      changed_when: true
+      delegate_to: "{{ _orm_report_cifs_delegate }}"
+      become: false
+      no_log: true
+
+    - name: Report CIFS | Publicar lista de anexos remotos
+      ansible.builtin.set_fact:
+        send_mail_cifs_remote_files: "{{ orm_collected_local_files | map('basename') | list }}"
+        send_mail_attachments: "{{ orm_collected_local_files | map('basename') | list }}"
+
+  rescue:
+    - name: Report CIFS | Registrar falha na publicação
+      ansible.builtin.set_fact:
+        orm_cifs_report_upload_failed: true
+        orm_cifs_report_upload_error: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr
+            | default(ansible_failed_result | to_json))
+          }}
+        send_mail_cifs_remote_files: []
+        send_mail_attachments: []
+
+  always:
+    - name: Report CIFS | Remover arquivo temporário de senha
+      ansible.builtin.file:
+        path: "{{ _orm_report_cifs_pass_file | default(orm_controller_tmp_dir ~ '/.cifs-report-pass') }}"
+        state: absent
+      delegate_to: "{{ _orm_report_cifs_delegate | default(orm_cifs_delegate_host | default('localhost')) }}"
+      become: false
+      failed_when: false
+      no_log: true
+
+    - name: Report CIFS | Remover anexos temporários do host delegado
+      ansible.builtin.file:
+        path: "{{ orm_controller_tmp_dir }}/{{ item | basename }}"
+        state: absent
+      loop: "{{ orm_collected_local_files | default([]) }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      delegate_to: "{{ _orm_report_cifs_delegate | default(orm_cifs_delegate_host | default('localhost')) }}"
+      become: false
+      failed_when: false
+
+- name: Report CIFS | Manter anexos vazios quando CIFS estiver desabilitado
+  ansible.builtin.set_fact:
+    send_mail_cifs_remote_files: []
+    send_mail_attachments: []
+  when: not (orm_cifs_enabled | bool)

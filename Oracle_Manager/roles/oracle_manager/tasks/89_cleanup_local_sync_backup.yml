@@ -1,0 +1,198 @@
+---
+- name: Local cleanup | Inicializar estado
+  ansible.builtin.set_fact:
+    orm_local_cleanup_failed: false
+    orm_local_cleanup_error: ""
+    orm_local_cleanup_performed: false
+    orm_local_cleanup_errors: []
+    _orm_local_cleanup_action: "{{ orm_action_normalized | default(orm_action | default('backup') | lower) }}"
+    _orm_local_cleanup_source_hosts: "{{ groups.orm_source_targets | default([]) }}"
+    _orm_local_cleanup_not_success_hosts: []
+
+- name: Local cleanup | Resolver hosts obrigatórios
+  ansible.builtin.set_fact:
+    _orm_local_cleanup_required_hosts: >-
+      {{
+        (
+          (groups.orm_source_targets | default([]))
+          +
+          (groups.orm_restore_targets | default([]))
+        )
+        | unique
+        | list
+        if _orm_local_cleanup_action == 'sync'
+        else
+        (groups.orm_source_targets | default([]))
+      }}
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']
+
+- name: Local cleanup | Identificar hosts sem sucesso
+  ansible.builtin.set_fact:
+    _orm_local_cleanup_not_success_hosts: >-
+      {{
+        _orm_local_cleanup_not_success_hosts
+        +
+        [item]
+      }}
+  loop: "{{ _orm_local_cleanup_required_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']
+    - hostvars[item].orm_host_status | default('NÃO EXECUTADO') != 'SUCESSO'
+
+- name: Local cleanup | Informar retenção por falha operacional
+  ansible.builtin.debug:
+    msg: >-
+      Artefatos locais do backup mantidos porque nem todos
+      os hosts obrigatórios terminaram com SUCESSO:
+      {{ _orm_local_cleanup_not_success_hosts | join(', ') }}.
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']
+    - _orm_local_cleanup_not_success_hosts | length > 0
+
+- name: Local cleanup | Informar retenção por falha nos anexos
+  ansible.builtin.debug:
+    msg: >-
+      Artefatos locais do backup mantidos porque os anexos
+      do relatório não foram publicados corretamente.
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']
+    - orm_cifs_report_upload_failed | default(false) | bool
+
+- name: Local cleanup | Informar retenção por artefato não coletado
+  ansible.builtin.debug:
+    msg: >-
+      Artefatos locais do backup mantidos porque houve
+      artefato esperado que não foi coletado pelo relatório.
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']
+    - orm_report_artifact_warning | default(false) | bool
+
+- name: Local cleanup | Informar retenção por falha no cleanup CIFS
+  ansible.builtin.debug:
+    msg: >-
+      Artefatos locais do backup mantidos porque
+      o cleanup do CIFS apresentou falha.
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action == 'sync'
+    - orm_cifs_cleanup_failed | default(false) | bool
+
+- name: Local cleanup | Remover artefatos locais do backup
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    ROOT="{{ hostvars[item].orm_backup_dir | default('') }}"
+
+    if [ -z "$ROOT" ]; then
+      echo "backup.root_dir não resolvido para {{ item }}." >&2
+      exit 20
+    fi
+
+    ROOT_LENGTH="$(printf '%s' "$ROOT" | wc -c)"
+
+    if [ "$ROOT" = "/" ] || [ "$ROOT_LENGTH" -lt 4 ]; then
+      echo "backup.root_dir inseguro para cleanup: $ROOT" >&2
+      exit 21
+    fi
+
+    while IFS= read -r FILE; do
+      [ -n "$FILE" ] || continue
+
+      case "$FILE" in
+        "$ROOT"/*)
+          if [ -f "$FILE" ]; then
+            rm -f -- "$FILE"
+            echo "__FILE_REMOVED__=$FILE"
+          else
+            echo "__FILE_ALREADY_ABSENT__=$FILE"
+          fi
+          ;;
+        *)
+          echo "Arquivo fora do backup.root_dir; cleanup recusado: $FILE" >&2
+          exit 22
+          ;;
+      esac
+    done <<< "$ORM_BACKUP_FILES"
+
+    echo "__CLEANUP_DONE__=true"
+  args:
+    executable: /bin/bash
+  environment:
+    ORM_BACKUP_FILES: "{{ hostvars[item].orm_backup_local_artifacts | default([]) | join('\n') }}"
+  loop: "{{ _orm_local_cleanup_source_hosts | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _orm_local_cleanup_exec
+  delegate_to: "{{ item }}"
+  become: true
+  failed_when: false
+  changed_when: "'__FILE_REMOVED__=' in (_orm_local_cleanup_exec.stdout | default(''))"
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']
+    - _orm_local_cleanup_not_success_hosts | default([]) | length == 0
+    - not (orm_cifs_report_upload_failed | default(false) | bool)
+    - not (orm_report_artifact_warning | default(false) | bool)
+    - not (
+        _orm_local_cleanup_action == 'sync'
+        and (orm_cifs_cleanup_failed | default(false) | bool)
+      )
+
+- name: Local cleanup | Registrar erros
+  ansible.builtin.set_fact:
+    orm_local_cleanup_failed: true
+    orm_local_cleanup_errors: >-
+      {{
+        orm_local_cleanup_errors
+        +
+        [
+          item.item
+          ~ ': '
+          ~ (
+              item.stderr
+              | default(
+                  item.stdout
+                  | default('Falha no cleanup local.')
+                )
+            )
+        ]
+      }}
+  loop: "{{ _orm_local_cleanup_exec.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('host') }}"
+  when:
+    - not (item.skipped | default(false) | bool)
+    - item.rc | default(0) | int != 0
+
+- name: Local cleanup | Publicar resultado
+  ansible.builtin.set_fact:
+    orm_local_cleanup_performed: >-
+      {{
+        (
+          _orm_local_cleanup_exec.results
+          | default([])
+          | rejectattr('skipped', 'defined')
+          | list
+          | length
+        ) > 0
+      }}
+    orm_local_cleanup_error: "{{ orm_local_cleanup_errors | join(' | ') }}"
+
+- name: Local cleanup | Exibir resultado
+  ansible.builtin.debug:
+    msg:
+      action: "{{ _orm_local_cleanup_action }}"
+      performed: "{{ orm_local_cleanup_performed }}"
+      failed: "{{ orm_local_cleanup_failed }}"
+      error: "{{ orm_local_cleanup_error }}"
+  when:
+    - orm_cleanup_local_backup_after_sync | bool
+    - _orm_local_cleanup_action in ['backup', 'sync']

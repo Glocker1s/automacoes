@@ -1,0 +1,191 @@
+---
+- name: Resolver source_env, target_envs e schemas efetivos
+  ansible.builtin.set_fact:
+    orm_source_env_effective: >-
+      {{ orm_source_env_normalized if (orm_source_env_normalized | length > 0) else (orm_profile_cfg.default_source_env | default('prd') | string | lower) }}
+    orm_target_envs_effective: >-
+      {{
+        orm_selected_target_envs
+        if (orm_selected_target_envs | length > 0)
+        else (
+          orm_profile_cfg.default_restore_targets | default([]) | map('string') | map('lower') | list
+          if orm_action_normalized == 'restore'
+          else (
+            orm_profile_cfg.default_sync_targets | default([]) | map('string') | map('lower') | list
+            if orm_action_normalized == 'sync'
+            else []
+          )
+        )
+      }}
+    orm_schemas_effective: >-
+      {{
+        orm_selected_schemas
+        if (orm_selected_schemas | length > 0)
+        else (orm_profile_cfg.schemas | default([]) | map('string') | map('trim') | map('upper') | reject('equalto', '') | list)
+      }}
+
+- name: Validar schemas efetivos
+  ansible.builtin.assert:
+    that:
+      - orm_schemas_effective | length > 0
+    fail_msg: >-
+      Nenhum schema foi definido para o profile {{ orm_profile_key_normalized }}.
+      Configure schemas no profile ou informe orm_schemas no Survey.
+
+- name: Normalizar todos os hosts do profile
+  ansible.builtin.set_fact:
+    _orm_all_hosts_json: >-
+      {%- set out = [] -%}
+      {%- for env_name, raw_hosts in (orm_profile_cfg.hosts_env_sync | default({})).items() -%}
+        {%- set env_l = env_name | string | lower | trim -%}
+        {%- if raw_hosts is string -%}
+          {%- set item = {'name': env_l ~ '-' ~ orm_profile_key_normalized ~ '-01', 'ansible_host': raw_hosts, 'env': env_l} -%}
+          {%- set _ = out.append(item) -%}
+        {%- elif raw_hosts is mapping -%}
+          {%- for h_name, h_val in raw_hosts.items() -%}
+            {%- if h_val is mapping -%}
+              {%- set item = h_val | combine({'name': h_name, 'env': env_l}, recursive=True) -%}
+              {%- if item.ansible_host is not defined -%}
+                {%- set item = item | combine({'ansible_host': h_name}, recursive=True) -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set item = {'name': h_name, 'ansible_host': h_val, 'env': env_l} -%}
+            {%- endif -%}
+            {%- set _ = out.append(item) -%}
+          {%- endfor -%}
+        {%- elif raw_hosts is sequence -%}
+          {%- for h in raw_hosts -%}
+            {%- if h is string -%}
+              {%- set item = {'name': h, 'ansible_host': h, 'env': env_l} -%}
+            {%- elif h is mapping -%}
+              {%- set item = h | combine({'env': env_l}, recursive=True) -%}
+              {%- if item.name is not defined and item.ansible_host is defined -%}
+                {%- set item = item | combine({'name': item.ansible_host}, recursive=True) -%}
+              {%- endif -%}
+              {%- if item.ansible_host is not defined and item.name is defined -%}
+                {%- set item = item | combine({'ansible_host': item.name}, recursive=True) -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set item = {} -%}
+            {%- endif -%}
+            {%- if item | length > 0 -%}
+              {%- set _ = out.append(item) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar todos os hosts normalizados
+  ansible.builtin.set_fact:
+    orm_all_configured_hosts: "{{ _orm_all_hosts_json | from_json }}"
+
+- name: Resolver candidatos de origem
+  ansible.builtin.set_fact:
+    _orm_source_candidates_json: >-
+      {%- set out = [] -%}
+      {%- for h in orm_all_configured_hosts -%}
+        {%- set env_l = h.env | string | lower -%}
+        {%- set name_l = h.name | default('') | string | lower -%}
+        {%- set ip_l = h.ansible_host | default('') | string | lower -%}
+        {%- set enabled = h.enabled | default(true) | bool -%}
+        {%- set source_ok = h.source | default(env_l == orm_source_env_effective) | bool -%}
+        {%- set host_filter_ok = (orm_source_host_normalized | length == 0) or (orm_source_host_normalized in [name_l, ip_l]) -%}
+        {%- if enabled and source_ok and env_l == orm_source_env_effective and host_filter_ok -%}
+          {%- set item = h | combine({
+                'sid': h.sid | default(orm_profile_cfg.oracle.sid | default(orm_default_sid)),
+                'pdb': h.pdb | default(orm_profile_cfg.oracle.pdb | default(orm_default_pdb)),
+                'service_name': h.service_name | default(orm_profile_cfg.oracle.service_name | default(orm_default_service_name)),
+                'oracle_home': h.oracle_home | default(orm_profile_cfg.oracle.oracle_home | default(orm_default_oracle_home)),
+                'os_user': h.os_user | default(orm_profile_cfg.oracle.os_user | default(orm_default_os_user)),
+                'os_group': h.os_group | default(orm_profile_cfg.oracle.os_group | default(orm_default_os_group)),
+                'directory_name': h.directory_name | default(orm_profile_cfg.oracle.directory_name | default(orm_default_directory_name)),
+                'backup_root_dir': h.backup_root_dir | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir)),
+                'restore_root_dir': h.restore_root_dir | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)),
+                'role': 'source'
+              }, recursive=True) -%}
+          {%- set _ = out.append(item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Resolver candidatos de destino
+  ansible.builtin.set_fact:
+    _orm_target_candidates_json: >-
+      {%- set out = [] -%}
+      {%- for h in orm_all_configured_hosts -%}
+        {%- set env_l = h.env | string | lower -%}
+        {%- set name_l = h.name | default('') | string | lower -%}
+        {%- set ip_l = h.ansible_host | default('') | string | lower -%}
+        {%- set enabled = h.enabled | default(true) | bool -%}
+        {%- set env_ok = env_l in (orm_target_envs_effective | default([])) -%}
+        {%- set host_filter_ok = (orm_selected_target_hosts | length == 0) or (name_l in orm_selected_target_hosts) or (ip_l in orm_selected_target_hosts) -%}
+        {%- if enabled and env_ok and host_filter_ok -%}
+          {%- set item = h | combine({
+                'sid': h.sid | default(orm_profile_cfg.oracle.sid | default(orm_default_sid)),
+                'pdb': h.pdb | default(orm_profile_cfg.oracle.pdb | default(orm_default_pdb)),
+                'service_name': h.service_name | default(orm_profile_cfg.oracle.service_name | default(orm_default_service_name)),
+                'oracle_home': h.oracle_home | default(orm_profile_cfg.oracle.oracle_home | default(orm_default_oracle_home)),
+                'os_user': h.os_user | default(orm_profile_cfg.oracle.os_user | default(orm_default_os_user)),
+                'os_group': h.os_group | default(orm_profile_cfg.oracle.os_group | default(orm_default_os_group)),
+                'directory_name': h.directory_name | default(orm_profile_cfg.oracle.directory_name | default(orm_default_directory_name)),
+                'backup_root_dir': h.backup_root_dir | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir)),
+                'restore_root_dir': h.restore_root_dir | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)),
+                'role': 'target'
+              }, recursive=True) -%}
+          {%- set _ = out.append(item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Publicar candidatos resolvidos
+  ansible.builtin.set_fact:
+    orm_source_candidates: "{{ _orm_source_candidates_json | from_json }}"
+    orm_target_candidates: "{{ _orm_target_candidates_json | from_json }}"
+
+- name: Validar origem quando ação exige backup
+  ansible.builtin.assert:
+    that:
+      - orm_source_candidates | length > 0
+      - orm_source_candidates | length == 1
+    fail_msg: >-
+      A ação {{ orm_action_normalized }} exige exatamente uma origem.
+      Origem resolvida para env '{{ orm_source_env_effective }}': {{ orm_source_candidates | length }}.
+      Se houver mais de uma origem, informe orm_source_host ou marque apenas uma como source=true.
+  when: orm_action_normalized in ['backup', 'sync']
+
+- name: Validar destinos quando ação exige restore
+  ansible.builtin.assert:
+    that:
+      - orm_target_envs_effective | length > 0
+      - orm_target_candidates | length > 0
+    fail_msg: >-
+      A ação {{ orm_action_normalized }} exige pelo menos um destino.
+      target_envs={{ orm_target_envs_effective }}, target_hosts={{ orm_selected_target_hosts }}.
+  when: orm_action_normalized in ['restore', 'sync']
+
+- name: Proteger restore puro multi-target
+  ansible.builtin.assert:
+    that:
+      - (orm_target_candidates | length <= 1) or (orm_confirm_multi_target_restore | default('nao') | string | lower in ['sim', 's', 'yes', 'true', '1'])
+    fail_msg: >-
+      Restore puro resolveu {{ orm_target_candidates | length }} destinos.
+      Informe orm_target_hosts para um host específico ou orm_confirm_multi_target_restore=sim.
+  when: orm_action_normalized == 'restore'
+
+- name: Definir dump compartilhado do job
+  ansible.builtin.set_fact:
+    orm_dump_basename: "{{ orm_profile_key_normalized }}_{{ orm_source_env_effective }}_{{ orm_run_timestamp }}_job_{{ orm_job_id }}.dmp"
+    orm_latest_manifest_name: "latest_{{ orm_profile_key_normalized }}_{{ orm_source_env_effective }}.txt"
+
+- name: Exibir plano resolvido
+  ansible.builtin.debug:
+    msg:
+      action: "{{ orm_action_normalized }}"
+      profile: "{{ orm_profile_key_normalized }}"
+      schemas: "{{ orm_schemas_effective }}"
+      source_env: "{{ orm_source_env_effective }}"
+      target_envs: "{{ orm_target_envs_effective }}"
+      source: "{{ orm_source_candidates }}"
+      targets: "{{ orm_target_candidates }}"
+      dump_basename: "{{ orm_dump_basename }}"

@@ -1,0 +1,163 @@
+---
+- name: Connection control | Listar sessões atuais dos schemas
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL > "{{ orm_sessions_log_file }}"
+    whenever sqlerror exit sql.sqlcode
+    set pages 500 lines 300 feedback off verify off
+    column username format a30
+    column machine format a45
+    column program format a60
+    select username, sid, serial#, status, machine, program
+      from v\$session
+     where upper(username) in ({{ _orm_schema_sql_list }})
+     order by username, sid;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Connection control | Contar sessões atuais
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*) from v\$session where upper(username) in ({{ _orm_schema_sql_list }});
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sessions_before
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Connection control | Publicar quantidade de sessões
+  ansible.builtin.set_fact:
+    orm_sessions_before: "{{ _orm_sessions_before.stdout | default('0') | trim | int }}"
+
+- name: Connection control | Impedir drop com sessões quando kill está desabilitado
+  ansible.builtin.assert:
+    that:
+      - not (orm_restore_drop_users | bool and not (orm_restore_kill_sessions | bool) and orm_sessions_before | int > 0)
+    fail_msg: >-
+      Existem {{ orm_sessions_before }} sessão(ões) abertas para {{ orm_schemas | join(', ') }} e
+      restore.kill_sessions=false. O DROP USER não será iniciado.
+
+- name: Connection control | Bloquear usuários existentes
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set feedback off verify off
+    begin
+      for r in (select username from dba_users where upper(username) in ({{ _orm_schema_sql_list }})) loop
+        execute immediate 'alter user "'||r.username||'" account lock';
+      end loop;
+    end;
+    /
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_lock_users | bool
+    - orm_schemas_found | default([]) | length > 0
+
+- name: Connection control | Registrar usuários bloqueados
+  ansible.builtin.set_fact:
+    orm_users_locked: true
+  when:
+    - orm_restore_lock_users | bool
+    - orm_schemas_found | default([]) | length > 0
+
+- name: Connection control | Encerrar sessões dos schemas
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set feedback off verify off
+    begin
+      for r in (select sid, serial# from v\$session where upper(username) in ({{ _orm_schema_sql_list }})) loop
+        execute immediate 'alter system kill session '''||r.sid||','||r.serial#||''' immediate';
+      end loop;
+    end;
+    /
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_kill_sessions | bool
+    - orm_sessions_before | int > 0
+
+- name: Connection control | Aguardar encerramento das sessões
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*) from v\$session where upper(username) in ({{ _orm_schema_sql_list }});
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sessions_after
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  retries: "{{ orm_restore_session_wait_retries }}"
+  delay: "{{ orm_restore_session_wait_delay }}"
+  until: _orm_sessions_after.stdout | default('999') | trim | int == 0
+  when:
+    - orm_restore_kill_sessions | bool
+    - orm_sessions_before | int > 0
+
+- name: Connection control | Publicar sessões finais
+  ansible.builtin.set_fact:
+    orm_sessions_after: "{{ _orm_sessions_after.stdout | default(orm_sessions_before | string) | trim | int }}"

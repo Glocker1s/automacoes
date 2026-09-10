@@ -1,0 +1,53 @@
+---
+- name: Custom validations | Inicializar resultados
+  ansible.builtin.set_fact:
+    orm_custom_validation_results: []
+
+- name: Custom validations | Executar queries declaradas no profile
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<'SQL' >> "{{ orm_validation_log_file }}" 2>&1 >> "{{ orm_validation_log_file }}" 2>&1
+    whenever sqlerror exit sql.sqlcode
+    whenever oserror exit failure
+    set echo on feedback on verify off heading on pages 500 lines 250
+    prompt === CUSTOM VALIDATION: {{ item }} ===
+    {{ lookup('ansible.builtin.file', item) }}
+    prompt === END CUSTOM VALIDATION: {{ item }} ===
+    exit
+    SQL
+  args:
+    executable: /bin/bash
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  loop: "{{ orm_profile_cfg.validations.queries | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _orm_custom_validations
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_profile_cfg.validations.enabled | default(false) | bool
+    - orm_profile_cfg.validations.queries | default([]) | length > 0
+
+- name: Custom validations | Publicar resultados
+  ansible.builtin.set_fact:
+    orm_custom_validation_results: "{{ _orm_custom_validations.results | default([]) }}"
+  when: _orm_custom_validations is defined
+
+- name: Custom validations | Registrar falha
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validações SQL customizadas"
+    orm_host_error_msg: "Uma ou mais validações SQL customizadas falharam. Verifique {{ orm_validation_log_file }}."
+  when:
+    - _orm_custom_validations is defined
+    - _orm_custom_validations.results | default([]) | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list | length > 0

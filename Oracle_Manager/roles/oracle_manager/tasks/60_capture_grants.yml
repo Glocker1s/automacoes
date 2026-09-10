@@ -1,0 +1,55 @@
+---
+- name: Grants | Gerar query de captura
+  ansible.builtin.template:
+    src: grant_capture.sql.j2
+    dest: "{{ orm_grant_capture_query_file }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0600"
+  become: true
+  when:
+    - orm_restore_capture_grants | bool
+    - orm_schemas_found | default([]) | length > 0
+
+- name: Grants | Capturar grants atuais do destino
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" @"{{ orm_grant_capture_query_file }}" > "{{ orm_grants_file }}"
+  args:
+    executable: /bin/bash
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_grants_capture
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_capture_grants | bool
+    - orm_schemas_found | default([]) | length > 0
+
+- name: Grants | Criar arquivo vazio quando não há schema atual para capturar
+  ansible.builtin.copy:
+    dest: "{{ orm_grants_file }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+    content: "-- Nenhum grant capturado: schema(s) não existiam no destino antes do restore.\n"
+  become: true
+  when:
+    - orm_restore_capture_grants | bool
+    - orm_schemas_found | default([]) | length == 0
+
+- name: Grants | Verificar arquivo capturado
+  ansible.builtin.stat:
+    path: "{{ orm_grants_file }}"
+  register: _orm_grants_file_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_restore_capture_grants | bool

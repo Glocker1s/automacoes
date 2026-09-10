@@ -1,0 +1,80 @@
+---
+- name: CIFS storage | Resolver configuração
+  ansible.builtin.set_fact:
+    _orm_storage_cifs_server: >-
+      {{
+        (orm_cifs_addresses | default({}))
+        .get(orm_cifs_label | default('') | lower, '')
+      }}
+    orm_cifs_data_dir_effective: >-
+      {{
+        orm_cifs_mount_dir
+        ~ (orm_cifs_path | regex_replace('/$', ''))
+      }}
+
+- name: CIFS storage | Validar configuração
+  ansible.builtin.assert:
+    that:
+      - orm_cifs_enabled | bool
+      - _orm_storage_cifs_server | length > 0
+    fail_msg: >-
+      Storage CIFS solicitado, porém o CIFS está desabilitado
+      ou orm_cifs_label={{ orm_cifs_label }} não possui endereço configurado.
+
+- name: CIFS storage | Criar diretório de montagem
+  ansible.builtin.file:
+    path: "{{ orm_cifs_mount_dir }}"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: CIFS storage | Criar arquivo temporário de senha CIFS
+  ansible.builtin.copy:
+    dest: "{{ orm_cifs_password_file }}"
+    content: "{{ ansible_password | default('') }}"
+    mode: "0600"
+  become: true
+  no_log: true
+
+- name: CIFS storage | Montar compartilhamento
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
+      umount "{{ orm_cifs_mount_dir }}" || true
+    fi
+
+    ORACLE_UID="$(id -u "{{ orm_os_user_effective }}")"
+    ORACLE_GID="$(id -g "{{ orm_os_user_effective }}")"
+
+    mount -t cifs "{{ _orm_storage_cifs_server }}" "{{ orm_cifs_mount_dir }}" \
+      -o username="{{ ansible_user }}",password="$(cat {{ orm_cifs_password_file }})",domain="{{ orm_cifs_domain }}",rw,vers="{{ orm_cifs_vers }}",uid="${ORACLE_UID}",gid="${ORACLE_GID}"
+  args:
+    executable: /bin/bash
+  become: true
+  no_log: true
+
+- name: CIFS storage | Criar diretório de dados
+  ansible.builtin.file:
+    path: "{{ orm_cifs_data_dir_effective }}"
+    state: directory
+    mode: "0775"
+  become: true
+
+- name: CIFS storage | Validar acesso do Oracle ao diretório de dados
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    TEST_FILE="{{ orm_cifs_data_dir_effective }}/.oracle_manager_test_{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+    touch "$TEST_FILE"
+    rm -f "$TEST_FILE"
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+
+- name: CIFS storage | Registrar montagem ativa
+  ansible.builtin.set_fact:
+    orm_cifs_storage_mounted: true

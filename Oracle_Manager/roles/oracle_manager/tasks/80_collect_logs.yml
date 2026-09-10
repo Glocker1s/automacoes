@@ -1,0 +1,166 @@
+---
+- name: Report logs | Resolver hosts do relatório
+  ansible.builtin.set_fact:
+    orm_report_hosts: "{{ ((groups.orm_source_targets | default([])) + (groups.orm_restore_targets | default([]))) | unique | list }}"
+
+- name: Report logs | Montar lista de artefatos remotos
+  ansible.builtin.set_fact:
+    _orm_remote_artifacts_json: >-
+      {%- set out = [] -%}
+      {%- for h in orm_report_hosts | default([]) -%}
+        {%- set safe_h = h | regex_replace('[^A-Za-z0-9_.-]', '_') -%}
+        {%- for p in hostvars[h].orm_host_artifacts | default([]) -%}
+          {%- if p | string | length > 0 -%}
+            {%- set _ = out.append({
+              'host': h,
+              'path': p,
+              'filename': safe_h ~ '__' ~ (p | basename),
+              'local_path': orm_controller_tmp_dir ~ '/' ~ safe_h ~ '__' ~ (p | basename)
+            }) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report logs | Publicar artefatos remotos
+  ansible.builtin.set_fact:
+    orm_remote_artifacts: "{{ _orm_remote_artifacts_json | from_json }}"
+
+- name: Report logs | Validar artefatos remotos
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ orm_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.path }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  register: _orm_remote_artifacts_stat
+  failed_when: false
+  changed_when: false
+
+- name: Report logs | Montar listas de artefatos existentes e ausentes
+  ansible.builtin.set_fact:
+    _orm_existing_remote_artifacts_json: >-
+      {%- set out = [] -%}
+      {%- for r in _orm_remote_artifacts_stat.results | default([]) -%}
+        {%- if (r.stat.exists | default(false) | bool) and not (r.stat.isdir | default(false) | bool) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    _orm_missing_remote_artifacts_json: >-
+      {%- set out = [] -%}
+      {%- for r in _orm_remote_artifacts_stat.results | default([]) -%}
+        {%- if not (r.stat.exists | default(false) | bool) or (r.stat.isdir | default(false) | bool) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report logs | Publicar artefatos existentes e ausentes
+  ansible.builtin.set_fact:
+    orm_existing_remote_artifacts: "{{ _orm_existing_remote_artifacts_json | from_json }}"
+    orm_missing_remote_artifacts: "{{ _orm_missing_remote_artifacts_json | from_json }}"
+
+- name: Report logs | Copiar artefatos para controller
+  ansible.builtin.fetch:
+    src: "{{ item.path }}"
+    dest: "{{ item.local_path }}"
+    flat: true
+  loop: "{{ orm_existing_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.path }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  register: _orm_fetch_artifacts
+  failed_when: false
+  changed_when: false
+
+- name: Report logs | Verificar arquivos após fetch
+  ansible.builtin.stat:
+    path: "{{ item.local_path }}"
+  loop: "{{ orm_existing_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.local_path }}"
+  register: _orm_local_after_fetch
+  delegate_to: localhost
+  become: false
+
+- name: Report logs | Montar lista pendente após fetch
+  ansible.builtin.set_fact:
+    _orm_missing_after_fetch_json: >-
+      {%- set out = [] -%}
+      {%- for r in _orm_local_after_fetch.results | default([]) -%}
+        {%- if not (r.stat.exists | default(false) | bool) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report logs | Publicar lista pendente após fetch
+  ansible.builtin.set_fact:
+    orm_missing_after_fetch: "{{ _orm_missing_after_fetch_json | from_json }}"
+
+- name: Report logs | Ler artefatos pendentes via cat
+  ansible.builtin.command:
+    argv:
+      - /bin/cat
+      - "{{ item.path }}"
+  loop: "{{ orm_missing_after_fetch | default([]) }}"
+  loop_control:
+    label: "{{ item.host }}:{{ item.path }}"
+  delegate_to: "{{ item.host }}"
+  become: true
+  register: _orm_cat_artifacts
+  failed_when: false
+  changed_when: false
+
+- name: Report logs | Salvar artefatos pendentes no controller
+  ansible.builtin.copy:
+    content: "{{ item.stdout | default('') }}\n"
+    dest: "{{ item.item.local_path }}"
+    mode: "0644"
+  loop: "{{ _orm_cat_artifacts.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.local_path | default('arquivo') }}"
+  delegate_to: localhost
+  become: false
+  when:
+    - item.rc is defined
+    - item.rc | int == 0
+    - item.item.local_path is defined
+
+- name: Report logs | Verificar arquivos locais finais
+  ansible.builtin.stat:
+    path: "{{ item.local_path }}"
+  loop: "{{ orm_remote_artifacts | default([]) }}"
+  loop_control:
+    label: "{{ item.local_path }}"
+  register: _orm_local_artifacts_final
+  delegate_to: localhost
+  become: false
+
+- name: Report logs | Montar resultado final da coleta
+  ansible.builtin.set_fact:
+    _orm_collected_local_files_json: >-
+      {%- set out = [] -%}
+      {%- for r in _orm_local_artifacts_final.results | default([]) -%}
+        {%- if r.stat.exists | default(false) | bool -%}
+          {%- set _ = out.append(r.item.local_path) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | unique | sort | to_json }}
+    _orm_missing_report_artifacts_json: >-
+      {%- set out = [] -%}
+      {%- for r in _orm_local_artifacts_final.results | default([]) -%}
+        {%- if not (r.stat.exists | default(false) | bool) -%}
+          {%- set _ = out.append(r.item) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report logs | Publicar resultado final da coleta
+  ansible.builtin.set_fact:
+    orm_collected_local_files: "{{ _orm_collected_local_files_json | from_json }}"
+    orm_missing_report_artifacts: "{{ _orm_missing_report_artifacts_json | from_json }}"
+    orm_report_artifact_warning: "{{ (_orm_missing_report_artifacts_json | from_json | length) > 0 }}"

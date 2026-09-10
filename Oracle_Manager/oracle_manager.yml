@@ -1,0 +1,78 @@
+---
+- name: Oracle Manager | Planejamento e inventário dinâmico
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Oracle Manager | Executar fase controller
+      ansible.builtin.include_role:
+        name: oracle_manager
+      vars:
+        orm_phase: controller
+
+- name: Oracle Manager | Backup origem
+  hosts: orm_source_targets
+  gather_facts: true
+  tasks:
+    - name: Oracle Manager | Executar fase backup
+      ansible.builtin.include_role:
+        name: oracle_manager
+      vars:
+        orm_phase: backup
+      when:
+        - orm_action_normalized | default(orm_action | default('backup') | lower) in ['backup', 'sync']
+
+- name: Oracle Manager | Barreira pós-backup do sync
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Oracle Manager | Inicializar barreira do sync
+      ansible.builtin.set_fact:
+        orm_sync_backup_blocked: false
+        orm_sync_backup_blocked_hosts: []
+        orm_sync_restore_skip_reason: ""
+
+    - name: Oracle Manager | Identificar backups que impedem restore
+      ansible.builtin.set_fact:
+        orm_sync_backup_blocked_hosts: "{{ orm_sync_backup_blocked_hosts + [item] }}"
+      loop: "{{ groups.orm_source_targets | default([]) }}"
+      when:
+        - orm_action_normalized | default(orm_action | default('backup') | lower) == 'sync'
+        - hostvars[item].orm_host_status | default('NÃO EXECUTADO') != 'SUCESSO'
+
+    - name: Oracle Manager | Bloquear restore quando backup do sync não teve sucesso
+      ansible.builtin.set_fact:
+        orm_sync_backup_blocked: true
+        orm_sync_restore_skip_reason: >-
+          Restore não iniciado porque o backup do sync não terminou com SUCESSO.
+          Hosts de origem com falha/aviso: {{ orm_sync_backup_blocked_hosts | join(', ') }}.
+      when:
+        - orm_action_normalized | default(orm_action | default('backup') | lower) == 'sync'
+        - orm_sync_backup_blocked_hosts | length > 0
+
+    - name: Oracle Manager | Exibir bloqueio do restore no sync
+      ansible.builtin.debug:
+        msg: "{{ orm_sync_restore_skip_reason }}"
+      when: orm_sync_backup_blocked | default(false) | bool
+
+- name: Oracle Manager | Restore destinos
+  hosts: orm_restore_targets
+  gather_facts: true
+  tasks:
+    - name: Oracle Manager | Executar fase restore
+      ansible.builtin.include_role:
+        name: oracle_manager
+      vars:
+        orm_phase: restore
+      when:
+        - orm_action_normalized | default(orm_action | default('backup') | lower) in ['restore', 'sync']
+        - not (hostvars['localhost'].orm_sync_backup_blocked | default(false) | bool)
+
+- name: Oracle Manager | Relatório consolidado
+  hosts: localhost
+  gather_facts: true
+  tasks:
+    - name: Oracle Manager | Executar fase report
+      ansible.builtin.include_role:
+        name: oracle_manager
+      vars:
+        orm_phase: report

@@ -1,0 +1,32 @@
+---
+- name: Backup validation | Verificar dump gerado
+  ansible.builtin.stat:
+    path: "{{ orm_dump_file }}"
+  register: _orm_dump_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Backup validation | Verificar log do Data Pump
+  ansible.builtin.stat:
+    path: "{{ orm_datapump_log_file }}"
+  register: _orm_datapump_log_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Backup validation | Validar artefatos do expdp
+  ansible.builtin.assert:
+    that:
+      - _orm_dump_stat.stat.exists | default(false)
+      - _orm_dump_stat.stat.isreg | default(false)
+      - _orm_dump_stat.stat.size | default(0) | int > 0
+      - _orm_datapump_log_stat.stat.exists | default(false)
+      - _orm_datapump_log_stat.stat.isreg | default(false)
+      - _orm_datapump_log_stat.stat.size | default(0) | int > 0
+    fail_msg: >-
+      Validação do backup Oracle falhou. Dump={{ orm_dump_file }},
+      exists={{ _orm_dump_stat.stat.exists | default(false) }}, size={{ _orm_dump_stat.stat.size | default(0) }};
+      log={{ orm_datapump_log_file }}, exists={{ _orm_datapump_log_stat.stat.exists | default(false) }}.
+
+- name: Backup validation | Publicar tamanho do dump
+  ansible.builtin.set_fact:
+    orm_dump_size_bytes: "{{ _orm_dump_stat.stat.size | int }}"
