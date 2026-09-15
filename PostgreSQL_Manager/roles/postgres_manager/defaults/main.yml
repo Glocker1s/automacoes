@@ -26,7 +26,7 @@ pgm_restore_dump_name: "latest" # latest ou nome do diretório .dump.dir
 # ============================================================================
 
 pgm_confirm_restore: "nao"              # restore/sync exigem sim
-pgm_confirm_multi_target_restore: "nao" # restore puro com mais de 1 target exige sim
+pgm_confirm_multi_target_restore: "sim" # restore puro com mais de 1 target exige sim
 pgm_fail_job_on_error: true
 
 # ============================================================================
@@ -78,12 +78,16 @@ pgm_fail_on_unreachable: true
 # ============================================================================
 
 # Estratégia padrão.
-# promote é o modo homologado atualmente.
+# Modos aceitos: promote | drop_in_place | restore_only
 pgm_restore_mode: "promote"
 
-# Nomes auxiliares usados no modo promote.
+# Nomes auxiliares usados pelos modos de restore.
 pgm_restore_temp_suffix: "_restoring"
 pgm_restore_old_suffix: "_old"
+
+# Sufixo da database criada pelo modo restore_only.
+# Ex.: corePaqueta -> corePaqueta_new
+pgm_restore_only_suffix: "_new"
 
 # Evita trazer owner e ACLs do ambiente de origem.
 pgm_restore_no_owner: true
@@ -135,7 +139,6 @@ pgm_database_create_validate_inheritance_default: true
 # Por padrão fica desligado e só executa quando habilitado no profile do banco.
 
 pgm_masking_enabled_default: false
-pgm_apply_masking: "sim"
 
 # Falha de masking impede o promote quando a feature estiver habilitada.
 pgm_masking_fail_on_error_default: true
@@ -317,6 +320,10 @@ pgm_database_defaults:
     # Nome usado para preservar a database anterior.
     old_suffix: "{{ pgm_restore_old_suffix }}"
 
+    # Nome da database criada no modo restore_only.
+    # A database atual permanece ativa e não é renomeada pela automação.
+    restore_only_suffix: "{{ pgm_restore_only_suffix }}"
+
     # Não restaura ownership da origem.
     no_owner: "{{ pgm_restore_no_owner }}"
 
@@ -340,7 +347,7 @@ pgm_database_defaults:
 
   database_create:
 
-    # Quando true, a _restoring herda propriedades da database atual:
+    # Quando true, a database criada para restore (_restoring/_new) herda propriedades da database atual:
     # owner, encoding, locale, tablespace e connection limit.
     inherit_from_current: "{{ pgm_database_create_inherit_from_current_default }}"
 
