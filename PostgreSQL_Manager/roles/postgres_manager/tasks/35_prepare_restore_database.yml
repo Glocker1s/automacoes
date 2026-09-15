@@ -229,7 +229,7 @@
   become_user: root
   when:
     - not (pgm_host_failed | bool)
-    - pgm_effective_restore_mode == 'promote'
+    - pgm_effective_restore_mode in ['promote', 'restore_only']
     - not (pgm_database_create_inherit_from_current | bool)
 
 - name: Database create | Registrar falha na criação herdada
