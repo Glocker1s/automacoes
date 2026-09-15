@@ -302,6 +302,41 @@
           </td>
         </tr>
 
+        {% set restore_only_rows = rows | selectattr('restore_mode', 'equalto', 'restore_only') | list %}
+        {% if restore_only_rows | length > 0 %}
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#8a5a00;margin-bottom:7px;">
+              Restore sem ativação automática
+            </div>
+            <div style="background-color:#fffaf0;border:1px solid #f0d49a;padding:10px;font-family:Arial,sans-serif;font-size:13px;color:#6b4a00;margin-bottom:8px;">
+              No modo <b>restore_only</b>, a base atual permanece ativa. A automação prepara a nova base, mas o cutover/rename deve ser realizado manualmente pelo DBA.
+            </div>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>{{ th('Ambiente') }}{{ th('Host') }}{{ th('Base atual') }}{{ th('Base restaurada') }}{{ th('Status') }}{{ th('Ativação') }}</tr>
+              {% for row in restore_only_rows %}
+              <tr>
+                {{ td_open() }}{{ row.env | default('—') }}</td>
+                {{ td_open() }}{{ code(row.host | default('—')) }}</td>
+                {{ td_open() }}{{ code(row.database | default('—')) }}</td>
+                {{ td_open() }}{{ code(row.restored_database | default('—')) }}</td>
+                {{ td_open() }}
+                  {% if row.status == 'SUCESSO' %}
+                    {{ badge(row.status, 'ok') }}
+                  {% elif row.status == 'SUCESSO COM AVISO' %}
+                    {{ badge(row.status, 'warn') }}
+                  {% else %}
+                    {{ badge(row.status | default('N/A'), 'fail') }}
+                  {% endif %}
+                </td>
+                {{ td_open() }}{{ code(row.activation | default('MANUAL')) }}</td>
+              </tr>
+              {% endfor %}
+            </table>
+          </td>
+        </tr>
+        {% endif %}
+
         <tr>
           <td style="padding-top:16px;">
             <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
