@@ -133,10 +133,10 @@
 - name: Validar modo de restore dos destinos
   ansible.builtin.assert:
     that:
-      - item.restore_mode | default(pgm_restore_mode) in ['promote', 'drop_in_place']
+      - item.restore_mode | default(pgm_restore_mode) in ['promote', 'drop_in_place', 'restore_only']
     fail_msg: >-
       restore_mode inválido no host {{ item.name }}: {{ item.restore_mode | default('') }}.
-      Valores aceitos: promote ou drop_in_place.
+      Valores aceitos: promote, drop_in_place ou restore_only.
   loop: "{{ pgm_target_candidates | default([]) }}"
   loop_control:
     label: "{{ item.name }} -> {{ item.restore_mode | default(pgm_restore_mode) }}"
