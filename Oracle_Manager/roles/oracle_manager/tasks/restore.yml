@@ -65,9 +65,10 @@
     orm_restore_dump_source: ""
     orm_restore_dump_size_bytes: 0
     orm_datapump_binary_required: "impdp"
-    orm_require_existing_schemas: false
+    orm_require_existing_schemas: "{{ orm_scope_effective == 'tables' }}" 
     orm_users_locked: false
     orm_restore_destructive_started: false
+    orm_table_restore_started: false
     orm_restore_schema_dropped: false
     orm_restore_import_completed: false
     orm_restore_completed: false
@@ -129,6 +130,11 @@
           Motivo: {{ orm_execution_reason | default('') }}
           Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
           Início: {{ orm_activity_started_at }}
+          Escopo: {{ orm_scope_effective }}
+          {% if orm_scope_effective == 'tables' %}
+          Tabelas: {{ orm_tables_effective | join(', ') }}
+          TABLE_EXISTS_ACTION: {{ orm_table_exists_action_effective | upper }}
+          {% endif %}
       become: true
 
     - name: Restore | Montar CIFS para leitura direta
@@ -161,23 +167,53 @@
 
     - name: Restore | Validar credenciais de destino
       ansible.builtin.import_tasks: 59_validate_restore_credentials.yml
-      when: not (orm_host_failed | bool)
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'schema'
 
-    - name: Restore | Gerar parfile do impdp antes da fase destrutiva
+    - name: Restore | Preparar restore de tabelas
+      ansible.builtin.import_tasks: 58_prepare_table_restore.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'tables'
+
+    - name: Restore | Gerar parfile do impdp antes da fase operacional
       ansible.builtin.import_tasks: 63_build_impdp_parfile.yml
       when: not (orm_host_failed | bool)
 
-    - name: Restore | Capturar grants atuais do destino
+    - name: Restore | Capturar grants atuais do schema
       ansible.builtin.import_tasks: 60_capture_grants.yml
-      when: not (orm_host_failed | bool)
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'schema'
+
+    - name: Restore | Capturar grants atuais das tabelas
+      ansible.builtin.import_tasks: 60_capture_table_grants.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'tables'
 
     - name: Restore | Controlar conexões e bloquear usuários
       ansible.builtin.import_tasks: 61_connection_control.yml
-      when: not (orm_host_failed | bool)
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'schema'
 
     - name: Restore | Preparar schema para import
       ansible.builtin.import_tasks: 62_prepare_schema.yml
-      when: not (orm_host_failed | bool)
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'schema'
+
+    - name: Restore | Marcar início do restore de tabelas
+      ansible.builtin.set_fact:
+        orm_table_restore_started: true
+        orm_restore_database_state: >-
+          Restore de tabelas iniciado.
+          TABLE_EXISTS_ACTION={{ orm_table_exists_action_effective | upper }}.
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'tables'
 
     - name: Restore | Executar impdp
       ansible.builtin.import_tasks: 64_execute_impdp.yml
@@ -187,6 +223,7 @@
       ansible.builtin.import_tasks: 65_restore_password.yml
       when:
         - not (orm_host_failed | bool)
+        - orm_scope_effective == 'schema'
         - orm_restore_import_completed | bool
 
     - name: Restore | Reaplicar grants capturados
@@ -195,10 +232,18 @@
         - not (orm_host_failed | bool)
         - orm_restore_import_completed | bool
 
-    - name: Restore | Executar validações finais
+    - name: Restore | Executar validações finais do schema
       ansible.builtin.import_tasks: 67_validate_restore.yml
       when:
         - not (orm_host_failed | bool)
+        - orm_scope_effective == 'schema'
+        - orm_restore_import_completed | bool
+
+    - name: Restore | Executar validações finais das tabelas
+      ansible.builtin.import_tasks: 69_validate_table_restore.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'tables'
         - orm_restore_import_completed | bool
 
     - name: Restore | Executar validações SQL customizadas
@@ -212,7 +257,13 @@
     - name: Restore | Marcar restore concluído
       ansible.builtin.set_fact:
         orm_restore_completed: true
-        orm_restore_database_state: "Restore concluído e validações pós-restore executadas."
+        orm_restore_database_state: >-
+          {{
+            'Restore de tabelas concluído e validações pós-restore executadas.'
+            if orm_scope_effective == 'tables'
+            else
+            'Restore concluído e validações pós-restore executadas.'
+          }}
       when:
         - not (orm_host_failed | bool)
         - orm_restore_import_completed | bool
@@ -465,3 +516,11 @@
           finished_at: "{{ orm_activity_finished_at }}"
           duration_seconds: "{{ orm_activity_duration_seconds }}"
           duration: "{{ orm_activity_duration }}"
+          scope: "{{ orm_scope_effective }}"
+          tables: "{{ orm_tables_effective | default([]) }}"
+          table_exists_action: >-
+            {{
+              orm_table_exists_action_effective
+              if orm_scope_effective == 'tables'
+              else ''
+            }}
