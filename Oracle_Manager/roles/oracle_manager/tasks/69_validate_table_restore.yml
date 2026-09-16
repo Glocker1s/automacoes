@@ -1,0 +1,141 @@
+---
+- name: Table validation | Verificar log do impdp
+  ansible.builtin.stat:
+    path: "{{ orm_impdp_log_file }}"
+  register: _orm_table_impdp_log_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Table validation | Registrar falha quando log não existe
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar log do impdp"
+    orm_host_error_msg: >-
+      Log do impdp não encontrado ou vazio:
+      {{ orm_impdp_log_file }}.
+  when:
+    - not (
+        _orm_table_impdp_log_stat.stat.exists | default(false)
+        and
+        (_orm_table_impdp_log_stat.stat.size | default(0) | int > 0)
+      )
+
+- name: Table validation | Consultar tabelas após import
+  ansible.builtin.shell:
+    cmd: |
+      PDB="{{ orm_pdb_effective | default('') }}"
+
+      if [ -n "$PDB" ]; then
+        export ORACLE_PDB_SID="$PDB"
+      else
+        unset ORACLE_PDB_SID
+      fi
+
+      unset TWO_TASK
+      unset LOCAL
+
+      "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+      whenever sqlerror exit sql.sqlcode
+      set heading off feedback off pages 0 verify off echo off
+
+      select case
+               when count(*) = 1 then 'FOUND'
+               else 'MISSING'
+             end
+        from dba_tables
+       where upper(owner) = upper('{{ item.split(".")[0] }}')
+         and upper(table_name) = upper('{{ item.split(".")[1] }}');
+
+      exit
+      SQL
+    executable: /bin/bash
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  loop: "{{ orm_tables_effective }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _orm_tables_after_restore_check
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - not (orm_host_failed | bool)
+
+- name: Table validation | Inicializar resultado pós-restore
+  ansible.builtin.set_fact:
+    orm_tables_after_restore: []
+    orm_tables_missing_after_restore: []
+  when:
+    - not (orm_host_failed | bool)
+
+- name: Table validation | Publicar tabelas encontradas após restore
+  ansible.builtin.set_fact:
+    orm_tables_after_restore: >-
+      {{
+        orm_tables_after_restore
+        +
+        [item.item]
+      }}
+  loop: "{{ _orm_tables_after_restore_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('') }}"
+  when:
+    - not (orm_host_failed | bool)
+    - "'FOUND' in (item.stdout_lines | default([]) | map('trim') | list)"
+
+- name: Table validation | Publicar tabelas ausentes após restore
+  ansible.builtin.set_fact:
+    orm_tables_missing_after_restore: >-
+      {{
+        orm_tables_missing_after_restore
+        +
+        [item.item]
+      }}
+  loop: "{{ _orm_tables_after_restore_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('') }}"
+  when:
+    - not (orm_host_failed | bool)
+    - "'FOUND' not in (item.stdout_lines | default([]) | map('trim') | list)"
+
+- name: Table validation | Registrar falha por tabelas ausentes
+  ansible.builtin.set_fact:
+    orm_host_failed: true
+    orm_host_failed_task: "Validar tabelas após import"
+    orm_host_error_msg: >-
+      Tabela(s) ausente(s) após o impdp:
+      {{ orm_tables_missing_after_restore | join(', ') }}.
+  when:
+    - orm_tables_missing_after_restore | default([]) | length > 0
+
+- name: Table validation | Gravar log de validação
+  ansible.builtin.copy:
+    dest: "{{ orm_validation_log_file }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+    content: |
+      Oracle Manager - Validação pós-restore de tabelas
+      Host: {{ inventory_hostname }}
+      Ambiente: {{ orm_env }}
+      SID: {{ orm_sid_effective }}
+      PDB: {{ orm_pdb_effective | default('') }}
+      TABLE_EXISTS_ACTION: {{ orm_table_exists_action_effective | upper }}
+
+      Tabelas solicitadas:
+      {{ orm_tables_effective | join(', ') }}
+
+      Tabelas existentes antes do restore:
+      {{ orm_tables_found_before_restore | default([]) | join(', ') }}
+
+      Tabelas ausentes antes do restore:
+      {{ orm_tables_missing_before_restore | default([]) | join(', ') }}
+
+      Tabelas encontradas após o restore:
+      {{ orm_tables_after_restore | default([]) | join(', ') }}
+
+      Tabelas ausentes após o restore:
+      {{ orm_tables_missing_after_restore | default([]) | join(', ') }}
+  become: true
