@@ -59,16 +59,33 @@
       impdp falhou ou não concluiu corretamente. rc={{ _orm_impdp_exec.rc | default('N/A') }}.
       Verifique {{ orm_impdp_log_file }} e {{ orm_control_log_file }}.
     orm_restore_database_state: >-
-      O schema anterior já pode ter sido removido e o impdp não concluiu.
-      Recuperação manual deve usar o dump
-      {{ orm_effective_dump_reference | default(orm_effective_dump_file) }}.
+      {{
+        (
+          'Falha durante o restore de tabelas. Uma ou mais tabelas podem ter sido '
+          ~ 'parcialmente alteradas. Recuperação manual deve usar o dump '
+          ~ (orm_effective_dump_reference | default(orm_effective_dump_file))
+        )
+        if orm_scope_effective == 'tables'
+        else
+        (
+          'O schema anterior já pode ter sido removido e o impdp não concluiu. '
+          ~ 'Recuperação manual deve usar o dump '
+          ~ (orm_effective_dump_reference | default(orm_effective_dump_file))
+        )
+      }}
   when:
     - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
 
 - name: Data Pump | Registrar import concluído
   ansible.builtin.set_fact:
     orm_restore_import_completed: true
-    orm_restore_database_state: "impdp concluído; iniciando pós-restore."
+    orm_restore_database_state: >-
+      {{
+        'impdp de tabelas concluído; iniciando pós-restore.'
+        if orm_scope_effective == 'tables'
+        else
+        'impdp concluído; iniciando pós-restore.'
+      }}
   when:
     - not (orm_host_failed | bool)
     - _orm_impdp_exec.rc | default(1) | int == 0
