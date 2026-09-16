@@ -109,6 +109,12 @@
           em local ou cifs. Para storage_mode=cifs,
           orm_cifs_enabled deve estar habilitado.
 
+    - name: Backup | Validar tabelas solicitadas
+      ansible.builtin.import_tasks: 42_validate_backup_tables.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_scope_effective == 'tables'
+
     - name: Backup | Criar diretório físico local
       ansible.builtin.file:
         path: "{{ orm_backup_dir }}"
@@ -142,6 +148,10 @@
           Motivo: {{ orm_execution_reason | default('') }}
           Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
           Início: {{ orm_activity_started_at }}
+          Escopo: {{ orm_scope_effective }}
+          {% if orm_scope_effective == 'tables' %}
+          Tabelas: {{ orm_tables_effective | join(', ') }}
+          {% endif %}
       become: true
 
     - name: Backup | Montar CIFS para gravação direta
@@ -487,3 +497,5 @@
           finished_at: "{{ orm_activity_finished_at }}"
           duration_seconds: "{{ orm_activity_duration_seconds }}"
           duration: "{{ orm_activity_duration }}"
+          scope: "{{ orm_scope_effective }}"
+          tables: "{{ orm_tables_effective | default([]) }}"
