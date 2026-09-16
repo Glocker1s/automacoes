@@ -1,28 +1,64 @@
 ---
-- name: Resolver source_env, target_envs e schemas efetivos
+- name: Resolver source_env, target_envs, schemas e tabelas efetivos
   ansible.builtin.set_fact:
     orm_source_env_effective: >-
-      {{ orm_source_env_normalized if (orm_source_env_normalized | length > 0) else (orm_profile_cfg.default_source_env | default('prd') | string | lower) }}
+      {{
+        orm_source_env_normalized
+        if (orm_source_env_normalized | length > 0)
+        else (
+          orm_profile_cfg.default_source_env
+          | default('prd')
+          | string
+          | lower
+        )
+      }}
+
     orm_target_envs_effective: >-
       {{
         orm_selected_target_envs
         if (orm_selected_target_envs | length > 0)
         else (
-          orm_profile_cfg.default_restore_targets | default([]) | map('string') | map('lower') | list
+          orm_profile_cfg.default_restore_targets
+          | default([])
+          | map('string')
+          | map('lower')
+          | list
           if orm_action_normalized == 'restore'
           else (
-            orm_profile_cfg.default_sync_targets | default([]) | map('string') | map('lower') | list
+            orm_profile_cfg.default_sync_targets
+            | default([])
+            | map('string')
+            | map('lower')
+            | list
             if orm_action_normalized == 'sync'
             else []
           )
         )
       }}
+
     orm_schemas_effective: >-
       {{
         orm_selected_schemas
         if (orm_selected_schemas | length > 0)
-        else (orm_profile_cfg.schemas | default([]) | map('string') | map('trim') | map('upper') | reject('equalto', '') | list)
+        else (
+          orm_profile_cfg.schemas
+          | default([])
+          | map('string')
+          | map('trim')
+          | map('upper')
+          | reject('equalto', '')
+          | list
+        )
       }}
+
+    orm_tables_effective: >-
+      {{
+        orm_selected_tables
+        if orm_scope_normalized == 'tables'
+        else []
+      }}
+
+    orm_table_exists_action_effective: "{{ orm_table_exists_action_normalized }}"
 
 - name: Validar schemas efetivos
   ansible.builtin.assert:
@@ -31,6 +67,36 @@
     fail_msg: >-
       Nenhum schema foi definido para o profile {{ orm_profile_key_normalized }}.
       Configure schemas no profile ou informe orm_schemas no Survey.
+
+- name: Resolver owners das tabelas
+  ansible.builtin.set_fact:
+    orm_table_owners_effective: >-
+      {{
+        orm_tables_effective
+        | map('regex_replace', '\..*$', '')
+        | unique
+        | list
+      }}
+
+- name: Validar lista de tabelas
+  ansible.builtin.assert:
+    that:
+      - orm_tables_effective | length > 0
+    fail_msg: >-
+      orm_scope=tables exige pelo menos uma tabela em orm_tables.
+      Informe OWNER.TABELA separado por vírgula ou quebra de linha.
+  when: orm_scope_normalized == 'tables'
+
+- name: Validar owners permitidos para backup/restore de tabelas
+  ansible.builtin.assert:
+    that:
+      - orm_table_owners_effective | difference(orm_schemas_effective) | length == 0
+    fail_msg: >-
+      Existem tabelas cujo OWNER não pertence aos schemas permitidos
+      pelo profile/Survey.
+      Schemas permitidos: {{ orm_schemas_effective | join(', ') }}.
+      Owners informados: {{ orm_table_owners_effective | join(', ') }}.
+  when: orm_scope_normalized == 'tables'
 
 - name: Normalizar todos os hosts do profile
   ansible.builtin.set_fact:
@@ -175,8 +241,36 @@
 
 - name: Definir dump compartilhado do job
   ansible.builtin.set_fact:
-    orm_dump_basename: "{{ orm_profile_key_normalized }}_{{ orm_source_env_effective }}_{{ orm_run_timestamp }}_job_{{ orm_job_id }}.dmp"
-    orm_latest_manifest_name: "latest_{{ orm_profile_key_normalized }}_{{ orm_source_env_effective }}.txt"
+    orm_dump_basename: >-
+      {{
+        orm_profile_key_normalized
+        ~ '_'
+        ~ orm_source_env_effective
+        ~ (
+            '_tables'
+            if orm_scope_normalized == 'tables'
+            else ''
+          )
+        ~ '_'
+        ~ orm_run_timestamp
+        ~ '_job_'
+        ~ orm_job_id
+        ~ '.dmp'
+      }}
+
+    orm_latest_manifest_name: >-
+      {{
+        'latest_'
+        ~ orm_profile_key_normalized
+        ~ '_'
+        ~ orm_source_env_effective
+        ~ (
+            '_tables'
+            if orm_scope_normalized == 'tables'
+            else ''
+          )
+        ~ '.txt'
+      }}
 
 - name: Exibir plano resolvido
   ansible.builtin.debug:
