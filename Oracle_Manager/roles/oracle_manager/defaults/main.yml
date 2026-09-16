@@ -9,6 +9,22 @@ orm_profile_key: ""
 orm_execution_reason: ""
 
 # ============================================================================
+# ESCOPO DA OPERAÇÃO
+# ============================================================================
+
+# schema = backup/restore do schema completo
+# tables = backup/restore somente das tabelas informadas no Survey
+orm_scope: "schema"
+
+# Usado somente quando orm_scope=tables.
+# Aceita OWNER.TABELA separado por vírgula ou quebra de linha.
+orm_tables: ""
+
+# Usado somente no restore/sync com orm_scope=tables.
+# Valores aceitos: truncate | replace | skip
+orm_table_exists_action: "truncate"
+
+# ============================================================================
 # SELEÇÃO DE ORIGEM / DESTINO
 # ============================================================================
 
@@ -133,7 +149,7 @@ orm_cifs_delegate_host: "192.168.0.149"
 
 # Remove os artefatos locais dos hosts destino após restore/sync,
 # independentemente do resultado da execução.
-orm_cleanup_restore_artifacts: true
+orm_cleanup_restore_artifacts: false
 
 # Remove do CIFS o dump consumido após restore/sync concluído com sucesso.
 # Backup puro mantém dump, log e latest publicados no CIFS.
@@ -141,7 +157,7 @@ orm_cleanup_cifs_dump_after_restore: false
 
 # Remove os artefatos locais do backup após a coleta/publicação dos anexos.
 # Aplica-se ao backup puro e também à origem de um sync.
-orm_cleanup_local_backup_after_sync: true
+orm_cleanup_local_backup_after_sync: false
 
 # ============================================================================
 # REPORT
