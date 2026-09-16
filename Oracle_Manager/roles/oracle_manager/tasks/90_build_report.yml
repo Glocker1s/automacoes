@@ -20,6 +20,21 @@
           'env': hv.orm_env | default('-'),
           'profile': hv.orm_profile_key | default(orm_profile_key_normalized | default(orm_profile_key | default('-'))),
           'action': hv.orm_host_action | default(hv.orm_role | default('-')),
+          'scope': (
+            summary.get('scope', '')
+            or (hv.orm_scope_effective | default(orm_scope | default('schema')))
+          ),
+          'tables': (
+            summary.get('tables', [])
+            or (hv.orm_tables_effective | default(orm_tables | default([])))
+          ),
+          'table_exists_action': (
+            summary.get('table_exists_action', '')
+            or (
+              hv.orm_table_exists_action_effective
+              | default(hv.orm_table_exists_action | default(orm_table_exists_action | default('')))
+            )
+          ),
           'status': status,
           'failed_task': hv.orm_host_failed_task | default(''),
           'error': err,
