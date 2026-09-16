@@ -1,0 +1,80 @@
+---
+- name: Restore tables | Consultar tabelas existentes no destino
+  ansible.builtin.shell:
+    cmd: |
+      PDB="{{ orm_pdb_effective | default('') }}"
+
+      if [ -n "$PDB" ]; then
+        export ORACLE_PDB_SID="$PDB"
+      else
+        unset ORACLE_PDB_SID
+      fi
+
+      unset TWO_TASK
+      unset LOCAL
+
+      "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+      whenever sqlerror exit sql.sqlcode
+      set heading off feedback off pages 0 verify off echo off
+
+      select case
+               when count(*) = 1 then 'FOUND'
+               else 'MISSING'
+             end
+        from dba_tables
+       where upper(owner) = upper('{{ item.split(".")[0] }}')
+         and upper(table_name) = upper('{{ item.split(".")[1] }}');
+
+      exit
+      SQL
+    executable: /bin/bash
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  loop: "{{ orm_tables_effective }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _orm_restore_tables_before
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Restore tables | Inicializar estado anterior das tabelas
+  ansible.builtin.set_fact:
+    orm_tables_found_before_restore: []
+    orm_tables_missing_before_restore: []
+
+- name: Restore tables | Publicar tabelas existentes no destino
+  ansible.builtin.set_fact:
+    orm_tables_found_before_restore: >-
+      {{
+        orm_tables_found_before_restore
+        +
+        [item.item]
+      }}
+  loop: "{{ _orm_restore_tables_before.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - "'FOUND' in (item.stdout_lines | default([]) | map('trim') | list)"
+
+- name: Restore tables | Publicar tabelas ausentes no destino
+  ansible.builtin.set_fact:
+    orm_tables_missing_before_restore: >-
+      {{
+        orm_tables_missing_before_restore
+        +
+        [item.item]
+      }}
+  loop: "{{ _orm_restore_tables_before.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - "'FOUND' not in (item.stdout_lines | default([]) | map('trim') | list)"
+
+- name: Restore tables | Publicar estado operacional
+  ansible.builtin.set_fact:
+    orm_restore_database_state: >-
+      Restore de tabelas preparado.
+      TABLE_EXISTS_ACTION={{ orm_table_exists_action_effective | upper }}.
