@@ -1,0 +1,25 @@
+whenever sqlerror exit sql.sqlcode
+set pages 0 feedback off verify off heading off echo off lines 32767 trimspool on
+
+select 'grant '
+       || privilege
+       || ' on '
+       || lower(owner)
+       || '.'
+       || lower(table_name)
+       || ' to '
+       || grantee
+       || decode(grantable, 'YES', ' with grant option', NULL)
+       || ';'
+  from sys.dba_tab_privs
+ where (
+{% for table in orm_tables_effective %}
+       (
+         upper(owner) = upper('{{ table.split(".")[0] }}')
+         and upper(table_name) = upper('{{ table.split(".")[1] }}')
+       ){% if not loop.last %} or{% endif %}
+{% endfor %}
+       )
+ order by owner, table_name, grantee, privilege;
+
+exit
