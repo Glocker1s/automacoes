@@ -13,10 +13,18 @@
     column username format a30
     column machine format a45
     column program format a60
-    select username, sid, serial#, status, machine, program
-      from v\$session
+    column service_name format a35
+    select inst_id,
+           username,
+           sid,
+           serial#,
+           status,
+           machine,
+           program,
+           service_name
+      from gv\$session
      where upper(username) in ({{ _orm_schema_sql_list }})
-     order by username, sid;
+     order by username, inst_id, sid;
     exit
     SQL
   environment:
@@ -38,7 +46,9 @@
     "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
     whenever sqlerror exit sql.sqlcode
     set heading off feedback off pages 0 verify off echo off
-    select count(*) from v\$session where upper(username) in ({{ _orm_schema_sql_list }});
+    select count(*)
+      from gv\$session
+     where upper(username) in ({{ _orm_schema_sql_list }});
     exit
     SQL
   environment:
@@ -74,7 +84,11 @@
     whenever sqlerror exit sql.sqlcode
     set feedback off verify off
     begin
-      for r in (select username from dba_users where upper(username) in ({{ _orm_schema_sql_list }})) loop
+      for r in (
+        select username
+          from dba_users
+         where upper(username) in ({{ _orm_schema_sql_list }})
+      ) loop
         execute immediate 'alter user "'||r.username||'" account lock';
       end loop;
     end;
@@ -110,9 +124,30 @@
     "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
     whenever sqlerror exit sql.sqlcode
     set feedback off verify off
+
     begin
-      for r in (select sid, serial# from v\$session where upper(username) in ({{ _orm_schema_sql_list }})) loop
-        execute immediate 'alter system kill session '''||r.sid||','||r.serial#||''' immediate';
+      for r in (
+        select inst_id,
+               sid,
+               serial#
+          from gv\$session
+         where upper(username) in ({{ _orm_schema_sql_list }})
+      ) loop
+        begin
+          execute immediate
+            'alter system kill session '''
+            || r.sid
+            || ','
+            || r.serial#
+            || ',@'
+            || r.inst_id
+            || ''' immediate';
+        exception
+          when others then
+            if sqlcode not in (-30, -31) then
+              raise;
+            end if;
+        end;
       end loop;
     end;
     /
@@ -140,7 +175,9 @@
     "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
     whenever sqlerror exit sql.sqlcode
     set heading off feedback off pages 0 verify off echo off
-    select count(*) from v\$session where upper(username) in ({{ _orm_schema_sql_list }});
+    select count(*)
+      from gv\$session
+     where upper(username) in ({{ _orm_schema_sql_list }});
     exit
     SQL
   environment:
@@ -160,4 +197,21 @@
 
 - name: Connection control | Publicar sessões finais
   ansible.builtin.set_fact:
-    orm_sessions_after: "{{ _orm_sessions_after.stdout | default(orm_sessions_before | string) | trim | int }}"
+    orm_sessions_after: >-
+      {{
+        _orm_sessions_after.stdout
+        | default(orm_sessions_before | string)
+        | trim
+        | int
+      }}
+
+- name: Connection control | Validar ausência de sessões antes do DROP
+  ansible.builtin.assert:
+    that:
+      - orm_sessions_after | int == 0
+    fail_msg: >-
+      Ainda existem {{ orm_sessions_after }} sessão(ões) abertas para
+      {{ orm_schemas | join(', ') }} após o controle de conexões.
+      O DROP USER não será iniciado.
+  when:
+    - orm_restore_drop_users | bool
