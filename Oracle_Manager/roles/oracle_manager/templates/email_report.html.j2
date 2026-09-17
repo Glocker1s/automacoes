@@ -60,6 +60,10 @@
 {% set target_envs = orm_target_envs_effective | default([]) %}
 {% set reason = orm_execution_reason | default(motivo | default('-')) %}
 {% set rows = orm_report_rows | default([]) %}
+{% set first_row = (rows | first) | default({}) %}
+{% set scope = orm_scope_effective | default(orm_scope | default(first_row.scope | default('schema'))) | string | lower %}
+{% set tables = orm_tables_effective | default(orm_tables | default(first_row.tables | default([]))) %}
+{% set table_exists_action = orm_table_exists_action_effective | default(orm_table_exists_action | default(first_row.table_exists_action | default(''))) | string | lower %}
 {% set attachments = orm_report_attachments | default(send_mail_attachments | default([])) %}
 {% set job_url = ansible_url | default('') ~ '/#/jobs/playbook/' ~ job_id ~ '/output' %}
 
@@ -124,6 +128,8 @@
           <td style="border-left:1px solid #d9d9d9;border-right:1px solid #d9d9d9;padding:12px 16px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
             <b>Ação:</b> {{ badge(action | upper, 'blue') }}
             &nbsp;&nbsp;
+            <b>Escopo:</b> {{ badge(scope | upper, 'blue') }}
+            &nbsp;&nbsp;
             <b>Profile:</b> {{ code(profile) }}
             &nbsp;&nbsp;
             <b>Origem:</b> {{ code(source_env) }}
@@ -135,6 +141,21 @@
               {{ code('—') }}
             {% endif %}
             <br/>
+
+            {% if scope == 'tables' %}
+            <div style="margin-top:7px;">
+              <b>Tabelas:</b>
+              {% if tables is sequence and tables is not string %}
+                {{ code(tables | join(', ')) }}
+              {% else %}
+                {{ code(tables if tables | string | length > 0 else '—') }}
+              {% endif %}
+              &nbsp;&nbsp;
+              <b>TABLE_EXISTS_ACTION:</b>
+              {{ code(table_exists_action | upper if table_exists_action | length > 0 else '—') }}
+            </div>
+            {% endif %}
+
             <div style="margin-top:7px;">
               <b>Motivo:</b> {{ reason if reason | string | length > 0 else '—' }}
             </div>
@@ -227,6 +248,7 @@
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Ambiente</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Host</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Ação</th>
+                  <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Escopo</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">SID</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">PDB</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Schema(s)</th>
@@ -240,6 +262,22 @@
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">{{ row.env | default('—') }}</td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;"><b>{{ row.host | default('—') }}</b></td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">{{ badge((row.action | default('—')) | upper, 'blue') }}</td>
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;">
+                    <b>{{ row.scope | default('schema') | upper }}</b>
+                    {% if row.scope | default('schema') | lower == 'tables' %}
+                      <div style="font-size:11px;color:#666666;margin-top:4px;line-height:15px;">
+                        {% if row.tables is sequence and row.tables is not string %}
+                          {{ row.tables | join(', ') }}
+                        {% else %}
+                          {{ row.tables | default('—') }}
+                        {% endif %}
+                      </div>
+                      <div style="font-size:11px;color:#666666;margin-top:3px;line-height:15px;">
+                        TABLE_EXISTS_ACTION:
+                        <b>{{ row.table_exists_action | default('—') | upper }}</b>
+                      </div>
+                    {% endif %}
+                  </td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">{{ code(row.sid if row.sid else '—') }}</td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">{{ code(row.pdb if row.pdb else '—') }}</td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;">
