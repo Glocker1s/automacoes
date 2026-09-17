@@ -1,4 +1,8 @@
+{% if orm_scope_effective == 'tables' %}
+TABLES={{ orm_tables_effective | join(',') }}
+{% else %}
 SCHEMAS={{ orm_schemas | join(',') }}
+{% endif %}
 DIRECTORY={{ orm_directory_name_effective }}
 DUMPFILE={{ orm_dump_basename }}
 LOGFILE={{ orm_datapump_log_directory_name_effective }}:{{ orm_datapump_log_basename }}
