@@ -295,22 +295,20 @@
     - name: Restore | Desbloquear usuários se falhou antes do DROP
       ansible.builtin.shell: |
         PDB="{{ orm_pdb_effective | default('') }}"
-
         if [ -n "$PDB" ]; then
           export ORACLE_PDB_SID="$PDB"
         else
           unset ORACLE_PDB_SID
         fi
-
         "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
         whenever sqlerror continue
         begin
           for r in (
             select username
-            from dba_users
+              from dba_users
             where upper(username) in ({{ _orm_schema_sql_list }})
           ) loop
-            execute immediate 'alter user "' || r.username || '" account unlock';
+            execute immediate 'alter user "'||r.username||'" account unlock';
           end loop;
         end;
         /
@@ -327,19 +325,18 @@
       when:
         - orm_host_failed | default(false) | bool
         - orm_users_locked | default(false) | bool
-        - not (orm_restore_destructive_started | default(false) | bool)
+        - not (orm_restore_schema_dropped | default(false) | bool)
         - orm_oracle_home_effective | default('') | length > 0
 
     - name: Restore | Complementar estado quando falhou após DROP
       ansible.builtin.set_fact:
         orm_restore_database_state: >-
-          Falha após início da fase destrutiva.
-          O schema anterior pode ter sido removido.
+          Falha após remoção do schema anterior.
           Recuperação deve ser feita a partir de
-          {{ orm_effective_dump_reference | default(orm_effective_dump_file | default('dump de restore')) }}.
+          {{ orm_effective_dump_file | default('dump de restore') }}.
       when:
         - orm_host_failed | default(false) | bool
-        - orm_restore_destructive_started | default(false) | bool
+        - orm_restore_schema_dropped | default(false) | bool
         - not (orm_restore_completed | default(false) | bool)
 
     - name: Restore | Coletar trecho dos logs quando houver falha
