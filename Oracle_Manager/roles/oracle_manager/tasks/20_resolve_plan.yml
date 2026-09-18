@@ -239,6 +239,24 @@
       Informe orm_target_hosts para um host específico ou orm_confirm_multi_target_restore=sim.
   when: orm_action_normalized == 'restore'
 
+- name: Normalizar motivo para nome do dump de tabelas
+  ansible.builtin.set_fact:
+    orm_dump_reason_suffix: >-
+      {{
+        (
+          orm_execution_reason
+          | default('')
+          | string
+          | trim
+          | lower
+          | regex_replace('[^a-z0-9._-]+', '_')
+          | regex_replace('_+', '_')
+          | regex_replace('^_|_$', '')
+        )
+        if orm_scope_normalized == 'tables'
+        else ''
+      }}
+
 - name: Definir dump compartilhado do job
   ansible.builtin.set_fact:
     orm_dump_basename: >-
@@ -255,6 +273,14 @@
         ~ orm_run_timestamp
         ~ '_job_'
         ~ orm_job_id
+        ~ (
+            '_motivo_' ~ orm_dump_reason_suffix
+            if (
+              orm_scope_normalized == 'tables'
+              and orm_dump_reason_suffix | length > 0
+            )
+            else ''
+          )
         ~ '.dmp'
       }}
 
