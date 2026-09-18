@@ -119,6 +119,18 @@ orm_restore_fail_on_invalid_objects_default: false
 orm_restore_storage_mode_default: "local"
 
 # ============================================================================
+# MASKING / MASCARAMENTO
+# ============================================================================
+
+orm_masking_enabled_default: false
+orm_masking_fail_on_error_default: true
+orm_masking_run_on_envs_default: []
+orm_masking_protected_envs_default:
+  - "prd"
+orm_masking_run_on_scopes_default:
+  - "schema"
+
+# ============================================================================
 # CIFS - usado somente para dump/manifesto
 # ============================================================================
 
@@ -227,11 +239,18 @@ orm_profile_defaults:
     require_password: "{{ orm_restore_require_password_default }}"
     session_wait_retries: "{{ orm_restore_session_wait_retries_default }}"
     session_wait_delay: "{{ orm_restore_session_wait_delay_default }}"
-    async_poll: "{{ orm_restore_async_poll_default }}"
     validate_schemas: "{{ orm_restore_validate_schemas_default }}"
     validate_invalid_objects: "{{ orm_restore_validate_invalid_objects_default }}"
     fail_on_invalid_objects: "{{ orm_restore_fail_on_invalid_objects_default }}"
     storage_mode: "{{ orm_restore_storage_mode_default }}"
+
+  masking:
+    enabled: "{{ orm_masking_enabled_default }}"
+    fail_on_error: "{{ orm_masking_fail_on_error_default }}"
+    run_on_envs: "{{ orm_masking_run_on_envs_default }}"
+    protected_envs: "{{ orm_masking_protected_envs_default }}"
+    run_on_scopes: "{{ orm_masking_run_on_scopes_default }}"
+    scripts: []
 
   users: {}
   validations:
