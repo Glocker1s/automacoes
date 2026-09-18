@@ -30,13 +30,20 @@
     orm_restore_require_password: "{{ orm_profile_cfg.restore.require_password | default(orm_restore_require_password_default) | bool }}"
     orm_restore_session_wait_retries: "{{ orm_profile_cfg.restore.session_wait_retries | default(orm_restore_session_wait_retries_default) | int }}"
     orm_restore_session_wait_delay: "{{ orm_profile_cfg.restore.session_wait_delay | default(orm_restore_session_wait_delay_default) | int }}"
-    orm_restore_async_poll: "{{ orm_profile_cfg.restore.async_poll | default(orm_restore_async_poll_default) | int }}"
     orm_restore_validate_schemas: "{{ orm_profile_cfg.restore.validate_schemas | default(orm_restore_validate_schemas_default) | bool }}"
     orm_restore_validate_invalid_objects: "{{ orm_profile_cfg.restore.validate_invalid_objects | default(orm_restore_validate_invalid_objects_default) | bool }}"
     orm_restore_fail_on_invalid_objects: "{{ orm_profile_cfg.restore.fail_on_invalid_objects | default(orm_restore_fail_on_invalid_objects_default) | bool }}"
     orm_datapump_log_directory_name_effective: "{{ orm_profile_cfg.oracle.log_directory_name | default(orm_default_log_directory_name) }}"
     orm_cifs_data_dir_effective: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
     orm_cifs_storage_mounted: false
+
+    orm_masking_enabled: "{{ (orm_profile_cfg.masking | default({})).get('enabled', orm_masking_enabled_default) | bool }}"
+    orm_masking_fail_on_error: "{{ (orm_profile_cfg.masking | default({})).get('fail_on_error', orm_masking_fail_on_error_default) | bool }}"
+    orm_masking_run_on_envs: "{{ (orm_profile_cfg.masking | default({})).get('run_on_envs', orm_masking_run_on_envs_default) | map('string') | map('lower') | list }}"
+    orm_masking_protected_envs: "{{ (orm_profile_cfg.masking | default({})).get('protected_envs', orm_masking_protected_envs_default) | map('string') | map('lower') | list }}"
+    orm_masking_run_on_scopes: "{{ (orm_profile_cfg.masking | default({})).get('run_on_scopes', orm_masking_run_on_scopes_default) | map('string') | map('lower') | list }}"
+    orm_masking_scripts: "{{ (orm_profile_cfg.masking | default({})).get('scripts', []) }}"
+    orm_masking_status: "DESABILITADO"
 
     orm_control_log_file: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}/restore_{{ orm_profile_key }}_{{ orm_env }}_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
 
@@ -57,6 +64,10 @@
     orm_sessions_log_file: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}/sessions_before_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
 
     orm_validation_log_file: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}/validation_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+
+    orm_masking_remote_dir: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}/masking_job_{{ tower_job_id | default(awx_job_id | default('local')) }}"
+    orm_masking_log_file: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}/masking_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log"
+    orm_masking_applicable: false
 
     orm_effective_dump_name: ""
     orm_effective_dump_file: ""
@@ -95,14 +106,67 @@
       ansible.builtin.assert:
         that:
           - orm_restore_parallel | int == 1
-          - orm_restore_async_poll | int > 0
           - orm_restore_storage_mode in ['local', 'cifs']
           - (orm_restore_storage_mode != 'cifs') or (orm_cifs_enabled | bool)
         fail_msg: >-
-          Oracle Manager V1 exige restore.parallel=1,
-          restore.async_timeout>0, restore.async_poll>0 e
+          Oracle Manager V1 exige restore.parallel=1 e
           restore.storage_mode em local ou cifs.
           Para storage_mode=cifs, orm_cifs_enabled deve estar habilitado.
+
+    - name: Masking | Resolver aplicabilidade
+      ansible.builtin.set_fact:
+        orm_masking_applicable: >-
+          {{
+            orm_masking_enabled | bool
+            and
+            (
+              orm_masking_run_on_envs | length == 0
+              or orm_env | lower in orm_masking_run_on_envs
+            )
+            and
+            orm_scope_effective | lower in orm_masking_run_on_scopes
+          }}
+        orm_masking_status: >-
+          {{
+            'PENDENTE'
+            if (
+              orm_masking_enabled | bool
+              and
+              (
+                orm_masking_run_on_envs | length == 0
+                or orm_env | lower in orm_masking_run_on_envs
+              )
+              and
+              orm_scope_effective | lower in orm_masking_run_on_scopes
+            )
+            else (
+              'NAO_APLICAVEL'
+              if orm_masking_enabled | bool
+              else 'DESABILITADO'
+            )
+          }}
+
+    - name: Masking | Bloquear ambiente protegido antes da fase destrutiva
+      ansible.builtin.assert:
+        that:
+          - orm_env | lower not in orm_masking_protected_envs
+        fail_msg: >-
+          Mascaramento está habilitado para o profile, mas o ambiente
+          {{ orm_env }} está protegido. A operação foi bloqueada antes
+          da fase destrutiva.
+      when:
+        - orm_masking_enabled | bool
+
+    - name: Masking | Validar scripts configurados
+      ansible.builtin.assert:
+        that:
+          - orm_masking_scripts | length > 0
+          - orm_masking_scripts | selectattr('file', 'defined') | list | length == orm_masking_scripts | length
+        fail_msg: >-
+          Mascaramento aplicável ao ambiente/escopo, porém não há scripts
+          válidos configurados no profile.
+      when:
+        - orm_masking_applicable | bool
 
     - name: Restore | Inicializar log de controle
       ansible.builtin.copy:
@@ -129,6 +193,7 @@
           Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
           Início: {{ orm_activity_started_at }}
           Escopo: {{ orm_scope_effective }}
+          Masking: {{ orm_masking_status }}
           {% if orm_scope_effective == 'tables' %}
           Tabelas: {{ orm_tables_effective | join(', ') }}
           TABLE_EXISTS_ACTION: {{ orm_table_exists_action_effective | upper }}
@@ -217,17 +282,24 @@
       ansible.builtin.import_tasks: 64_execute_impdp.yml
       when: not (orm_host_failed | bool)
 
+    - name: Restore | Reaplicar grants capturados
+      ansible.builtin.import_tasks: 66_apply_grants.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+
+    - name: Restore | Executar mascaramento de dados
+      ansible.builtin.import_tasks: 70_masking.yml
+      when:
+        - not (orm_host_failed | bool)
+        - orm_restore_import_completed | bool
+        - orm_masking_applicable | bool
+
     - name: Restore | Restaurar senha e desbloquear usuários
       ansible.builtin.import_tasks: 65_restore_password.yml
       when:
         - not (orm_host_failed | bool)
         - orm_scope_effective == 'schema'
-        - orm_restore_import_completed | bool
-
-    - name: Restore | Reaplicar grants capturados
-      ansible.builtin.import_tasks: 66_apply_grants.yml
-      when:
-        - not (orm_host_failed | bool)
         - orm_restore_import_completed | bool
 
     - name: Restore | Executar validações finais do schema
@@ -335,6 +407,7 @@
       when:
         - orm_host_failed | default(false) | bool
         - orm_restore_schema_dropped | default(false) | bool
+        - not (orm_restore_import_completed | default(false) | bool)
         - not (orm_restore_completed | default(false) | bool)
 
     - name: Restore | Coletar trecho dos logs quando houver falha
@@ -351,6 +424,11 @@
 
         echo "=== GRANTS APPLY LOG ==="
         tail -n 60 "{{ orm_grants_apply_log_file }}" 2>/dev/null || true
+
+        echo
+
+        echo "=== MASKING LOG ==="
+        tail -n 100 "{{ orm_masking_log_file }}" 2>/dev/null || true
       args:
         executable: /bin/bash
       register: _orm_restore_error_excerpt
@@ -422,6 +500,17 @@
             cat "{{ orm_grants_apply_log_file }}"
           else
             echo "Reaplicação de grants concluída sem saída adicional."
+          fi
+
+          echo
+          echo "============================================================"
+          echo "MASKING"
+          echo "============================================================"
+
+          if [ -f "{{ orm_masking_log_file }}" ]; then
+            cat "{{ orm_masking_log_file }}"
+          else
+            echo "Masking: {{ orm_masking_status | default('DESABILITADO') }}"
           fi
 
           echo
@@ -502,6 +591,10 @@
           sessions_before: "{{ orm_sessions_before | default(0) }}"
           sessions_after: "{{ orm_sessions_after | default(0) }}"
           invalid_objects: "{{ orm_invalid_objects_count | default(0) }}"
+          masking_enabled: "{{ orm_masking_enabled | default(false) }}"
+          masking_applicable: "{{ orm_masking_applicable | default(false) }}"
+          masking_status: "{{ orm_masking_status | default('DESABILITADO') }}"
+          masking_log: "{{ orm_masking_log_file | default('') }}"
           destructive_started: "{{ orm_restore_destructive_started | default(false) }}"
           schema_dropped: "{{ orm_restore_schema_dropped | default(false) }}"
           import_completed: "{{ orm_restore_import_completed | default(false) }}"
