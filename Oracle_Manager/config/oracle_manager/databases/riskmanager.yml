@@ -36,7 +36,7 @@ cm:
 
         # Configurações de backup.
         backup:
-          storage_mode: "local"
+          storage_mode: "cifs"
           # Diretório físico local onde o expdp gera dump/log/parfile.
           root_dir: "/backup/oracle_manager"
 
@@ -96,10 +96,6 @@ cm:
           session_wait_retries: 12
           session_wait_delay: 5
 
-          # Tempo máximo do impdp e intervalo de acompanhamento.
-          async_timeout: 14400
-          async_poll: 15
-
           # Validações pós-restore.
           validate_schemas: true
           validate_invalid_objects: true
@@ -117,6 +113,24 @@ cm:
           enabled: true
           queries:
             - "queries/riskmanager_lab.sql"
+
+        masking:
+          enabled: true
+          fail_on_error: true
+
+          run_on_envs:
+            - "tu"
+
+          protected_envs:
+            - "prd"
+
+          run_on_scopes:
+            - "schema"
+
+          scripts:
+            - name: "oracle_masking_lab"
+              file: "masking/oracle_masking_lab.sql"
+              pass_schema_arg: true
 
         # Mapeamento de ambientes e hosts.
         #
