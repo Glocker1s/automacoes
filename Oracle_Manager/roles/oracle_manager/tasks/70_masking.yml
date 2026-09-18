@@ -1,0 +1,157 @@
+---
+- name: Masking | Criar diretório remoto dos scripts
+  ansible.builtin.file:
+    path: "{{ orm_masking_remote_dir }}"
+    state: directory
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0750"
+  become: true
+
+- name: Masking | Inicializar log
+  ansible.builtin.copy:
+    dest: "{{ orm_masking_log_file }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+    content: |
+      Oracle Manager - Masking
+      Host: {{ inventory_hostname }}
+      Ambiente: {{ orm_env }}
+      Profile: {{ orm_profile_key }}
+      Escopo: {{ orm_scope_effective }}
+      Schemas: {{ orm_schemas | join(', ') }}
+      Scripts: {{ orm_masking_scripts | map(attribute='file') | list | join(', ') }}
+  become: true
+
+- name: Masking | Copiar scripts para o destino
+  ansible.builtin.copy:
+    src: "{{ item.file }}"
+    dest: "{{ orm_masking_remote_dir }}/{{ item.file | basename }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+  loop: "{{ orm_masking_scripts }}"
+  loop_control:
+    label: "{{ item.name | default(item.file) }}"
+  become: true
+
+- name: Masking | Executar scripts
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+
+    SCRIPT_FILE="{{ orm_masking_remote_dir }}/{{ item.file | basename }}"
+    SCRIPT_NAME="{{ item.name | default(item.file | basename) }}"
+
+    {
+      echo
+      echo "============================================================"
+      echo "Script: ${SCRIPT_NAME}"
+      echo "Arquivo: ${SCRIPT_FILE}"
+      echo "============================================================"
+    } >> "{{ orm_masking_log_file }}"
+
+    if [ ! -s "$SCRIPT_FILE" ]; then
+      echo "[ERROR] Script não encontrado ou vazio: ${SCRIPT_FILE}" >> "{{ orm_masking_log_file }}"
+      exit 20
+    fi
+
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" >> "{{ orm_masking_log_file }}" 2>&1 <<SQL
+    whenever sqlerror exit sql.sqlcode rollback
+    set echo on
+    set feedback on
+    set verify on
+    set serveroutput on
+    {% if item.pass_schema_arg | default(false) | bool %}
+    @"${SCRIPT_FILE}" "{{ orm_schemas | first }}"
+    {% else %}
+    @"${SCRIPT_FILE}"
+    {% endif %}
+    exit
+    SQL
+
+    rc=$?
+    echo "[INFO] Masking rc=${rc}" >> "{{ orm_masking_log_file }}"
+    exit ${rc}
+  args:
+    executable: /bin/bash
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  loop: "{{ orm_masking_scripts }}"
+  loop_control:
+    label: "{{ item.name | default(item.file) }}"
+  register: _orm_masking_exec
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+
+- name: Masking | Registrar scripts com falha
+  ansible.builtin.set_fact:
+    orm_masking_failed_results: >-
+      {{
+        _orm_masking_exec.results
+        | default([])
+        | selectattr('rc', 'defined')
+        | rejectattr('rc', 'equalto', 0)
+        | list
+      }}
+
+- name: Masking | Registrar sucesso
+  ansible.builtin.set_fact:
+    orm_masking_status: "SUCESSO"
+  when:
+    - orm_masking_failed_results | length == 0
+
+- name: Masking | Registrar falha ou aviso
+  ansible.builtin.set_fact:
+    orm_masking_status: "{{ 'FALHA' if orm_masking_fail_on_error else 'AVISO' }}"
+    orm_host_failed: "{{ orm_host_failed or orm_masking_fail_on_error }}"
+    orm_host_warning: "{{ orm_host_warning or not orm_masking_fail_on_error }}"
+    orm_host_failed_task: >-
+      {{
+        'Mascaramento de dados'
+        if orm_masking_fail_on_error
+        else orm_host_failed_task
+      }}
+    orm_host_error_msg: >-
+      {{
+        'Falha ao executar mascaramento de dados. Verifique ' ~ orm_masking_log_file
+        if orm_masking_fail_on_error
+        else orm_host_error_msg
+      }}
+    orm_restore_database_state: >-
+      {{
+        'Restore importado, porém o mascaramento falhou. '
+        ~ (
+          'Usuário mantido bloqueado por segurança.'
+          if orm_masking_fail_on_error and orm_scope_effective == 'schema'
+          else 'Execução mantida com aviso conforme configuração.'
+        )
+      }}
+  when:
+    - orm_masking_failed_results | length > 0
+
+- name: Masking | Registrar resultado no log de controle
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+    Masking:
+      Status: {{ orm_masking_status }}
+      Ambiente: {{ orm_env }}
+      Escopo: {{ orm_scope_effective }}
+      Log: {{ orm_masking_log_file }}
+      Scripts: {{ orm_masking_scripts | map(attribute='file') | list | join(', ') }}
+    EOF
+  args:
+    executable: /bin/bash
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
