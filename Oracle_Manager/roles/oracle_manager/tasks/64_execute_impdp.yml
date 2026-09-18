@@ -11,8 +11,6 @@
     ORACLE_PDB_SID: "{{ orm_pdb_effective if (orm_is_cdb | bool and orm_pdb_effective | length > 0) else '' }}"
     PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
     TZ: "{{ orm_report_timezone | default('America/Sao_Paulo') }}"
-  async: "{{ orm_restore_async_timeout }}"
-  poll: "{{ orm_restore_async_poll }}"
   register: _orm_impdp_exec
   failed_when: false
   changed_when: true
