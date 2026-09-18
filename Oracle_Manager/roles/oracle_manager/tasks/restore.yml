@@ -30,7 +30,6 @@
     orm_restore_require_password: "{{ orm_profile_cfg.restore.require_password | default(orm_restore_require_password_default) | bool }}"
     orm_restore_session_wait_retries: "{{ orm_profile_cfg.restore.session_wait_retries | default(orm_restore_session_wait_retries_default) | int }}"
     orm_restore_session_wait_delay: "{{ orm_profile_cfg.restore.session_wait_delay | default(orm_restore_session_wait_delay_default) | int }}"
-    orm_restore_async_timeout: "{{ orm_profile_cfg.restore.async_timeout | default(orm_restore_async_timeout_default) | int }}"
     orm_restore_async_poll: "{{ orm_profile_cfg.restore.async_poll | default(orm_restore_async_poll_default) | int }}"
     orm_restore_validate_schemas: "{{ orm_profile_cfg.restore.validate_schemas | default(orm_restore_validate_schemas_default) | bool }}"
     orm_restore_validate_invalid_objects: "{{ orm_profile_cfg.restore.validate_invalid_objects | default(orm_restore_validate_invalid_objects_default) | bool }}"
@@ -96,7 +95,6 @@
       ansible.builtin.assert:
         that:
           - orm_restore_parallel | int == 1
-          - orm_restore_async_timeout | int > 0
           - orm_restore_async_poll | int > 0
           - orm_restore_storage_mode in ['local', 'cifs']
           - (orm_restore_storage_mode != 'cifs') or (orm_cifs_enabled | bool)
