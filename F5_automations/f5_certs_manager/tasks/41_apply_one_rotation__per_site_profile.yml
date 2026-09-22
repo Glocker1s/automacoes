@@ -83,10 +83,48 @@
     - _target_profile_type == 'client'
     - (_client_prof_raw.json.certKeyChain | default([])) | length > 1
 
+- name: Validar data de expiração para nome dos objetos no F5
+  ansible.builtin.assert:
+    that:
+      - (_src_cert.not_after_epoch | default(0) | int) > 0
+    fail_msg: >-
+      Não foi possível determinar a data de expiração do certificado
+      {{ _src_cert.cert_name | default(_folder_full) }}.
+      A data de expiração é necessária para gerar o sufixo dos objetos no F5.
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+    - (f5_import_name_suffix_override | default('') | string | trim | length) == 0
+  changed_when: false
+
 - name: Definir base dos nomes de objetos no F5
   ansible.builtin.set_fact:
     _f5_import_base_name: "{{ _folder_full | regex_replace('[^A-Za-z0-9._-]', '_') }}"
-    _f5_import_suffix: "{{ f5_import_name_suffix_eff | default('') | trim }}"
+  changed_when: false
+
+- name: Definir sufixo pela data de expiração do certificado
+  ansible.builtin.set_fact:
+    _f5_import_suffix: >-
+      {{
+        (
+          (f5_import_name_suffix_override | default('') | string | trim)
+          if (f5_import_name_suffix_override | default('') | string | trim | length) > 0
+          else (
+            (f5_import_name_suffix_format | default('%m-%Y'))
+            | strftime(_src_cert.not_after_epoch | int)
+          )
+        )
+        | trim
+        | regex_replace('[^A-Za-z0-9._-]', '-')
+      }}
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+  changed_when: false
+
+- name: Definir sufixo vazio quando sufixo de importação estiver desabilitado
+  ansible.builtin.set_fact:
+    _f5_import_suffix: ""
+  when:
+    - not (f5_import_name_suffix_enabled | default(true) | bool)
   changed_when: false
 
 - name: Definir nome desejado dos objetos no F5
