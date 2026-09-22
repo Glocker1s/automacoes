@@ -1,0 +1,15 @@
+---
+- name: Garantir lista de resultados do cleanup
+  ansible.builtin.set_fact:
+    f5_cleanup_results: "{{ f5_cleanup_results | default([]) }}"
+
+- name: Selecionar grupos duplicados candidatos a deleção
+  ansible.builtin.set_fact:
+    _cleanup_groups: "{{ (f5_duplicates | default([])) | selectattr('delete_candidate') | list }}"
+
+- name: Cleanup - processar cada grupo candidato (apaga o "oldest" do grupo)
+  ansible.builtin.include_tasks: 51_cleanup_one_duplicate.yml
+  loop: "{{ _cleanup_groups }}"
+  loop_control:
+    loop_var: dg
+    label: "{{ dg.oldest.full_path | default('unknown') }}"

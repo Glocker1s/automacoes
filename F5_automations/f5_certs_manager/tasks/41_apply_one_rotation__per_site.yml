@@ -1,0 +1,302 @@
+---
+- name: Definir server/port/provider do site
+  ansible.builtin.set_fact:
+    _f5_srv: "{{ site.server }}"
+    _f5_port: "{{ site.port | default(443) | int }}"
+    f5_provider_eff: "{{ f5_provider_base | combine({'server': site.server, 'server_port': (site.port | default(443) | int)}) }}"
+  changed_when: false
+
+- name: Obter caches do site
+  ansible.builtin.set_fact:
+    _site_clientssl_profiles: "{{ (f5_clientssl_profiles_by_site | default({})).get(site.name, []) }}"
+    _site_serverssl_profiles: "{{ (f5_serverssl_profiles_by_site | default({})).get(site.name, []) }}"
+    _site_installed_certs: "{{ (f5_installed_certs_by_site | default({})).get(site.name, []) }}"
+    _site_virtual_index: "{{ (f5_virtuals_index_by_site | default({})).get(site.name, {}) }}"
+  changed_when: false
+
+- name: Definir tipos de SSL Profile para ação
+  ansible.builtin.set_fact:
+    _ssl_profile_types_for_action: "{{ f5_ssl_profile_types_for_action | default(['client']) }}"
+  changed_when: false
+
+- name: Inicializar descoberta do certificado atual
+  ansible.builtin.set_fact:
+    _seed_current_cert_candidate_found: false
+    _seed_current_cert_candidate: {}
+  changed_when: false
+
+- name: Montar lista de certificados atualmente em uso no site conforme escopo
+  ansible.builtin.set_fact:
+    _site_used_current_certs: >-
+      {%- set out = [] -%}
+
+      {%- if 'client' in (_ssl_profile_types_for_action | default(['client'])) -%}
+        {%- for p in (_site_clientssl_profiles | default([])) -%}
+          {%- set ppart = (p.partition | default('Common')) -%}
+          {%- set ckc = (p.certKeyChain | default([])) -%}
+          {%- if (ckc | length) > 0 -%}
+            {%- set cert0 = (ckc[0].cert | default('') | string | trim) -%}
+            {%- if (cert0 | length) > 0 and (cert0 | lower) not in ['none', 'inherit'] -%}
+              {%- set cert0full = cert0 if cert0.startswith('/') else ('/' ~ ppart ~ '/' ~ cert0) -%}
+              {%- if cert0full not in out -%}
+                {%- set _ = out.append(cert0full) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endif -%}
+
+      {%- if 'server' in (_ssl_profile_types_for_action | default(['client'])) -%}
+        {%- for p in (_site_serverssl_profiles | default([])) -%}
+          {%- set ppart = (p.partition | default('Common')) -%}
+          {%- set cert0 = (p.cert | default('') | string | trim) -%}
+          {%- if (cert0 | length) > 0 and (cert0 | lower) not in ['none', 'inherit'] -%}
+            {%- set cert0full = cert0 if cert0.startswith('/') else ('/' ~ ppart ~ '/' ~ cert0) -%}
+            {%- if cert0full not in out -%}
+              {%- set _ = out.append(cert0full) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endif -%}
+
+      {{ out }}
+  changed_when: false
+
+- name: Descobrir candidatos por match exato de DNS SANs
+  ansible.builtin.set_fact:
+    _site_cert_candidates_exact: >-
+      {%- set out = [] -%}
+      {%- set wanted = (_src_cert.sans_norm | default([])) -%}
+      {%- for c in (_site_installed_certs | default([])) -%}
+        {%- set cfull = (c.full_path | default('')) -%}
+        {%- set sans = ((c.san_list_norm | default([])) | reject('match', '^ip address:') | list) -%}
+        {%- if (cfull in (_site_used_current_certs | default([]))) and (wanted | length > 0) and (sans == wanted) -%}
+          {%- set _ = out.append(c) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Descobrir candidatos por primary SAN
+  ansible.builtin.set_fact:
+    _site_cert_candidates_primary: >-
+      {%- set out = [] -%}
+      {%- set primary = (_src_cert.primary_san | default('') | string | trim | lower) -%}
+      {%- for c in (_site_installed_certs | default([])) -%}
+        {%- set cfull = (c.full_path | default('')) -%}
+        {%- set sans = ((c.san_list_norm | default([])) | reject('match', '^ip address:') | list) -%}
+        {%- if (cfull in (_site_used_current_certs | default([]))) and (primary | length > 0) and (primary in sans) -%}
+          {%- set _ = out.append(c) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Descobrir candidatos por interseção de DNS SANs
+  ansible.builtin.set_fact:
+    _site_cert_candidates_overlap: >-
+      {%- set out = [] -%}
+      {%- set wanted = (_src_cert.sans_norm | default([])) -%}
+      {%- for c in (_site_installed_certs | default([])) -%}
+        {%- set cfull = (c.full_path | default('')) -%}
+        {%- set sans = ((c.san_list_norm | default([])) | reject('match', '^ip address:') | list) -%}
+        {%- if (cfull in (_site_used_current_certs | default([]))) and ((sans | intersect(wanted)) | length > 0) -%}
+          {%- set _ = out.append(c) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Falhar se match exato de SANs ficou ambíguo
+  ansible.builtin.fail:
+    msg: >-
+      [{{ site.name }}] Descoberta automática ficou ambígua por DNS SAN exata.
+      Cert novo={{ _src_cert.cert_name | default('') }}
+      SANs={{ _src_cert.sans_norm | default([]) }}
+      Candidatos={{ _site_cert_candidates_exact | map(attribute='full_path') | list }}
+  when: (_site_cert_candidates_exact | default([]) | length) > 1
+
+- name: Selecionar candidato por match exato de SANs
+  ansible.builtin.set_fact:
+    _seed_current_cert_candidate: "{{ _site_cert_candidates_exact[0] }}"
+    _seed_current_cert_candidate_found: true
+  when: (_site_cert_candidates_exact | default([]) | length) == 1
+  changed_when: false
+
+- name: Falhar se primary SAN ficou ambíguo
+  ansible.builtin.fail:
+    msg: >-
+      [{{ site.name }}] Descoberta automática ficou ambígua por primary SAN.
+      Cert novo={{ _src_cert.cert_name | default('') }}
+      Primary SAN={{ _src_cert.primary_san | default('') }}
+      Candidatos={{ _site_cert_candidates_primary | map(attribute='full_path') | list }}
+  when:
+    - not (_seed_current_cert_candidate_found | bool)
+    - (_site_cert_candidates_primary | default([]) | length) > 1
+
+- name: Selecionar candidato por primary SAN
+  ansible.builtin.set_fact:
+    _seed_current_cert_candidate: "{{ _site_cert_candidates_primary[0] }}"
+    _seed_current_cert_candidate_found: true
+  when:
+    - not (_seed_current_cert_candidate_found | bool)
+    - (_site_cert_candidates_primary | default([]) | length) == 1
+  changed_when: false
+
+- name: Falhar se interseção de SANs ficou ambígua
+  ansible.builtin.fail:
+    msg: >-
+      [{{ site.name }}] Descoberta automática ficou ambígua por interseção de DNS SANs.
+      Cert novo={{ _src_cert.cert_name | default('') }}
+      SANs={{ _src_cert.sans | default([]) }}
+      Candidatos={{ _site_cert_candidates_overlap | map(attribute='full_path') | list }}
+  when:
+    - not (_seed_current_cert_candidate_found | bool)
+    - (_site_cert_candidates_overlap | default([]) | length) > 1
+
+- name: Selecionar candidato por interseção de SANs
+  ansible.builtin.set_fact:
+    _seed_current_cert_candidate: "{{ _site_cert_candidates_overlap[0] }}"
+    _seed_current_cert_candidate_found: true
+  when:
+    - not (_seed_current_cert_candidate_found | bool)
+    - (_site_cert_candidates_overlap | default([]) | length) == 1
+  changed_when: false
+
+- name: Falhar se não foi possível descobrir o certificado atual no site
+  ansible.builtin.fail:
+    msg: >-
+      [{{ site.name }}] Não consegui descobrir automaticamente o certificado atual no F5
+      para o cert novo "{{ _src_cert.cert_name | default('') }}".
+      DNS SANs novas={{ _src_cert.sans_norm | default([]) }}
+      Primary SAN={{ _src_cert.primary_san | default('') }}
+      Certs em uso no site={{ _site_used_current_certs | default([]) }}
+      Escopo de profiles={{ _ssl_profile_types_for_action | default(['client']) }}.
+  when: not (_seed_current_cert_candidate_found | bool)
+
+- name: Definir dados resolvidos da descoberta
+  ansible.builtin.set_fact:
+    _seed_profile_full_resolved: "autodiscovery via {{ _seed_current_cert_candidate.full_path }}"
+    _seed_current_cert_resolved: "{{ _seed_current_cert_candidate.full_path }}"
+  changed_when: false
+
+- name: Montar lista de profiles alvo do site conforme escopo SSL
+  ansible.builtin.set_fact:
+    _target_profiles_site: >-
+      {%- set out = [] -%}
+
+      {%- if 'client' in (_ssl_profile_types_for_action | default(['client'])) -%}
+        {%- for p in (_site_clientssl_profiles | default([])) -%}
+          {%- set ppart = (p.partition | default('Common')) -%}
+          {%- set pname = (p.name | default('')) -%}
+          {%- set pfull = '/' ~ ppart ~ '/' ~ pname -%}
+          {%- set ckc = (p.certKeyChain | default([])) -%}
+          {%- if (ckc | length) > 0 -%}
+            {%- set cert0 = (ckc[0].cert | default('') | string | trim) -%}
+            {%- set cert0full = cert0 if cert0.startswith('/') else ('/' ~ ppart ~ '/' ~ cert0) -%}
+            {%- if cert0full == _seed_current_cert_resolved -%}
+              {%- set _ = out.append({'name': pname, 'partition': ppart, 'full_path': pfull, 'type': 'client'}) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endif -%}
+
+      {%- if 'server' in (_ssl_profile_types_for_action | default(['client'])) -%}
+        {%- for p in (_site_serverssl_profiles | default([])) -%}
+          {%- set ppart = (p.partition | default('Common')) -%}
+          {%- set pname = (p.name | default('')) -%}
+          {%- set pfull = '/' ~ ppart ~ '/' ~ pname -%}
+          {%- set cert0 = (p.cert | default('') | string | trim) -%}
+          {%- if (cert0 | length) > 0 and (cert0 | lower) not in ['none', 'inherit'] -%}
+            {%- set cert0full = cert0 if cert0.startswith('/') else ('/' ~ ppart ~ '/' ~ cert0) -%}
+            {%- if cert0full == _seed_current_cert_resolved -%}
+              {%- set _ = out.append({'name': pname, 'partition': ppart, 'full_path': pfull, 'type': 'server'}) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endif -%}
+
+      {{ out }}
+  changed_when: false
+
+- name: Montar lista de Client SSL Profiles alvo do site
+  ansible.builtin.set_fact:
+    _target_profiles_client_site: "{{ _target_profiles_site | default([]) | selectattr('type', 'equalto', 'client') | list }}"
+  changed_when: false
+
+- name: Garantir que pelo menos um profile alvo foi encontrado
+  ansible.builtin.assert:
+    that:
+      - (_target_profiles_site | default([]) | length) > 0
+    fail_msg: >-
+      [{{ site.name }}] Não encontrei nenhum SSL Profile alvo para o cert atual
+      {{ _seed_current_cert_resolved | default('n/a') }} no escopo
+      {{ _ssl_profile_types_for_action | default(['client']) }}.
+
+- name: Definir rotation_id do grupo do site
+  ansible.builtin.set_fact:
+    _group_rotation_id: "{{ site.name ~ '|' ~ (_seed_current_cert_resolved | default('')) ~ '|' ~ _folder_full }}"
+  changed_when: false
+
+- name: Aplicar rotação em cada profile alvo do site
+  ansible.builtin.include_tasks: 41_apply_one_rotation__per_site_profile.yml
+  loop: "{{ _target_profiles_site }}"
+  loop_control:
+    loop_var: target_profile
+    label: "{{ site.name }}:{{ target_profile.type }}:{{ target_profile.full_path }}"
+  vars:
+    _profile_partition: "{{ target_profile.partition }}"
+    _profile_name: "{{ target_profile.name }}"
+    _target_profile: "{{ target_profile.full_path }}"
+    _target_profile_type: "{{ target_profile.type }}"
+    _rotation_id: "{{ _group_rotation_id }}"
+
+- name: Montar entradas automáticas de validação do grupo
+  ansible.builtin.set_fact:
+    _validate_entries_eff: >-
+      {%- set out = [] -%}
+      {%- set targets = [] -%}
+      {%- for p in (_target_profiles_client_site | default([])) -%}
+        {%- for v in ((_site_virtual_index | default({})).get(p.full_path, [])) -%}
+          {%- set t = (v.target | default('') | string | trim) -%}
+          {%- if t | length > 0 and t not in targets -%}
+            {%- set _ = targets.append(t) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {%- for t in targets -%}
+        {%- set _ = out.append({
+            'target': t,
+            'sni': (_src_cert.sans | default([])),
+            'path': (rot.validate_path | default(f5_validate_path_default | default('/'))),
+            'ok_codes': (rot.validate_ok_codes | default(f5_validate_ok_codes_default | default([200])))
+          }) -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Garantir que ao menos um target de validação foi descoberto para Client SSL
+  ansible.builtin.assert:
+    that:
+      - (_validate_entries_eff | default([]) | length) > 0
+    fail_msg: >-
+      [{{ site.name }}] Não foi possível descobrir targets de validação para o grupo
+      {{ _seed_current_cert_resolved | default('n/a') }}.
+  when:
+    - (_target_profiles_client_site | default([]) | length) > 0
+    - (f5_enable_post_handshake_validation | bool) or (f5_enable_post_http_validation | bool)
+
+- name: Validar handshake TLS + HTTP para o grupo do site
+  ansible.builtin.include_tasks: 42_validate_handshake.yml
+  vars:
+    _rotation_id: "{{ _group_rotation_id }}"
+    _validate_entries: "{{ _validate_entries_eff | default([]) }}"
+    _validate_default_sni: ""
+    _validate_default_path: "{{ rot.validate_path | default(f5_validate_path_default | default('/')) }}"
+    _validate_default_ok_codes: "{{ rot.validate_ok_codes | default(f5_validate_ok_codes_default | default([200])) }}"
+    _expected_not_after: "{{ _src_cert.not_after | default('') }}"
+    _expected_not_after_epoch: "{{ _src_cert.not_after_epoch | default(0) | int }}"
+  when:
+    - (_target_profiles_client_site | default([]) | length) > 0
+    - (_validate_entries_eff | default([]) | length) > 0
+    - (f5_enable_post_handshake_validation | bool) or (f5_enable_post_http_validation | bool)

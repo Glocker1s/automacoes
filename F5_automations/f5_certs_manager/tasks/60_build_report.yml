@@ -1,0 +1,923 @@
+---
+- name: Formatar data do report no timezone configurado
+  ansible.builtin.command: >
+    date -d @{{ _now_epoch | int }} '+%d/%m/%Y %H:%M:%S'
+  environment:
+    TZ: "{{ f5_report_timezone | default('America/Sao_Paulo') }}"
+  register: _report_date_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Definir data do report
+  ansible.builtin.set_fact:
+    report_date_br: "{{ _report_date_cmd.stdout | default('%d/%m/%Y %H:%M:%S' | strftime(_now_epoch | int)) }}"
+  changed_when: false
+
+- name: Montar HTML do report
+  ansible.builtin.set_fact:
+    f5_report_html: |
+      {% macro fmt_f5_gmt(s) -%}
+        {%- if (s | default('') | trim | length) == 0 -%}
+          —
+        {%- else -%}
+          {%- set cleaned = (s | trim | regex_replace('\\s+', ' ')) -%}
+          {%- set dt = (cleaned | to_datetime('%b %d %H:%M:%S %Y %Z')) -%}
+          {{ dt.strftime('%d/%m/%Y %H:%M:%S') }}
+        {%- endif -%}
+      {%- endmacro %}
+
+      {% macro plural_dia(n) -%}
+        {%- if (n | int) == 1 -%}dia{%- else -%}dias{%- endif -%}
+      {%- endmacro %}
+
+      {% macro code(v) -%}
+        <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f3f3f3;color:#222;padding:2px 5px;">{{ v | default('—') }}</span>
+      {%- endmacro %}
+
+      {% macro muted(v) -%}
+        <span style="color:#666666;">{{ v }}</span>
+      {%- endmacro %}
+
+      {% macro badge(text, kind) -%}
+        {%- if kind == 'crit' -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#ffebee;color:#b00020;padding:2px 6px;">{{ text }}</span>
+        {%- elif kind == 'warn' -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#fff3e0;color:#b26a00;padding:2px 6px;">{{ text }}</span>
+        {%- elif kind == 'ok' -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#e8f5e9;color:#1b5e20;padding:2px 6px;">{{ text }}</span>
+        {%- else -%}
+          <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#eeeeee;color:#333333;padding:2px 6px;">{{ text }}</span>
+        {%- endif -%}
+      {%- endmacro %}
+
+      {% macro badge_days(days, level) -%}
+        {%- set d = (days | default(0) | int) -%}
+        {%- if d < 0 -%}
+          {{ badge('EXPIRADO', 'crit') }}
+        {%- elif d == 0 -%}
+          {{ badge('HOJE', 'crit') }}
+        {%- else -%}
+          {%- if level == 'crit' -%}
+            {{ badge(d ~ ' ' ~ plural_dia(d), 'crit') }}
+          {%- elif level == 'warn' -%}
+            {{ badge(d ~ ' ' ~ plural_dia(d), 'warn') }}
+          {%- else -%}
+            {{ badge(d ~ ' ' ~ plural_dia(d), 'ok') }}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endmacro %}
+
+      {% macro th(v) -%}
+        <th bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;">{{ v }}</th>
+      {%- endmacro %}
+
+      {% macro td_open() -%}
+        <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+      {%- endmacro %}
+
+      {% macro cert_table(title, rows, level) -%}
+        <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">{{ title }}</div>
+        {% if (rows | default([]) | length) == 0 %}
+          <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;margin-bottom:6px;">Nenhum item.</div>
+        {% else %}
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+            <tr>
+              {{ th('Certificado') }}
+              {{ th('Expira em') }}
+              {{ th('Dias') }}
+              {{ th('Em uso (profiles)') }}
+            </tr>
+            {% for r in rows %}
+            <tr>
+              {{ td_open() }}{{ code(r.full_path | default('—')) }}</td>
+              {{ td_open() }}{{ fmt_f5_gmt(r.expirationString | default('')) }}</td>
+              {{ td_open() }}{{ badge_days(r.days_left, level) }}</td>
+              {{ td_open() }}
+                {% set used_details = (r.used_by_profile_details | default([])) %}
+                {% set chain_details = (r.used_as_chain_by_profile_details | default([])) %}
+
+                {% if (used_details | length) == 0 and (chain_details | length) == 0 %}
+                  —
+                {% else %}
+                  {% for u in used_details %}
+                    {% if u.type | default('client') == 'server' %}
+                      {{ badge('SERVER SSL', 'warn') }}
+                    {% else %}
+                      {{ badge('CLIENT SSL', 'gray') }}
+                    {% endif %}
+                    {{ code(u.profile | default('—')) }}<br/>
+                  {% endfor %}
+
+                  {% for u in chain_details %}
+                    {% if u.type | default('client') == 'server' %}
+                      {{ badge('SERVER SSL / CADEIA', 'warn') }}
+                    {% else %}
+                      {{ badge('CLIENT SSL / CADEIA', 'gray') }}
+                    {% endif %}
+                    {{ code(u.profile | default('—')) }}<br/>
+                  {% endfor %}
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </table>
+        {% endif %}
+      {%- endmacro %}
+
+      {% set ns = namespace(has_crit=false, has_warn=false, apply_fail=false, compare_drift=false) %}
+      {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
+        {% set s = (si.value | default({})) %}
+        {% if (s.expired | default([]) | length) > 0 or (s.critical | default([]) | length) > 0 %}
+          {% set ns.has_crit = true %}
+        {% elif (s.warning | default([]) | length) > 0 %}
+          {% set ns.has_warn = true %}
+        {% endif %}
+      {% endfor %}
+      {% for h in (f5_handshake_results | default([])) %}
+        {% if not (h.ok | default(false) | bool) %}
+          {% set ns.apply_fail = true %}
+        {% endif %}
+      {% endfor %}
+      {% if (f5_compare_drift | default([]) | length) > 0 %}
+        {% set ns.compare_drift = true %}
+      {% endif %}
+      {% set level = 'ok' %}
+      {% if ns.has_crit or ns.apply_fail %}
+        {% set level = 'crit' %}
+      {% elif ns.has_warn or ns.compare_drift %}
+        {% set level = 'warn' %}
+      {% endif %}
+
+      {% set level_bg = '#1b5e20' %}
+      {% if level == 'crit' %}
+        {% set level_bg = '#b00020' %}
+      {% elif level == 'warn' %}
+        {% set level_bg = '#b26a00' %}
+      {% endif %}
+
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+        <tr>
+          <td align="left" style="padding:8px 8px 12px 8px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+            <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+              <tr>
+                <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#263238" style="width:100%;background-color:#263238;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+                    <tr>
+                      <td bgcolor="#263238" style="background-color:#263238;padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+                          <tr>
+                            <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                              <div style="font-family:Arial,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;margin:0;padding:0;">F5 - Gerenciamento de Certificados</div>
+                              <div style="font-family:Arial,sans-serif;font-size:13px;color:#dbe3e6;margin-top:4px;">
+                                Sites:
+                                <b>
+                                {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
+                                  {% set s = si.value %}
+                                  {{ s.name | default(si.key) }} ({{ s.server | default('—') }}){% if not loop.last %} &nbsp;•&nbsp; {% endif %}
+                                {% endfor %}
+                                </b><br/>
+                                Modo: <b>{{ f5_certs_mode }}</b><br/>
+                                Escopo SSL: <b>{{ f5_ssl_profile_scope_eff | default(f5_ssl_profile_scope | default('client')) }}</b><br/>
+                                Data: <b>{{ report_date_br }}</b><br/>
+                              </div>
+                              <div style="font-family:Arial,sans-serif;font-size:12px;color:#c8d1d5;margin-top:2px;">
+                                Warning ≤ {{ f5_warning_days }}d &nbsp;•&nbsp; Critical ≤ {{ f5_critical_days }}d &nbsp;•&nbsp; Timewarp: {{ f5_timewarp_days | default(0) }}d
+                              </div>
+                            </td>
+                            <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;padding-left:10px;">
+                              <table role="presentation" cellspacing="0" cellpadding="0" border="0" bgcolor="{{ level_bg }}" style="border-collapse:collapse;background-color:{{ level_bg }};">
+                                <tr>
+                                  <td bgcolor="{{ level_bg }}" style="background-color:{{ level_bg }};font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#ffffff;padding:4px 10px;text-align:center;">
+                                    {{ level | upper }}
+                                  </td>
+                                </tr>
+                              </table>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                  </table>
+
+                  {% if f5_certs_mode == 'apply' %}
+                    <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Resumo das trocas (apply)</div>
+
+                    {% if (f5_rotation_results | default([]) | length) == 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;margin-bottom:6px;">Nenhuma rotação registrada.</div>
+                    {% else %}
+                      {% set rotation_ids = (f5_rotation_results | default([]) | map(attribute='rotation_id') | reject('equalto','') | unique | list) %}
+
+                      {% for rid in rotation_ids %}
+                        {% set group_rows = (f5_rotation_results | default([]) | selectattr('rotation_id', 'equalto', rid) | list) %}
+                        {% set first = group_rows[0] %}
+                        {% set profiles = (group_rows | map(attribute='profile') | unique | list) %}
+                        {% set vals = (f5_handshake_results | default([]) | selectattr('rotation_id','equalto', rid) | list) %}
+
+                        {% set vns = namespace(keys=[], rows=[]) %}
+                        {% for rr in group_rows %}
+                          {% for v in (rr.virtuals | default([])) %}
+                            {% set vk = (v.virtual | default('')) ~ '|' ~ (v.pool | default('')) ~ '|' ~ (v.target | default('')) %}
+                            {% if vk not in vns.keys %}
+                              {% set _ = vns.keys.append(vk) %}
+                              {% set _ = vns.rows.append(v) %}
+                            {% endif %}
+                          {% endfor %}
+                        {% endfor %}
+
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                          <tr>
+                            <th colspan="2" bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;">Troca</th>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Site</b></td>
+                            {{ td_open() }}{{ badge(first.site | default('prd'), 'gray') }} &nbsp; {{ code(first.f5_server | default('—')) }}</td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Origem da descoberta</b></td>
+                            {{ td_open() }}{{ code(first.discovery_source | default(first.seed_profile | default('—'))) }}</td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Cert compartilhado atual</b></td>
+                            {{ td_open() }}{{ code(first.current_shared_cert | default(first.shared_current_cert | default('—'))) }}</td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Profiles alterados</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
+                              {% for rr in group_rows %}
+                                {% if rr.profile_type | default('client') == 'server' %}
+                                  {{ badge('SERVER SSL', 'warn') }}
+                                {% else %}
+                                  {{ badge('CLIENT SSL', 'gray') }}
+                                {% endif %}
+                                {{ code(rr.profile | default('—')) }}{% if not loop.last %}<br/>{% endif %}
+                              {% endfor %}
+                              </span>
+                            </td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Pasta CIFS</b></td>
+                            {{ td_open() }}{{ code(first.cifs_folder | default(first.cifsp_folder | default('—'))) }}</td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Antes</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
+                                cert: {{ code(first.before.cert) }}<br/>
+                                key: {{ code(first.before.key | default('—')) }}<br/>
+                                chain: {{ code(first.before.chain) }}
+                              </span>
+                            </td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Depois</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
+                                cert: {{ code(first.after.cert) }}<br/>
+                                key: {{ code(first.after.key | default('—')) }}<br/>
+                                chain: {{ code(first.after.chain) }}
+                              </span>
+                            </td>
+                          </tr>
+                          <tr>
+                            {{ td_open() }}<b>Virtuals / Pools / Targets</b></td>
+                            {{ td_open() }}
+                              <span style="color:#666666;">
+                              {% if (vns.rows | length) == 0 %}
+                                —
+                              {% else %}
+                                {% for v in vns.rows %}
+                                  {{ code(v.virtual | default('—')) }}
+                                  {% if v.pool|default('')|length > 0 %} → <b>pool:</b> {{ code(v.pool) }}{% endif %}
+                                  {% if v.target|default('')|length > 0 %} → <b>target:</b> {{ code(v.target) }}{% endif %}
+                                  <br/>
+                                {% endfor %}
+                              {% endif %}
+                              </span>
+                            </td>
+                          </tr>
+                        </table>
+                        
+                        {% set server_vals = (f5_serverssl_config_validation_results | default([]) | selectattr('rotation_id','equalto', rid) | list) %}
+
+                        {% if server_vals | length > 0 %}
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:10px;margin-bottom:6px;">Validação Server SSL (config)</div>
+
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:14px;">
+                            <tr>
+                              {{ th('Profile') }}
+                              {{ th('Cert esperado') }}
+                              {{ th('Cert atual') }}
+                              {{ th('Key esperada') }}
+                              {{ th('Key atual') }}
+                              {{ th('Chain esperada') }}
+                              {{ th('Chain atual') }}
+                              {{ th('Status') }}
+                            </tr>
+                            {% for v in server_vals %}
+                              <tr>
+                                {{ td_open() }}{{ code(v.profile | default('—')) }}</td>
+                                {{ td_open() }}{{ code(v.expected.cert | default('—')) }}</td>
+                                {{ td_open() }}{{ code(v.actual.cert | default('—')) }}</td>
+                                {{ td_open() }}{{ code(v.expected.key | default('—')) }}</td>
+                                {{ td_open() }}{{ code(v.actual.key | default('—')) }}</td>
+                                {{ td_open() }}{{ code(v.expected.chain | default('—')) }}</td>
+                                {{ td_open() }}{{ code(v.actual.chain | default('—')) }}</td>
+                                {{ td_open() }}
+                                  {% if v.ok | default(false) | bool %}
+                                    {{ badge('OK', 'ok') }}
+                                  {% else %}
+                                    {{ badge('FAIL', 'crit') }}
+                                  {% endif %}
+                                </td>
+                              </tr>
+                            {% endfor %}
+                          </table>
+                        {% endif %}
+
+                        <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:10px;margin-bottom:6px;">Validação (TLS + HTTP)</div>
+                        {% if vals | length == 0 %}
+                          <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;margin-bottom:12px;">Sem validação configurada para esta troca.</div>
+                        {% else %}
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:14px;">
+                            <tr>
+                              {{ th('Target') }}
+                              {{ th('SNI') }}
+                              {{ th('Path') }}
+                              {{ th('Enddate visto') }}
+                              {{ th('Esperado') }}
+                              {{ th('TLS') }}
+                              {{ th('HTTP') }}
+                              {{ th('Status') }}
+                            </tr>
+                            {% for h in vals %}
+                            <tr>
+                              {{ td_open() }}{{ code(h.target) }}</td>
+                              {{ td_open() }}{{ h.sni if (h.sni|default('')|length)>0 else '—' }}</td>
+                              {{ td_open() }}{{ code(h.path | default('/')) }}</td>
+                              {{ td_open() }}<span style="color:#666666;">{{ h.enddate if (h.enddate|default('')|length)>0 else '—' }}</span></td>
+                              {{ td_open() }}<span style="color:#666666;">{{ h.expected_enddate if (h.expected_enddate|default('')|length)>0 else '—' }}</span></td>
+                              {{ td_open() }}{% if h.tls_ok %}{{ badge('OK', 'ok') }}{% else %}{{ badge('FAIL', 'crit') }}{% endif %}</td>
+                              {{ td_open() }}
+                                {% if h.http_error|default('') == 'curl_not_found' %}
+                                  {{ badge('SEM CURL', 'gray') }}
+                                  <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;">fallback: {{ h.http_code if (h.http_code|default('')|length)>0 else '—' }}</div>
+                                {% else %}
+                                  {% if h.http_ok %}
+                                    {{ badge(h.http_code, 'ok') }}
+                                  {% else %}
+                                    {{ badge((h.http_code if (h.http_code|default('')|length)>0 else '—'), 'crit') }}
+                                  {% endif %}
+                                {% endif %}
+                              </td>
+                              {{ td_open() }}{% if h.ok %}{{ badge('OK', 'ok') }}{% else %}{{ badge('FAIL', 'crit') }}{% endif %}</td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+                        {% endif %}
+                      {% endfor %}
+                    {% endif %}
+                  {% endif %}
+
+                  {% if f5_certs_mode == 'compare' %}
+                    {% set cmp = f5_compare_summary | default({}) %}
+                    {% set drift_rows = f5_compare_drift | default([]) %}
+                    {% set compared_sites = cmp.compared_sites | default([]) %}
+
+                    <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:8px;">Auditoria entre sites</div>
+
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-top:6px;margin-bottom:10px;">
+                      <tr>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:9px 10px;font-family:Arial,sans-serif;">
+                                <div style="font-size:11px;color:#666666;">Comparação</div>
+                                <div style="font-size:13px;font-weight:bold;color:#111111;">
+                                  {{ cmp.baseline_site | default('base') }}
+                                  x
+                                  {% if (compared_sites | length) > 0 %}
+                                    {{ compared_sites | join(', ') }}
+                                  {% else %}
+                                    —
+                                  {% endif %}
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:9px 10px;font-family:Arial,sans-serif;">
+                                <div style="font-size:11px;color:#666666;">Escopo</div>
+                                <div style="font-size:13px;font-weight:bold;color:#111111;">{{ cmp.scope | default('—') }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:9px 10px;font-family:Arial,sans-serif;">
+                                <div style="font-size:11px;color:#666666;">Itens analisados</div>
+                                <div style="font-size:15px;font-weight:bold;color:#111111;">{{ cmp.total_identities | default(0) }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:9px 10px;font-family:Arial,sans-serif;">
+                                <div style="font-size:11px;color:#666666;">Divergências</div>
+                                <div style="font-size:15px;font-weight:bold;color:{% if (cmp.total_drift | default(0) | int) > 0 %}#b26a00{% else %}#1b5e20{% endif %};">{{ cmp.total_drift | default(0) }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:9px 10px;font-family:Arial,sans-serif;">
+                                <div style="font-size:11px;color:#666666;">Versões diferentes</div>
+                                <div style="font-size:15px;font-weight:bold;color:#b26a00;">{{ cmp.different_versions | default(0) }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+
+                    {% if (drift_rows | length) == 0 %}
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f1f8f4" style="width:100%;background-color:#f1f8f4;border:1px solid #c8e6c9;border-collapse:collapse;margin-bottom:12px;">
+                        <tr>
+                          <td style="padding:10px 12px;font-family:Arial,sans-serif;font-size:13px;color:#1b5e20;">
+                            <b>OK:</b> Nenhuma divergência encontrada entre os sites comparados.
+                          </td>
+                        </tr>
+                      </table>
+                    {% else %}
+
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fff8e1" style="width:100%;background-color:#fff8e1;border:1px solid #ffe0a3;border-collapse:collapse;margin-bottom:10px;">
+                        <tr>
+                          <td style="padding:10px 12px;font-family:Arial,sans-serif;font-size:13px;color:#5f4300;">
+                            <b>Resumo:</b>
+                            {{ cmp.missing_on_compared | default(0) }} ausente(s) no site comparado,
+                            {{ cmp.extra_on_compared | default(0) }} extra(s) no site comparado,
+                            {{ cmp.not_referenced_on_compared | default(0) }} instalado(s) mas não referenciado(s) no site comparado,
+                            {{ cmp.not_referenced_on_baseline | default(0) }} instalado(s) mas não referenciado(s) no site base,
+                            {{ cmp.different_versions | default(0) }} com versão/vencimento diferente,
+                            {{ cmp.key_differences | default(0) }} com key referenciada diferente.
+                          </td>
+                        </tr>
+                      </table>
+
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Status') }}
+                          {{ th('Componente') }}
+                          {{ th('Certificado / domínio') }}
+                          {{ th('Problema encontrado') }}
+                          {{ th(cmp.baseline_site | default('base')) }}
+                          {{ th('Site comparado') }}
+                          {{ th('Ação sugerida') }}
+                        </tr>
+
+                        {% for d in drift_rows %}
+                          {% set b = d.baseline_cert | default({}) %}
+                          {% set o = d.other_cert | default({}) %}
+
+                          {% set identity = d.san | default('') %}
+                          {% if (identity | length) == 0 %}
+                            {% set identity = d.subject | default('') %}
+                          {% endif %}
+                          {% if (identity | length) == 0 %}
+                            {% set identity = d.compare_key | default('—') %}
+                          {% endif %}
+
+                          <tr>
+                            {{ td_open() }}
+                              {% if d.status == 'AUSENTE_NO_COMPARADO' %}
+                                {{ badge('AUSENTE', 'crit') }}
+                              {% elif d.status == 'EXTRA_NO_COMPARADO' %}
+                                {{ badge('EXTRA', 'warn') }}
+                              {% elif d.status == 'NAO_REFERENCIADO_NO_COMPARADO' %}
+                                {{ badge('NÃO REFERENCIADO', 'warn') }}
+                              {% elif d.status == 'NAO_REFERENCIADO_NO_BASE' %}
+                                {{ badge('NÃO REFERENCIADO', 'warn') }}
+                              {% elif d.status == 'KEY_REFERENCIADA_DIFERENTE' %}
+                                {{ badge('KEY DIFERENTE', 'warn') }}
+                              {% elif d.status == 'VERSAO_DIFERENTE' %}
+                                {{ badge('DIFERENTE', 'warn') }}
+                              {% else %}
+                                {{ badge('DRIFT', 'warn') }}
+                              {% endif %}
+                            </td>
+
+                            {{ td_open() }}
+                              {% if d.component == 'CERTIFICADO' %}
+                                {{ badge('CERTIFICADO', 'gray') }}
+                              {% elif d.component == 'CADEIA' %}
+                                {{ badge('CADEIA', 'gray') }}
+                              {% elif d.component == 'KEY' %}
+                                {{ badge('KEY', 'gray') }}
+                              {% elif d.component == 'CERTIFICADO/CADEIA' %}
+                                {{ badge('CERT/CAD', 'gray') }}
+                              {% else %}
+                                {{ badge(d.component | default('CERTIFICADO'), 'gray') }}
+                              {% endif %}
+                            </td>
+
+                            {{ td_open() }}
+                              {% if d.status == 'KEY_REFERENCIADA_DIFERENTE' %}
+                                <b>Profile</b><br/>
+                                {{ code(d.profile | default(d.compare_key | default('—'))) }}
+                              {% else %}
+                                {% if (d.san | default('') | length) > 0 %}
+                                  <b>SAN</b><br/>
+                                {% elif (d.subject | default('') | length) > 0 %}
+                                  <b>Subject</b><br/>
+                                {% endif %}
+                                {{ code(identity) }}
+                              {% endif %}
+                            </td>
+
+                            {{ td_open() }}
+                              {% if d.status == 'AUSENTE_NO_COMPARADO' %}
+                                Existe no site base, mas não foi encontrado instalado nem referenciado no site comparado.
+                              {% elif d.status == 'EXTRA_NO_COMPARADO' %}
+                                Existe no site comparado, mas não foi encontrado instalado nem referenciado no site base.
+                              {% elif d.status == 'NAO_REFERENCIADO_NO_COMPARADO' %}
+                                O item existe instalado no site comparado, mas não está referenciado por profile no escopo analisado.
+                                <br/><br/>
+                                Isso normalmente indica que o objeto existe no F5, porém foi removido do Client SSL/Server SSL Profile.
+                              {% elif d.status == 'NAO_REFERENCIADO_NO_BASE' %}
+                                O item existe instalado no site base, mas não está referenciado por profile no escopo analisado.
+                                <br/><br/>
+                                Isso normalmente indica que o objeto existe no F5, porém foi removido do Client SSL/Server SSL Profile.
+                              {% elif d.status == 'KEY_REFERENCIADA_DIFERENTE' %}
+                                O profile existe nos dois sites, mas referencia uma key diferente.
+                                <br/><span style="color:#666666;">Obs.: a automação compara a referência da key no profile, não valida o conteúdo criptográfico da key.</span>
+                              {% elif d.status == 'VERSAO_DIFERENTE' %}
+                                Existe nos dois sites, porém o {{ (d.component | default('certificado')) | lower }} não está igual.
+                                {% if (d.outdated_side | default('') | length) > 0 %}
+                                  <br/><br/>Provável lado desatualizado: {{ badge(d.outdated_side, 'warn') }}
+                                {% endif %}
+                                <br/>Diferença de vencimento: <b>{{ d.expiration_delta_days | default(0) }} dias</b>.
+                              {% else %}
+                                {{ d.message | default('Divergência encontrada.') }}
+                              {% endif %}
+                            </td>
+
+                            {{ td_open() }}
+                              {% if d.status == 'KEY_REFERENCIADA_DIFERENTE' %}
+                                Key: {{ code(d.baseline_value | default('—')) }}
+                              {% elif (b | length) > 0 %}
+                                <b>{{ b.name | default('—') }}</b><br/>
+                                Expira: {{ fmt_f5_gmt(b.expirationString | default('')) }}<br/>
+                                Dias restantes: {{ b.days_left | default('—') }}<br/>
+                                {% set bp = b.compare_profiles | default([]) %}
+                                Profiles: {{ bp | length }}
+                                {% if (bp | length) > 0 %}
+                                  <br/><span style="color:#666666;">{{ bp | join('<br/>') }}</span>
+                                {% endif %}
+                              {% else %}
+                                —
+                              {% endif %}
+                            </td>
+
+                            {{ td_open() }}
+                              <b>{{ d.other_site | default('—') }}</b><br/>
+                              {% if d.status == 'KEY_REFERENCIADA_DIFERENTE' %}
+                                Key: {{ code(d.other_value | default('—')) }}
+                              {% elif (o | length) > 0 %}
+                                {{ o.name | default('—') }}<br/>
+                                Expira: {{ fmt_f5_gmt(o.expirationString | default('')) }}<br/>
+                                Dias restantes: {{ o.days_left | default('—') }}<br/>
+                                {% set op = o.compare_profiles | default([]) %}
+                                Profiles: {{ op | length }}
+                                {% if (op | length) > 0 %}
+                                  <br/><span style="color:#666666;">{{ op | join('<br/>') }}</span>
+                                {% endif %}
+                              {% else %}
+                                —
+                              {% endif %}
+                            </td>
+
+                            {{ td_open() }}
+                              {% if d.status == 'AUSENTE_NO_COMPARADO' %}
+                                Verificar se a rotação/importação também foi executada no site <b>{{ d.other_site | default('comparado') }}</b>.
+                              {% elif d.status == 'EXTRA_NO_COMPARADO' %}
+                                Validar se esse item deveria existir no site comparado ou se é sobra de rotação manual.
+                              {% elif d.status == 'NAO_REFERENCIADO_NO_COMPARADO' %}
+                                Conferir o profile no site <b>{{ d.other_site | default('comparado') }}</b> e validar se o certificado/cadeia deveria estar associado.
+                              {% elif d.status == 'NAO_REFERENCIADO_NO_BASE' %}
+                                Conferir o profile no site base e validar se o certificado/cadeia deveria estar associado.
+                              {% elif d.status == 'KEY_REFERENCIADA_DIFERENTE' %}
+                                Conferir o certKeyChain do profile e padronizar a key referenciada entre os sites.
+                              {% elif d.status == 'VERSAO_DIFERENTE' %}
+                                Comparar a última rotação entre os sites e padronizar o lado desatualizado.
+                              {% else %}
+                                Validar manualmente a divergência.
+                              {% endif %}
+                            </td>
+                          </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+                  {% endif %}
+
+                  {% for si in (f5_site_findings_by_site | default({}) | dict2items) %}
+                    {% set s = (si.value | default({})) %}
+
+                    {% set expired_sorted = (s.expired | default([]) | sort(attribute='days_left')) %}
+                    {% set critical_sorted = (s.critical | default([]) | sort(attribute='days_left')) %}
+                    {% set warning_sorted = (s.warning | default([]) | sort(attribute='days_left')) %}
+                    {% set ok_sorted = (s.ok | default([]) | sort(attribute='days_left')) %}
+
+                    <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:14px;margin-bottom:6px;">
+                      Inventário - {{ s.name | default(si.key) }} ({{ s.server | default('—') }})
+                    </div>
+
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-top:6px;margin-bottom:10px;">
+                      <tr>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Expirados</div>
+                                <div style="font-size:20px;font-weight:bold;color:#b00020;">{{ expired_sorted|length }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Críticos (≤ {{ f5_critical_days }}d)</div>
+                                <div style="font-size:20px;font-weight:bold;color:#b00020;">{{ critical_sorted|length }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Warning (≤ {{ f5_warning_days }}d)</div>
+                                <div style="font-size:20px;font-weight:bold;color:#b26a00;">{{ warning_sorted|length }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">OK</div>
+                                <div style="font-size:20px;font-weight:bold;color:#1b5e20;">{{ ok_sorted|length }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                        <td width="20%" style="padding:6px;font-family:Arial,sans-serif;">
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fafafa" style="width:100%;background-color:#fafafa;border:1px solid #eeeeee;border-collapse:collapse;">
+                            <tr>
+                              <td bgcolor="#fafafa" style="background-color:#fafafa;padding:10px 12px;font-family:Arial,sans-serif;">
+                                <div style="font-size:12px;color:#666666;">Duplicados</div>
+                                <div style="font-size:20px;font-weight:bold;color:#111111;">{{ (s.duplicates | default([]) | length) }}</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+
+                    {{ cert_table('Expirados', expired_sorted, 'crit') }}
+                    {{ cert_table('Críticos',  critical_sorted, 'crit') }}
+                    {{ cert_table('Warning',   warning_sorted, 'warn') }}
+                    {% if f5_certs_mode == 'list' %}
+                    {{ cert_table('OK', ok_sorted, 'ok') }}
+                    {% endif %}
+
+                    <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Duplicidade (por SAN/Subject)</div>
+                    {% if (s.duplicates | default([]) | length) == 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:13px;color:#666666;">Nenhum grupo duplicado identificado.</div>
+                    {% else %}
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Chave (SAN/Subject)') }}
+                          {{ th('Qtd') }}
+                          {{ th('Mais antigo') }}
+                          {{ th('Status deleção') }}
+                          {{ th('Em uso?') }}
+                        </tr>
+                        {% for d in (s.duplicates | default([])) %}
+                        <tr>
+                          {{ td_open() }}<span style="font-family:Consolas,'Courier New',monospace;font-size:12px;color:#111111;">{{ d.dup_key | default('') }}</span></td>
+                          {{ td_open() }}{{ badge(d.count, 'gray') }}</td>
+                          {{ td_open() }}
+                            {{ code(d.oldest.full_path | default('—')) }}<br/>
+                            <span style="color:#666666;">{{ fmt_f5_gmt(d.oldest.expirationString | default('')) }}</span>
+                          </td>
+                          {{ td_open() }}
+                            {% if d.delete_candidate %}
+                              {{ badge('CANDIDATO', 'crit') }}<br/>
+                              <span style="font-family:Arial,sans-serif;font-size:12px;color:#666666;">Expirado há {{ d.days_since_expired_oldest }} {{ plural_dia(d.days_since_expired_oldest) }}</span>
+                            {% elif (d.oldest.days_left | default(0) | int) < 0 %}
+                              {{ badge('AGUARDANDO DELETE', 'warn') }}<br/>
+                              <span style="font-family:Arial,sans-serif;font-size:12px;color:#666666;">Falta(m) {{ d.delete_in_days }} {{ plural_dia(d.delete_in_days) }}</span>
+                            {% else %}
+                              {{ badge('NÃO EXPIRADO', 'ok') }}
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}
+                            {% if d.oldest_in_use %}
+                              {{ badge('SIM', 'crit') }}
+                            {% else %}
+                              {{ badge('NÃO', 'ok') }}
+                            {% endif %}
+                          </td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
+                    {% if s.cleanup_results is defined and (s.cleanup_results | length) > 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Limpeza de duplicados (executado)</div>
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Cert') }}
+                          {{ th('Ação') }}
+                          {{ th('Motivo/Detalhe') }}
+                          {{ th('Certificado destino') }}
+                          {{ th('Profiles ajustados') }}
+                        </tr>
+                        {% for c in s.cleanup_results %}
+                        <tr>
+                          {{ td_open() }}{{ code(c.cert) }}</td>
+                          {{ td_open() }}
+                            {% set act = (c.action | default('')) %}
+                            {% if act in ['DELETADO', 'DELETED'] %}
+                              {{ badge('DELETADO', 'crit') }}
+                            {% elif act in ['PULADO', 'SKIPPED'] %}
+                              {{ badge('PULADO', 'gray') }}
+                            {% else %}
+                              {{ badge((act if (act | length) > 0 else '—'), 'gray') }}
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}<span style="color:#666666;">{{ c.reason | default('—') }}</span></td>
+                          {{ td_open() }}
+                            {% set destino = (c.cert_destino | default(c.survivor | default(''))) %}
+                            {% if (destino | default('') | length) > 0 %}
+                              {{ code(destino) }}
+                            {% else %}
+                              —
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}
+                            {% set perfis = (c.profiles_ajustados | default(c.profiles_repointed | default([]))) %}
+                            <span style="color:#666666;">
+                            {% if (perfis | length) > 0 %}
+                              {{ perfis | join('<br/>') }}
+                            {% else %}
+                              —
+                            {% endif %}
+                            </span>
+                          </td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
+                    {% if s.expired_unused_cleanup_results is defined and (s.expired_unused_cleanup_results | length) > 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Limpeza de expirados sem uso (executado)</div>
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Cert') }}
+                          {{ th('Ação') }}
+                          {{ th('Motivo/Detalhe') }}
+                          {{ th('Expirado há') }}
+                          {{ th('Key apagada?') }}
+                        </tr>
+                        {% for c in s.expired_unused_cleanup_results %}
+                        <tr>
+                          {{ td_open() }}{{ code(c.cert | default('—')) }}</td>
+                          {{ td_open() }}
+                            {% set act = (c.action | default('')) %}
+                            {% if act in ['DELETADO', 'DELETED'] %}
+                              {{ badge('DELETADO', 'crit') }}
+                            {% elif act in ['PULADO', 'SKIPPED'] %}
+                              {{ badge('PULADO', 'gray') }}
+                            {% else %}
+                              {{ badge((act if (act | length) > 0 else '—'), 'gray') }}
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}<span style="color:#666666;">{{ c.reason | default('—') }}</span></td>
+                          {{ td_open() }}
+                            {% if c.days_since_expired is defined %}
+                              {{ c.days_since_expired }} dias
+                            {% else %}
+                              —
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}
+                            {% if c.key_deleted | default(false) | bool %}
+                              {{ badge('SIM', 'ok') }}
+                            {% else %}
+                              {{ badge('NÃO', 'gray') }}
+                            {% endif %}
+                          </td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
+                    {% if s.configsync_results is defined and (s.configsync_results | length) > 0 %}
+                      <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Config Sync HA</div>
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                        <tr>
+                          {{ th('Site') }}
+                          {{ th('Device Group') }}
+                          {{ th('Ação') }}
+                          {{ th('Status') }}
+                          {{ th('Motivo') }}
+                          {{ th('Detalhe') }}
+                        </tr>
+                        {% for cs in s.configsync_results %}
+                        <tr>
+                          {{ td_open() }}{{ cs.site | default('—') }}</td>
+                          {{ td_open() }}{{ code(cs.device_group | default('—')) }}</td>
+                          {{ td_open() }}{{ cs.action | default('—') }}</td>
+                          {{ td_open() }}
+                            {% set st = (cs.status | default('')) %}
+                            {% if st in ['IN_SYNC', 'EXECUTADO_SEM_VALIDACAO'] %}
+                              {{ badge(st, 'ok') }}
+                            {% elif st in ['SYNCING', 'CHANGES_PENDING', 'STATUS_DESCONHECIDO'] %}
+                              {{ badge(st, 'warn') }}
+                            {% elif st in ['FALHA'] %}
+                              {{ badge(st, 'crit') }}
+                            {% else %}
+                              {{ badge((st if (st | length) > 0 else '—'), 'gray') }}
+                            {% endif %}
+                          </td>
+                          {{ td_open() }}<span style="color:#666666;">{{ cs.reason | default('—') }}</span></td>
+                          {{ td_open() }}<span style="color:#666666;">{{ cs.message | default('—') }}</span></td>
+                        </tr>
+                        {% endfor %}
+                      </table>
+                    {% endif %}
+
+                  {% endfor %}
+
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+  changed_when: false
+
+- name: Definir subject do e-mail
+  ansible.builtin.set_fact:
+    _subject_level: >-
+      {%- set ns = namespace(has_crit=false, has_warn=false, apply_fail=false, compare_drift=false) -%}
+      {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+        {%- set s = (si.value | default({})) -%}
+        {%- if (s.expired | default([]) | length) > 0 or (s.critical | default([]) | length) > 0 -%}
+          {%- set ns.has_crit = true -%}
+        {%- elif (s.warning | default([]) | length) > 0 -%}
+          {%- set ns.has_warn = true -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for h in (f5_handshake_results | default([])) -%}
+        {%- if not (h.ok | default(false) | bool) -%}
+          {%- set ns.apply_fail = true -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- if (f5_compare_drift | default([]) | length) > 0 -%}
+        {%- set ns.compare_drift = true -%}
+      {%- endif -%}
+      {{ 'CRITICO' if (ns.has_crit or ns.apply_fail) else ('ALERTA' if (ns.has_warn or ns.compare_drift) else 'OK') }}
+  changed_when: false
+
+- name: Publicar para e-mail (set_stats)
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: >-
+        Ansible-Report ({{ _subject_level }}) - {{ awx_job_template_name | default('F5 Certificados') }} - Sites:
+        {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+          {%- set s = si.value -%}
+          {{ s.name | default(si.key) }}={{ s.server | default('—') }}{% if not loop.last %} / {% endif %}
+        {%- endfor -%}
+        - Job #{{ awx_job_id | default('local') }}
+      send_mail_body: "{{ f5_report_html }}"

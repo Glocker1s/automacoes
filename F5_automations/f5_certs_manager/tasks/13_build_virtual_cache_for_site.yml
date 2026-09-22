@@ -1,0 +1,14 @@
+---
+- name: Definir server/port efetivos do site (cache)
+  ansible.builtin.set_fact:
+    f5_server_eff: "{{ site.server }}"
+    f5_server_port_eff: "{{ site.port | default(443) | int }}"
+  changed_when: false
+
+- name: Construir índice profile -> [virtual,pool] (site)
+  ansible.builtin.include_tasks: 12_build_virtual_profile_index.yml
+
+- name: Guardar índice do site
+  ansible.builtin.set_fact:
+    f5_virtuals_index_by_site: "{{ f5_virtuals_index_by_site | default({}) | combine({ site.name: (f5_virtuals_index_by_profile | default({})) }, recursive=True) }}"
+  changed_when: false

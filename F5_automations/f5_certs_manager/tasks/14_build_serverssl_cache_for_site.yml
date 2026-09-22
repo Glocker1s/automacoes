@@ -1,0 +1,32 @@
+---
+- name: Definir contexto do site para cache de server ssl profiles
+  ansible.builtin.set_fact:
+    _f5_srv: "{{ site.server }}"
+    _f5_port: "{{ site.port | default(443) | int }}"
+  changed_when: false
+
+- name: Consultar iControl REST - Server SSL Profiles (cache por site)
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/ltm/profile/server-ssl?$select=name,partition,defaultsFrom,cert,key,chain
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _serverssl_profiles_site_raw
+  changed_when: false
+
+- name: Guardar cache de Server SSL Profiles por site
+  ansible.builtin.set_fact:
+    f5_serverssl_profiles_by_site: >-
+      {{
+        (f5_serverssl_profiles_by_site | default({}))
+        | combine({
+            site.name: (_serverssl_profiles_site_raw.json['items'] | default([]))
+          }, recursive=True)
+      }}
+  changed_when: false

@@ -1,0 +1,114 @@
+---
+- name: Falhar se não houver plano de rotação
+  ansible.builtin.assert:
+    that:
+      - (f5_rotation_plan | default([])) | length > 0
+    fail_msg: "Modo apply exige f5_rotation_plan com pelo menos 1 item."
+
+- name: Garantir que inventário de fonte está disponível
+  ansible.builtin.assert:
+    that:
+      - source_cert_inventory is defined
+      - (source_cert_inventory | length) > 0
+    fail_msg: |
+      Não foi possível coletar certificados-fonte do CIFS.
+      Confira: mount_cifs, certificate_prefix, ansible_user/ansible_password.
+
+- name: Inicializar coleções do apply
+  ansible.builtin.set_fact:
+    f5_rotation_results: "{{ f5_rotation_results | default([]) }}"
+    f5_handshake_results: "{{ f5_handshake_results | default([]) }}"
+    f5_serverssl_config_validation_results: "{{ f5_serverssl_config_validation_results | default([]) }}"
+    f5_clientssl_profiles_by_site: "{{ f5_clientssl_profiles_by_site | default({}) }}"
+    f5_serverssl_profiles_by_site: "{{ f5_serverssl_profiles_by_site | default({}) }}"
+    f5_installed_certs_by_site: "{{ f5_installed_certs_by_site | default({}) }}"
+    f5_virtuals_index_by_site: "{{ f5_virtuals_index_by_site | default({}) }}"
+  changed_when: false
+
+- name: Gerar sufixo de importação dos objetos F5
+  ansible.builtin.command: >
+    date '+{{ f5_import_name_suffix_format | default("%m-%Y") }}'
+  environment:
+    TZ: "{{ f5_import_name_timezone | default(f5_report_timezone | default('America/Sao_Paulo')) }}"
+  register: _f5_import_name_suffix_cmd
+  changed_when: false
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+    - (f5_import_name_suffix_override | default('') | trim | length) == 0
+
+- name: Definir sufixo efetivo de importação dos objetos F5
+  ansible.builtin.set_fact:
+    f5_import_name_suffix_eff: >-
+      {{
+        (
+          f5_import_name_suffix_override
+          if ((f5_import_name_suffix_override | default('') | trim | length) > 0)
+          else (_f5_import_name_suffix_cmd.stdout | default(''))
+        )
+        | trim
+        | regex_replace('[^A-Za-z0-9._-]', '-')
+      }}
+  when:
+    - f5_import_name_suffix_enabled | default(true) | bool
+  changed_when: false
+
+- name: Definir sufixo vazio quando sufixo de importação estiver desabilitado
+  ansible.builtin.set_fact:
+    f5_import_name_suffix_eff: ""
+  when:
+    - not (f5_import_name_suffix_enabled | default(true) | bool)
+  changed_when: false
+
+- name: Construir cache de Virtual Servers por profile (1x por site)
+  ansible.builtin.include_tasks: 13_build_virtual_cache_for_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+
+- name: Construir cache de Client SSL Profiles (1x por site)
+  ansible.builtin.include_tasks: 14_build_clientssl_cache_for_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+
+- name: Construir cache de Server SSL Profiles (1x por site)
+  ansible.builtin.include_tasks: 14_build_serverssl_cache_for_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+  when: "'server' in (f5_ssl_profile_types_for_action | default(['client']))"
+
+- name: Construir cache de certificados instalados (1x por site)
+  ansible.builtin.include_tasks: 15_build_cert_cache_for_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+
+- name: Executar rotação por item (aplica em todos os sites)
+  ansible.builtin.include_tasks: 41_apply_one_rotation.yml
+  loop: "{{ f5_rotation_plan }}"
+  loop_control:
+    loop_var: rot
+    label: >-
+      {{
+        (rot.profile_partition | default('Common')) ~ '/' ~ (rot.profile_name | default(''))
+        if ((rot.profile_name | default('') | trim | length) > 0)
+        else ('prefix=' ~ (rot.certificate_prefix | default('') | trim))
+      }}
+
+- name: Config Sync após APPLY quando houve alteração no site
+  ansible.builtin.include_tasks: 70_configsync_site.yml
+  loop: "{{ f5_sites_eff | default([]) }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+  vars:
+    f5_configsync_reason: "apply de certificados"
+  when:
+    - f5_enable_configsync | bool
+    - f5_configsync_run_on_apply | bool
+    - (f5_rotation_results | default([]) | selectattr('site', 'equalto', site.name) | list | length) > 0

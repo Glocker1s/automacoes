@@ -1,0 +1,661 @@
+---
+- name: F5 - Certificados (inventário / rotação)
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Fluxo completo F5 - Certificados
+      block:
+        - name: Marcar fluxo como iniciado sem falha
+          ansible.builtin.set_fact:
+            _f5_flow_failed: false
+
+        - name: Normalizar prefixes pedidos no survey simples
+          ansible.builtin.set_fact:
+            _requested_prefixes_from_survey: >-
+              {{
+                (certificate_prefix | default('') | replace('\n', ',') | split(','))
+                | map('trim')
+                | reject('equalto', '')
+                | unique
+                | list
+              }}
+          when: f5_certs_mode == 'apply'
+
+        - name: Montar f5_rotation_plan a partir do survey simples
+          ansible.builtin.set_fact:
+            f5_rotation_plan: >-
+              {%- set out = [] -%}
+              {%- for pref in (_requested_prefixes_from_survey | default([])) -%}
+              {%- set _ = out.append({
+                  'certificate_prefix': pref,
+                  'validate_path': (single_validate_path | default('/') | trim),
+                  'validate_ok_codes': [200]
+                }) -%}
+              {%- endfor -%}
+              {{ out }}
+          when: f5_certs_mode == 'apply'
+
+        - name: Validar campos no modo APPLY
+          ansible.builtin.assert:
+            that:
+              - (_requested_prefixes_from_survey | default([]) | length) > 0
+            fail_msg: |
+              No modo APPLY, informe pelo menos um prefixo em certificate_prefix.
+              Exemplo:
+              - agorascan.lab
+              - agorascan.lab,portal-cert.lab,api-cert.lab
+          when: f5_certs_mode == 'apply'
+
+        - name: Executar role
+          ansible.builtin.include_role:
+            name: f5_certs_manager
+
+      rescue:
+        - name: Marcar fluxo como falhado
+          ansible.builtin.set_fact:
+            _f5_flow_failed: true
+
+        - name: Capturar contexto bruto da falha
+          ansible.builtin.set_fact:
+            _fail_task: "{{ ansible_failed_task.name | default('—') }}"
+            _fail_action: "{{ ansible_failed_task.action | default('—') }}"
+            _fail_raw_result: "{{ ansible_failed_result | default({}) }}"
+            _fail_results_all: "{{ ansible_failed_result.results | default([]) }}"
+            _fail_main_msg: "{{ ansible_failed_result.msg | default('Erro não mapeado') }}"
+
+        - name: Capturar itens que falharam quando a task tinha loop
+          ansible.builtin.set_fact:
+            _fail_failed_results: >-
+              {{
+                (
+                  ansible_failed_result.results
+                  | default([])
+                  | selectattr('failed', 'defined')
+                  | selectattr('failed', 'equalto', true)
+                  | list
+                )
+                if (ansible_failed_result.results is defined)
+                else ([ansible_failed_result | default({})])
+              }}
+
+        - name: Garantir pelo menos um item de falha para renderização
+          ansible.builtin.set_fact:
+            _fail_failed_results: "{{ _fail_failed_results if (_fail_failed_results | length > 0) else [_fail_raw_result] }}"
+
+        - name: Normalizar texto da falha para classificação
+          ansible.builtin.set_fact:
+            _fail_raw_lower: >-
+              {{
+                (
+                  (_fail_raw_result | default({}) | to_json)
+                  ~ ' '
+                  ~ (_fail_main_msg | default(''))
+                  ~ ' '
+                  ~ (_fail_task | default(''))
+                  ~ ' '
+                  ~ (_fail_action | default(''))
+                ) | lower
+              }}
+
+        - name: Classificar falha para e-mail
+          ansible.builtin.set_fact:
+            _fail_category: >-
+              {% if
+                'esperado exatamente 1 arquivo de certificado' in _fail_raw_lower
+                or 'certificado folha' in _fail_raw_lower
+                or 'candidatos folha' in _fail_raw_lower
+              %}
+              Arquivo de certificado não encontrado ou ambíguo
+              {% elif
+                'esperado exatamente 1 arquivo de key' in _fail_raw_lower
+                or 'arquivo de key' in _fail_raw_lower
+                or 'arquivo .key' in _fail_raw_lower
+                or 'nenhum arquivo .key' in _fail_raw_lower
+              %}
+              Arquivo de key não encontrado ou ambíguo
+              {% elif
+                'cert_key_match=false' in _fail_raw_lower
+                or 'cert_key_match' in _fail_raw_lower and 'false' in _fail_raw_lower
+                or 'modulus' in _fail_raw_lower
+              %}
+              Certificado e key não correspondem
+              {% elif
+                'dns_sans=[]' in _fail_raw_lower
+                or 'sans=[]' in _fail_raw_lower
+                or 'subject alternative name' in _fail_raw_lower
+              %}
+              Certificado sem SAN/DNS válido
+              {% elif
+                'precheck_min_valid_ok=false' in _fail_raw_lower
+                or 'checkend' in _fail_raw_lower
+                or 'certificado fonte não possui validade mínima' in _fail_raw_lower
+              %}
+              Certificado fonte sem validade mínima
+              {% elif
+                'nenhuma pasta' in _fail_raw_lower
+                or 'certificate_prefix' in _fail_raw_lower and 'não encontrado' in _fail_raw_lower
+                or 'não foi possível coletar certificados-fonte' in _fail_raw_lower
+              %}
+              Pasta do certificado não encontrada no CIFS
+              {% elif
+                'mount' in _fail_raw_lower
+                or 'cifs' in _fail_raw_lower
+                or 'mount error' in _fail_raw_lower
+              %}
+              Falha no CIFS/certificado fonte
+              {% elif
+                'cadeia' in _fail_raw_lower
+                or 'openssl verify' in _fail_raw_lower
+                or 'unarchive' in _fail_raw_lower
+                or 'nenhum arquivo .crt/.cer/.pem/.txt' in _fail_raw_lower
+              %}
+              Falha ao processar cadeia do certificado
+              {% elif
+                'f5_target_scope inválido' in _fail_raw_lower
+                or 'nenhum site efetivo' in _fail_raw_lower
+              %}
+              Escopo/site F5 inválido
+              {% elif
+                'unauthorized' in _fail_raw_lower
+                or '401' in _fail_raw_lower
+                or 'authentication failed' in _fail_raw_lower
+              %}
+              Falha de autenticação no F5
+              {% elif
+                'forbidden' in _fail_raw_lower
+                or '403' in _fail_raw_lower
+                or 'permission' in _fail_raw_lower
+                or 'denied' in _fail_raw_lower
+              %}
+              Permissão insuficiente
+              {% elif
+                'timed out' in _fail_raw_lower
+                or 'timeout' in _fail_raw_lower
+              %}
+              Timeout
+              {% elif
+                'connection' in _fail_raw_lower
+                or 'unreachable' in _fail_raw_lower
+                or 'name or service not known' in _fail_raw_lower
+                or 'no route to host' in _fail_raw_lower
+              %}
+              Falha de conectividade
+              {% elif
+                'certificate key file' in _fail_raw_lower
+                or 'requested key' in _fail_raw_lower
+                or 'ssl-key' in _fail_raw_lower
+              %}
+              Key/certificado não encontrado no F5
+              {% elif
+                'certkeychain' in _fail_raw_lower
+                or 'client-ssl' in _fail_raw_lower
+                or 'profile' in _fail_raw_lower
+              %}
+              Falha ao alterar profile Client SSL
+              {% elif
+                'config-sync' in _fail_raw_lower
+                or 'config sync' in _fail_raw_lower
+                or 'sync-status' in _fail_raw_lower
+                or 'device group' in _fail_raw_lower
+              %}
+              Falha no Config Sync HA
+              {% elif
+                'curl' in _fail_raw_lower
+                or 'openssl s_client' in _fail_raw_lower
+                or 'handshake' in _fail_raw_lower
+                or 'http_code' in _fail_raw_lower
+              %}
+              Falha na validação TLS/HTTP
+              {% else %}
+              Erro não classificado automaticamente
+              {% endif %}
+
+            _fail_guidance: >-
+              {% if
+                'esperado exatamente 1 arquivo de certificado' in _fail_raw_lower
+                or 'certificado folha' in _fail_raw_lower
+                or 'candidatos folha' in _fail_raw_lower
+              %}
+              Validar se a pasta do certificate_prefix contém exatamente 1 certificado folha com extensão .cer, .crt ou .pem. Se houver arquivos de cadeia na mesma pasta, eles devem seguir padrão CADEIA.TXT, CADEIA*.zip ou *chain* para não serem confundidos com o certificado principal.
+              {% elif
+                'esperado exatamente 1 arquivo de key' in _fail_raw_lower
+                or 'arquivo de key' in _fail_raw_lower
+                or 'arquivo .key' in _fail_raw_lower
+                or 'nenhum arquivo .key' in _fail_raw_lower
+              %}
+              Validar se a pasta do certificate_prefix contém exatamente 1 arquivo .key/.KEY correspondente ao certificado.
+              {% elif
+                'cert_key_match=false' in _fail_raw_lower
+                or 'cert_key_match' in _fail_raw_lower and 'false' in _fail_raw_lower
+                or 'modulus' in _fail_raw_lower
+              %}
+              Validar se a key privada pertence ao certificado informado. O modulus/hash do certificado e da key precisa ser igual.
+              {% elif
+                'dns_sans=[]' in _fail_raw_lower
+                or 'sans=[]' in _fail_raw_lower
+                or 'subject alternative name' in _fail_raw_lower
+              %}
+              Validar se o certificado possui SAN DNS. A automação usa as SANs para descoberta automática de profile, SNI e validação.
+              {% elif
+                'precheck_min_valid_ok=false' in _fail_raw_lower
+                or 'checkend' in _fail_raw_lower
+                or 'certificado fonte não possui validade mínima' in _fail_raw_lower
+              %}
+              Validar a validade do certificado fonte. Ele não atende ao mínimo configurado em f5_min_valid_days_after_install.
+              {% elif
+                'nenhuma pasta' in _fail_raw_lower
+                or 'certificate_prefix' in _fail_raw_lower and 'não encontrado' in _fail_raw_lower
+                or 'não foi possível coletar certificados-fonte' in _fail_raw_lower
+              %}
+              Validar o certificate_prefix informado no survey e confirmar se existe uma pasta com esse nome no caminho CIFS configurado.
+              {% elif
+                'mount' in _fail_raw_lower
+                or 'cifs' in _fail_raw_lower
+                or 'mount error' in _fail_raw_lower
+              %}
+              Validar montagem CIFS, credenciais, caminho do share, permissões de leitura e se o Execution Environment consegue acessar o destino.
+              {% elif
+                'cadeia' in _fail_raw_lower
+                or 'openssl verify' in _fail_raw_lower
+                or 'unarchive' in _fail_raw_lower
+                or 'nenhum arquivo .crt/.cer/.pem/.txt' in _fail_raw_lower
+              %}
+              Validar se a cadeia veio como CADEIA.TXT ou CADEIA*.zip. Se vier zip, ele precisa conter arquivos .crt/.cer/.pem/.txt com certificados de CA/intermediárias.
+              {% elif
+                'f5_target_scope inválido' in _fail_raw_lower
+                or 'nenhum site efetivo' in _fail_raw_lower
+              %}
+              Validar se f5_target_scope bate com os nomes configurados em f5_sites. Exemplo: prd-interno,dr-interno ou hml.
+              {% elif
+                'unauthorized' in _fail_raw_lower
+                or '401' in _fail_raw_lower
+                or 'authentication failed' in _fail_raw_lower
+              %}
+              Validar usuário, senha, permissão REST e acesso ao BIG-IP.
+              {% elif
+                'forbidden' in _fail_raw_lower
+                or '403' in _fail_raw_lower
+                or 'permission' in _fail_raw_lower
+                or 'denied' in _fail_raw_lower
+              %}
+              Validar se a conta possui permissão para importar certificado/key, alterar Client SSL Profile, salvar configuração, deletar objetos e executar Config Sync.
+              {% elif
+                'timed out' in _fail_raw_lower
+                or 'timeout' in _fail_raw_lower
+              %}
+              Validar conectividade, tempo de resposta do BIG-IP e aumentar retries/delay se necessário.
+              {% elif
+                'connection' in _fail_raw_lower
+                or 'unreachable' in _fail_raw_lower
+                or 'name or service not known' in _fail_raw_lower
+                or 'no route to host' in _fail_raw_lower
+              %}
+              Validar rota, DNS, firewall, porta 443 e conectividade do AAP/Execution Environment até o BIG-IP.
+              {% elif
+                'certificate key file' in _fail_raw_lower
+                or 'requested key' in _fail_raw_lower
+                or 'ssl-key' in _fail_raw_lower
+              %}
+              Validar nome real da key/certificado no F5, partition e uso de true_names.
+              {% elif
+                'certkeychain' in _fail_raw_lower
+                or 'client-ssl' in _fail_raw_lower
+                or 'profile' in _fail_raw_lower
+              %}
+              Validar se o profile existe, se possui certKeyChain compatível e se os objetos cert/key/chain existem na mesma partition.
+              {% elif
+                'config-sync' in _fail_raw_lower
+                or 'config sync' in _fail_raw_lower
+                or 'sync-status' in _fail_raw_lower
+                or 'device group' in _fail_raw_lower
+              %}
+              Validar device group, status de HA, horário/NTP dos membros e se o sync está sendo feito a partir do device alterado.
+              {% elif
+                'curl' in _fail_raw_lower
+                or 'openssl s_client' in _fail_raw_lower
+                or 'handshake' in _fail_raw_lower
+                or 'http_code' in _fail_raw_lower
+              %}
+              Validar VIP, porta, SNI, path, retorno HTTP esperado e conectividade TLS a partir do ambiente de execução.
+              {% else %}
+              Usar a seção "Detalhes técnicos da falha" para identificar a task, módulo e mensagem retornada.
+              {% endif %}
+
+            _fail_badge_kind: >-
+              {% if
+                'timeout' in _fail_raw_lower
+                or 'cadeia' in _fail_raw_lower
+                or 'openssl verify' in _fail_raw_lower
+                or 'curl' in _fail_raw_lower
+                or 'http_code' in _fail_raw_lower
+              %}
+              warn
+              {% elif 'erro não classificado automaticamente' in _fail_raw_lower %}
+              warn
+              {% else %}
+              crit
+              {% endif %}
+
+        - name: Montar HTML de falha F5
+          ansible.builtin.set_fact:
+            f5_failure_report_html: |
+              {% set raw_lower = (_fail_raw_result | to_json | lower) %}
+              {% set requested_sites = f5_target_scope | default('—') %}
+              {% set requested_prefix = certificate_prefix | default('—') %}
+              {% set mode = f5_certs_mode | default('—') %}
+
+              {% macro th(v) -%}
+                <th bgcolor="#f2f2f2" style="background-color:#f2f2f2;color:#111111;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;text-align:left;border:1px solid #d9d9d9;padding:8px;">{{ v }}</th>
+              {%- endmacro %}
+
+              {% macro td_open() -%}
+                <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">
+              {%- endmacro %}
+
+              {% macro code(v) -%}
+                <span style="font-family:Consolas,'Courier New',monospace;font-size:12px;background-color:#f3f3f3;color:#222222;padding:2px 5px;">{{ v | default('—') }}</span>
+              {%- endmacro %}
+
+              {% macro badge(text, kind) -%}
+                {%- if kind == 'crit' -%}
+                  <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#ffebee;color:#b00020;padding:2px 6px;">{{ text }}</span>
+                {%- elif kind == 'warn' -%}
+                  <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#fff3e0;color:#b26a00;padding:2px 6px;">{{ text }}</span>
+                {%- elif kind == 'ok' -%}
+                  <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#e8f5e9;color:#1b5e20;padding:2px 6px;">{{ text }}</span>
+                {%- else -%}
+                  <span style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;background-color:#eeeeee;color:#333333;padding:2px 6px;">{{ text }}</span>
+                {%- endif -%}
+              {%- endmacro %}
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+                <tr>
+                  <td align="left" style="padding:8px 8px 12px 8px;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+                    <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+                      <tr>
+                        <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#263238" style="width:100%;background-color:#263238;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+                            <tr>
+                              <td bgcolor="#263238" style="background-color:#263238;padding:14px 16px;font-family:Arial,sans-serif;color:#ffffff;">
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+                                  <tr>
+                                    <td align="left" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;">
+                                      <div style="font-family:Arial,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;margin:0;padding:0;">Falha na automação F5 - Gerenciamento de Certificados</div>
+                                      <div style="font-family:Arial,sans-serif;font-size:13px;color:#dbe3e6;margin-top:4px;">
+                                        Modo: <b>{{ mode }}</b><br/>
+                                        Sites solicitados: <b>{{ requested_sites }}</b><br/>
+                                        Prefixo/certificado: <b>{{ requested_prefix }}</b><br/>
+                                        Job: <b>#{{ awx_job_id | default('local') }}</b>
+                                      </div>
+                                    </td>
+                                    <td align="right" valign="top" style="font-family:Arial,sans-serif;color:#ffffff;padding-left:10px;">
+                                      <table role="presentation" cellspacing="0" cellpadding="0" border="0" bgcolor="#b00020" style="border-collapse:collapse;background-color:#b00020;">
+                                        <tr>
+                                          <td bgcolor="#b00020" style="background-color:#b00020;font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#ffffff;padding:4px 10px;text-align:center;">
+                                            FALHA
+                                          </td>
+                                        </tr>
+                                      </table>
+                                    </td>
+                                  </tr>
+                                </table>
+                              </td>
+                            </tr>
+                          </table>
+
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Resumo da falha</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Campo') }}
+                              {{ th('Valor') }}
+                            </tr>
+                            <tr>
+                              {{ td_open() }}<b>Task que falhou</b></td>
+                              {{ td_open() }}{{ code(_fail_task | default('—')) }}</td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}<b>Ação / módulo</b></td>
+                              {{ td_open() }}{{ code(_fail_action | default('—')) }}</td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}<b>Mensagem resumida</b></td>
+                              {{ td_open() }}<span style="color:#666666;">{{ _fail_main_msg | default('—') | e }}</span></td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}<b>Diagnóstico provável</b></td>
+                              {{ td_open() }}
+                                {{ badge(_fail_category | default('Erro não classificado automaticamente') | trim, _fail_badge_kind | default('warn') | trim) }}
+                                <div style="font-family:Arial,sans-serif;font-size:12px;color:#666666;margin-top:6px;">
+                                  {{ _fail_guidance | default('Consulte os detalhes técnicos abaixo para identificar a origem exata.') | trim }}
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Parâmetros principais</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Parâmetro') }}
+                              {{ th('Valor') }}
+                            </tr>
+                            <tr>
+                              {{ td_open() }}Modo</td>
+                              {{ td_open() }}{{ code(f5_certs_mode | default('—')) }}</td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}Escopo F5</td>
+                              {{ td_open() }}{{ code(f5_target_scope | default('—')) }}</td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}Certificate prefix</td>
+                              {{ td_open() }}{{ code(certificate_prefix | default('—')) }}</td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}Path validação</td>
+                              {{ td_open() }}{{ code(single_validate_path | default('—')) }}</td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}Sites efetivos</td>
+                              {{ td_open() }}
+                                {% if f5_sites_eff is defined %}
+                                  {% for s in f5_sites_eff %}
+                                    {{ code((s.name | default('—')) ~ '=' ~ (s.server | default('—'))) }}{% if not loop.last %}<br/>{% endif %}
+                                  {% endfor %}
+                                {% elif f5_sites is defined %}
+                                  {% for s in f5_sites %}
+                                    {{ code((s.name | default('—')) ~ '=' ~ (s.server | default('—'))) }}{% if not loop.last %}<br/>{% endif %}
+                                  {% endfor %}
+                                {% else %}
+                                  —
+                                {% endif %}
+                              </td>
+                            </tr>
+                            <tr>
+                              {{ td_open() }}Config Sync habilitado</td>
+                              {{ td_open() }}{{ code(f5_enable_configsync | default(false)) }}</td>
+                            </tr>
+                          </table>
+
+                          {% if source_cert_inventory is defined and (source_cert_inventory | length) > 0 %}
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Certificados fonte já processados antes da falha</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Cert name') }}
+                              {{ th('SANs') }}
+                              {{ th('Validade') }}
+                              {{ th('Key match') }}
+                            </tr>
+                            {% for sc in source_cert_inventory %}
+                            <tr>
+                              {{ td_open() }}{{ code(sc.cert_name | default('—')) }}</td>
+                              {{ td_open() }}<span style="color:#666666;">{{ (sc.sans | default([])) | join('<br/>') if (sc.sans | default([]) | length) > 0 else '—' }}</span></td>
+                              {{ td_open() }}<span style="color:#666666;">{{ sc.not_after | default('—') }}</span></td>
+                              {{ td_open() }}
+                                {% if sc.cert_key_match | default(false) | bool %}
+                                  {{ badge('OK', 'ok') }}
+                                {% else %}
+                                  {{ badge('FALHA', 'crit') }}
+                                {% endif %}
+                              </td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+                          {% endif %}
+
+                          {% if f5_rotation_results is defined and (f5_rotation_results | length) > 0 %}
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Rotações registradas antes da falha</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Site') }}
+                              {{ th('Profile') }}
+                              {{ th('Cert atual') }}
+                              {{ th('Cert novo') }}
+                            </tr>
+                            {% for r in f5_rotation_results %}
+                            <tr>
+                              {{ td_open() }}{{ code(r.site | default('—')) }}</td>
+                              {{ td_open() }}{{ code(r.profile | default('—')) }}</td>
+                              {{ td_open() }}{{ code(r.before.cert | default('—')) }}</td>
+                              {{ td_open() }}{{ code(r.after.cert | default('—')) }}</td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+                          {% endif %}
+
+                          {% if f5_cleanup_results is defined and (f5_cleanup_results | length) > 0 %}
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Cleanup registrado antes da falha</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Cert') }}
+                              {{ th('Ação') }}
+                              {{ th('Detalhe') }}
+                            </tr>
+                            {% for c in f5_cleanup_results %}
+                            <tr>
+                              {{ td_open() }}{{ code(c.cert | default('—')) }}</td>
+                              {{ td_open() }}{{ code(c.action | default('—')) }}</td>
+                              {{ td_open() }}<span style="color:#666666;">{{ c.reason | default('—') }}</span></td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+                          {% endif %}
+
+                          {% if f5_configsync_results is defined and (f5_configsync_results | length) > 0 %}
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Config Sync registrado antes da falha</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Site') }}
+                              {{ th('Device Group') }}
+                              {{ th('Status') }}
+                              {{ th('Mensagem') }}
+                            </tr>
+                            {% for cs in f5_configsync_results %}
+                            <tr>
+                              {{ td_open() }}{{ code(cs.site | default('—')) }}</td>
+                              {{ td_open() }}{{ code(cs.device_group | default('—')) }}</td>
+                              {{ td_open() }}{{ code(cs.status | default('—')) }}</td>
+                              {{ td_open() }}<span style="color:#666666;">{{ cs.message | default('—') }}</span></td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+                          {% endif %}
+
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Detalhes técnicos da falha</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Item') }}
+                              {{ th('Mensagem') }}
+                              {{ th('Detalhe') }}
+                            </tr>
+                            {% for r in _fail_failed_results %}
+                              {% set failed_item = r.item | default('—') %}
+                              {% set err_msg = r.msg | default(r.stderr | default(r.content | default('Erro não mapeado'))) %}
+                              {% set err_detail = r.exception | default(r.stderr | default(r.content | default(r | to_json))) %}
+                            <tr>
+                              {{ td_open() }}{{ code(failed_item | string) }}</td>
+                              {{ td_open() }}<span style="color:#666666;">{{ err_msg | string | e }}</span></td>
+                              {{ td_open() }}<span style="font-family:Consolas,'Courier New',monospace;font-size:12px;color:#666666;white-space:pre-wrap;">{{ err_detail | string | e }}</span></td>
+                            </tr>
+                            {% endfor %}
+                          </table>
+
+                          <div style="font-family:Arial,sans-serif;font-size:14px;font-weight:bold;color:#111111;margin-top:16px;margin-bottom:6px;">Orientação para correção</div>
+                          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;margin-bottom:10px;">
+                            <tr>
+                              {{ th('Cenário detectado') }}
+                              {{ th('Ação recomendada') }}
+                            </tr>
+                            <tr>
+                              {{ td_open() }}{{ _fail_category | default('Falha genérica') | trim }}</td>
+                              {{ td_open() }}
+                                <span style="color:#666666;">
+                                  {{ _fail_guidance | default('Usar a seção "Detalhes técnicos da falha" para identificar a task, módulo e mensagem retornada.') | trim }}
+                                </span>
+                              </td>
+                            </tr>
+                          </table>
+
+                        </td>
+                      </tr>
+                    </table>
+
+                  </td>
+                </tr>
+              </table>
+
+        - name: Publicar para e-mail (falha)
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: >-
+                Ansible-Report (FALHA) - {{ awx_job_template_name | default('F5 Certificados') }} -
+                Modo {{ f5_certs_mode | default('—') }} -
+                Sites {{ f5_target_scope | default('—') }} -
+                Job #{{ awx_job_id | default('local') }}
+              send_mail_body: "{{ f5_failure_report_html }}"
+
+        - name: Aviso de falha tratada
+          ansible.builtin.debug:
+            msg: "Falha tratada: {{ _fail_task }} / {{ _fail_action }}. Detalhes técnicos foram adicionados ao e-mail de falha."
+
+      always:
+        - name: Desmontar CIFS no controller quando aplicável após falha
+          become: true
+          become_user: root
+          ansible.builtin.shell: |
+            umount "{{ mount_path }}" || true
+          changed_when: false
+          failed_when: false
+          when:
+            - _f5_flow_failed | default(false) | bool
+            - f5_certs_mode | default('') == 'apply'
+            - (mount_path | default('') | trim | length) > 0
+
+        - name: Remover credencial temporária do CIFS quando aplicável após falha
+          become: true
+          become_user: root
+          ansible.builtin.file:
+            path: "{{ _cred_file }}"
+            state: absent
+          failed_when: false
+          changed_when: false
+          when:
+            - _f5_flow_failed | default(false) | bool
+            - f5_certs_mode | default('') == 'apply'
+            - _cred_file is defined
+            - (_cred_file | trim | length) > 0
+
+        - name: Remover diretório temporário de cadeias após falha
+          become: true
+          become_user: root
+          ansible.builtin.file:
+            path: "{{ f5_source_chain_work_dir }}"
+            state: absent
+          failed_when: false
+          changed_when: false
+          when:
+            - _f5_flow_failed | default(false) | bool
+            - f5_source_chain_work_dir is defined
+            - (f5_source_chain_work_dir | trim | length) > 0

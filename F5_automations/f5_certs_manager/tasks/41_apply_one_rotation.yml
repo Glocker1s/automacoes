@@ -1,0 +1,92 @@
+---
+- name: Garantir lista de resultados de rotação
+  ansible.builtin.set_fact:
+    f5_rotation_results: "{{ f5_rotation_results | default([]) }}"
+  changed_when: false
+
+- name: Normalizar inputs do item
+  ansible.builtin.set_fact:
+    _prefix_eff: "{{ rot.certificate_prefix | default('') | trim }}"
+  changed_when: false
+
+- name: Validar prefixo do item
+  ansible.builtin.assert:
+    that:
+      - (_prefix_eff | length) > 0
+    fail_msg: "Item de rotação sem certificate_prefix."
+
+- name: Preparar lista de candidatos do CIFS
+  ansible.builtin.set_fact:
+    _candidates_names: >-
+      {{
+        (cifs_cert_dir_candidates | default([]) | map(attribute='name') | list)
+        if (cifs_cert_dir_candidates is defined)
+        else (source_cert_inventory | default([]) | map(attribute='cert_name') | list)
+      }}
+  changed_when: false
+
+- name: Resolver pasta do CIFS por prefixo
+  ansible.builtin.set_fact:
+    _matches: >-
+      {{
+        _candidates_names
+        | select('match', '^' ~ (_prefix_eff | regex_escape))
+        | list
+      }}
+  changed_when: false
+
+- name: Falhar se prefix não encontrou nenhuma pasta
+  ansible.builtin.fail:
+    msg: >-
+      Não encontrei nenhuma pasta no CIFS iniciando com prefixo="{{ _prefix_eff }}".
+      Pastas encontradas: {{ _candidates_names }}
+  when: (_matches | default([]) | length) == 0
+
+- name: Falhar se prefix encontrou mais de uma pasta
+  ansible.builtin.fail:
+    msg: >-
+      Prefixo "{{ _prefix_eff }}" encontrou mais de uma pasta no CIFS: {{ _matches }}.
+      Refine o prefixo para ficar único.
+  when: (_matches | default([]) | length) > 1
+
+- name: Definir pasta resolvida do CIFS
+  ansible.builtin.set_fact:
+    _folder_full: "{{ _matches[0] }}"
+  changed_when: false
+
+- name: Localizar certificado-fonte no inventário do CIFS
+  ansible.builtin.set_fact:
+    _src_cert: >-
+      {{
+        (source_cert_inventory | selectattr('cert_name', 'equalto', _folder_full) | list | first)
+        if (source_cert_inventory | selectattr('cert_name', 'equalto', _folder_full) | list | length > 0)
+        else {}
+      }}
+  changed_when: false
+
+- name: Falhar se não achar a pasta processada no inventário do CIFS
+  ansible.builtin.fail:
+    msg: >-
+      Não encontrei a pasta '{{ _folder_full }}' no inventário processado do CIFS.
+  when: _src_cert == {}
+
+- name: Pré-validação do cert/key
+  ansible.builtin.assert:
+    that:
+      - _src_cert.precheck_min_valid_ok | bool
+      - (_src_cert.key_path | default('') | trim | length) > 0
+      - _src_cert.cert_key_match | bool
+      - (_src_cert.sans | default([]) | length) > 0
+    fail_msg: |
+      Pré-check falhou para {{ _src_cert.cert_name }}.
+      - precheck_min_valid_ok={{ _src_cert.precheck_min_valid_ok | default('n/a') }}
+      - key_path={{ _src_cert.key_path | default('') }}
+      - cert_key_match={{ _src_cert.cert_key_match | default('n/a') }}
+      - sans={{ _src_cert.sans | default([]) }}
+
+- name: Aplicar rotação em cada site
+  ansible.builtin.include_tasks: 41_apply_one_rotation__per_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"

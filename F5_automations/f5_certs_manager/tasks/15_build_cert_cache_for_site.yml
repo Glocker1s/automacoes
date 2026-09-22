@@ -1,0 +1,20 @@
+---
+- name: Definir contexto do site para cache de certificados
+  ansible.builtin.set_fact:
+    f5_server_eff: "{{ site.server }}"
+    f5_server_port_eff: "{{ site.port | default(443) | int }}"
+  changed_when: false
+
+- name: Coletar certificados instalados do site
+  ansible.builtin.include_tasks: 00_f5_collect_certs.yml
+
+- name: Guardar cache de certificados por site
+  ansible.builtin.set_fact:
+    f5_installed_certs_by_site: >-
+      {{
+        (f5_installed_certs_by_site | default({}))
+        | combine({
+            site.name: (f5_installed_certs_enriched | default([]))
+          }, recursive=True)
+      }}
+  changed_when: false

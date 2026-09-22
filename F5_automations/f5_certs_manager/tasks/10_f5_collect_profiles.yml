@@ -1,0 +1,85 @@
+---
+- name: Definir server/port efetivos (profiles)
+  ansible.builtin.set_fact:
+    _f5_srv: "{{ f5_server_eff }}"
+    _f5_port: "{{ (f5_server_port_eff | default(443)) | int }}"
+  changed_when: false
+
+- name: Inicializar listas e mapas de profiles
+  ansible.builtin.set_fact:
+    f5_clientssl_profiles: []
+    f5_serverssl_profiles: []
+    f5_profiles_by_cert: {}
+    f5_profiles_by_chain: {}
+    f5_profiles_by_cert_by_type:
+      client: {}
+      server: {}
+    f5_profiles_by_chain_by_type:
+      client: {}
+      server: {}
+    f5_profiles_by_cert_typed: {}
+    f5_profiles_by_chain_typed: {}
+    f5_profile_type_by_path: {}
+  changed_when: false
+
+- name: Consultar iControl REST - Client SSL Profiles
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/ltm/profile/client-ssl?$select=name,partition,certKeyChain
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _f5_clientssl_raw
+  changed_when: false
+  when: f5_collect_client_ssl_eff | default(true) | bool
+
+- name: Normalizar lista de Client SSL profiles
+  ansible.builtin.set_fact:
+    f5_clientssl_profiles: "{{ _f5_clientssl_raw.json['items'] | default([]) }}"
+  when: f5_collect_client_ssl_eff | default(true) | bool
+  changed_when: false
+
+- name: Consultar iControl REST - Server SSL Profiles
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/ltm/profile/server-ssl?$select=name,partition,defaultsFrom,cert,key,chain
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _f5_serverssl_raw
+  changed_when: false
+  when: f5_collect_server_ssl_eff | default(false) | bool
+
+- name: Normalizar lista de Server SSL profiles
+  ansible.builtin.set_fact:
+    f5_serverssl_profiles: "{{ _f5_serverssl_raw.json['items'] | default([]) }}"
+  when: f5_collect_server_ssl_eff | default(false) | bool
+  changed_when: false
+
+- name: Mapear uso de certificados em Client SSL profiles
+  ansible.builtin.include_tasks: 11_map_profile_usage.yml
+  vars:
+    _profile_type: "client"
+  loop: "{{ f5_clientssl_profiles | default([]) }}"
+  loop_control:
+    loop_var: _profile
+    label: "client:/{{ _profile.partition | default('Common') }}/{{ _profile.name | default('') }}"
+
+- name: Mapear uso de certificados em Server SSL profiles
+  ansible.builtin.include_tasks: 11_map_profile_usage.yml
+  vars:
+    _profile_type: "server"
+  loop: "{{ f5_serverssl_profiles | default([]) }}"
+  loop_control:
+    loop_var: _profile
+    label: "server:/{{ _profile.partition | default('Common') }}/{{ _profile.name | default('') }}"

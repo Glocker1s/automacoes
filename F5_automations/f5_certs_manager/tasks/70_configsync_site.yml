@@ -1,0 +1,152 @@
+---
+- name: Garantir lista global de resultados de Config Sync
+  ansible.builtin.set_fact:
+    f5_configsync_results: "{{ f5_configsync_results | default([]) }}"
+  changed_when: false
+
+- name: Definir contexto do Config Sync
+  ansible.builtin.set_fact:
+    _configsync_site_name: "{{ site.name }}"
+    _configsync_server: "{{ site.server }}"
+    _configsync_port: "{{ site.port | default(443) | int }}"
+    _configsync_provider: "{{ f5_provider_base | combine({'server': site.server, 'server_port': (site.port | default(443) | int)}) }}"
+    _configsync_reason: "{{ f5_configsync_reason | default('alteração de configuração') }}"
+    _configsync_device_group: "{{ f5_configsync_device_group_by_site.get(site.name, '') }}"
+  changed_when: false
+
+- name: Validar device group de Config Sync
+  ansible.builtin.assert:
+    that:
+      - _configsync_device_group | default('') | trim | length > 0
+    fail_msg: >-
+      Config Sync está habilitado, mas nenhum device group foi definido para o site {{ _configsync_site_name }}.
+      Configure f5_configsync_device_group_by_site.{{ _configsync_site_name }}.
+  when:
+    - f5_enable_configsync | bool
+
+- name: Executar Config Sync do site
+  block:
+
+    - name: Salvar running-config antes do Config Sync
+      f5networks.f5_modules.bigip_config:
+        save: true
+        provider: "{{ _configsync_provider }}"
+      delegate_to: localhost
+
+    - name: Executar Config Sync device-to-group
+      f5networks.f5_modules.bigip_configsync_action:
+        device_group: "{{ _configsync_device_group }}"
+        sync_device_to_group: true
+        provider: "{{ _configsync_provider }}"
+      delegate_to: localhost
+      register: _configsync_action
+
+    - name: Consultar status do Config Sync
+      ansible.builtin.uri:
+        url: "https://{{ _configsync_server }}:{{ _configsync_port }}/mgmt/tm/cm/sync-status"
+        method: GET
+        user: "{{ f5_user }}"
+        password: "{{ f5_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ f5_validate_certs | bool }}"
+        return_content: true
+        status_code: [200]
+      delegate_to: localhost
+      register: _configsync_status_raw
+      retries: "{{ f5_configsync_retries | int }}"
+      delay: "{{ f5_configsync_delay | int }}"
+      until: >
+        ((_configsync_status_raw.content | default('')) is search('In Sync'))
+        or (((_configsync_status_raw.json | default({})) | string) is search('In Sync'))
+      when:
+        - f5_configsync_validate_after | bool
+
+    - name: Definir status textual do Config Sync
+      ansible.builtin.set_fact:
+        _configsync_status_blob: >-
+          {{
+            (_configsync_status_raw.content | default(''))
+            ~ ' '
+            ~ ((_configsync_status_raw.json | default({})) | string)
+          }}
+      when:
+        - f5_configsync_validate_after | bool
+      changed_when: false
+
+    - name: Registrar Config Sync sem validação
+      ansible.builtin.set_fact:
+        f5_configsync_results: >-
+          {{
+            f5_configsync_results + [{
+              'site': _configsync_site_name,
+              'server': _configsync_server,
+              'device_group': _configsync_device_group,
+              'action': 'SYNC_EXECUTADO',
+              'status': 'EXECUTADO_SEM_VALIDACAO',
+              'reason': _configsync_reason,
+              'message': 'Config Sync executado sem validação posterior.',
+              'failed': false
+            }]
+          }}
+      when:
+        - not (f5_configsync_validate_after | bool)
+      changed_when: false
+
+    - name: Registrar Config Sync validado com sucesso
+      ansible.builtin.set_fact:
+        f5_configsync_results: >-
+          {{
+            f5_configsync_results + [{
+              'site': _configsync_site_name,
+              'server': _configsync_server,
+              'device_group': _configsync_device_group,
+              'action': 'SYNC_EXECUTADO',
+              'status': (
+                'IN_SYNC'
+                if ((_configsync_status_blob | default('')) is search('In Sync'))
+                else (
+                  'CHANGES_PENDING'
+                  if ((_configsync_status_blob | default('')) is search('Changes Pending'))
+                  else (
+                    'SYNCING'
+                    if ((_configsync_status_blob | default('')) is search('Syncing'))
+                    else 'STATUS_DESCONHECIDO'
+                  )
+                )
+              ),
+              'reason': _configsync_reason,
+              'message': 'Config Sync executado e status consultado.',
+              'failed': false
+            }]
+          }}
+      when:
+        - f5_configsync_validate_after | bool
+      changed_when: false
+
+  rescue:
+
+    - name: Registrar falha no Config Sync
+      ansible.builtin.set_fact:
+        f5_configsync_results: >-
+          {{
+            f5_configsync_results + [{
+              'site': _configsync_site_name | default(site.name),
+              'server': _configsync_server | default(site.server),
+              'device_group': _configsync_device_group | default(''),
+              'action': 'SYNC_FALHOU',
+              'status': 'FALHA',
+              'reason': _configsync_reason | default('alteração de configuração'),
+              'message': (ansible_failed_result.msg | default(ansible_failed_result | string)),
+              'failed': true
+            }]
+          }}
+      changed_when: false
+
+    - name: Falhar quando Config Sync falhar
+      ansible.builtin.fail:
+        msg: >-
+          Config Sync falhou no site {{ _configsync_site_name | default(site.name) }}
+          para o device group {{ _configsync_device_group | default('') }}.
+          Detalhe: {{ ansible_failed_result.msg | default(ansible_failed_result | string) }}
+      when:
+        - f5_configsync_fail_on_error | bool

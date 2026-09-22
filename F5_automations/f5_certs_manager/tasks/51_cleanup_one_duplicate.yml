@@ -1,0 +1,540 @@
+---
+- name: Definir alvo do cleanup (oldest)
+  ansible.builtin.set_fact:
+    _dc: "{{ dg.oldest }}"
+    _dc_in_use: "{{ dg.oldest_in_use | default(false) | bool }}"
+    _dc_full_path: "{{ dg.oldest.full_path | default('') }}"
+    _dc_partition: "{{ dg.oldest.tmPartition | default('Common') }}"
+    _dc_name: "{{ dg.oldest.name | default('') }}"
+    _profiles_using_oldest: "{{ dg.oldest.used_by_profiles | default([]) }}"
+    _profiles_using_oldest_as_chain: "{{ dg.oldest.used_as_chain_by_profiles | default([]) }}"
+  changed_when: false
+
+- name: Classificar profiles que usam o certificado antigo por tipo
+  ansible.builtin.set_fact:
+    _profiles_using_oldest_client: >-
+      {{
+        _profiles_using_oldest
+        | default([])
+        | select('in', (f5_profile_type_by_path | default({}) | dict2items | selectattr('value', 'equalto', 'client') | map(attribute='key') | list))
+        | list
+      }}
+    _profiles_using_oldest_server: >-
+      {{
+        _profiles_using_oldest
+        | default([])
+        | select('in', (f5_profile_type_by_path | default({}) | dict2items | selectattr('value', 'equalto', 'server') | map(attribute='key') | list))
+        | list
+      }}
+  changed_when: false
+
+- name: Pular - oldest em uso e modo seguro ligado
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'PULADO',
+          'reason': 'Em uso por profile (modo seguro)',
+          'cert_destino': '',
+          'profiles_ajustados': []
+        }]
+      }}
+  when:
+    - f5_duplicate_cleanup_only_if_not_in_use | bool
+    - _dc_in_use | bool
+
+- name: Pular - oldest em uso como chain
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'PULADO',
+          'reason': 'Em uso como chain; ajuste automático suporta apenas certificado principal',
+          'cert_destino': '',
+          'profiles_ajustados': []
+        }]
+      }}
+  when:
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - _dc_in_use | bool
+    - (_profiles_using_oldest_as_chain | default([]) | length) > 0
+
+- name: Pular - oldest em uso por Server SSL no cleanup agressivo
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'PULADO',
+          'reason': 'Em uso por Server SSL Profile; ajuste automático de Server SSL será tratado na etapa de rotação/cleanup server',
+          'cert_destino': '',
+          'profiles_ajustados': (_profiles_using_oldest_server | default([]))
+        }]
+      }}
+  when:
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - _dc_in_use | bool
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) > 0
+
+- name: Deletar certificado (ssl-cert) no F5 - delete direto
+  f5networks.f5_modules.bigip_ssl_certificate:
+    name: "{{ _dc_name }}"
+    partition: "{{ _dc_partition }}"
+    true_names: true
+    state: absent
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  when:
+    - not (_dc_in_use | bool)
+
+- name: Deletar key com mesmo nome - delete direto
+  f5networks.f5_modules.bigip_ssl_key:
+    name: "{{ _dc_name }}"
+    partition: "{{ _dc_partition }}"
+    true_names: true
+    state: absent
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  when:
+    - not (_dc_in_use | bool)
+    - f5_cleanup_delete_key | bool
+
+- name: Registrar resultado DELETADO - delete direto
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'DELETADO',
+          'reason': 'Duplicado expirado há ' ~ (dg.days_since_expired_oldest | string) ~ ' dias',
+          'cert_destino': '',
+          'profiles_ajustados': []
+        }]
+      }}
+  when:
+    - not (_dc_in_use | bool)
+
+- name: Montar lista de candidatos destino (sem o oldest)
+  ansible.builtin.set_fact:
+    _replacement_candidates_all: >-
+      {%- set out = [] -%}
+      {%- for it in (dg['items'] | default([])) -%}
+      {%- if (it.full_path | default('')) != (_dc_full_path | default('')) -%}
+      {%- set _ = out.append(it) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Falhar se não houver certificado destino para ajuste
+  ansible.builtin.fail:
+    msg: >-
+      Não há certificado alternativo no grupo duplicado para ajustar os profiles
+      antes de apagar {{ _dc_full_path }}.
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_replacement_candidates_all | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Selecionar candidatos destino válidos
+  ansible.builtin.set_fact:
+    _replacement_candidates_valid: >-
+      {{
+        (_replacement_candidates_all | default([]))
+        | rejectattr('days_left', 'lt', 0)
+        | list
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Escolher certificado destino preferencial
+  ansible.builtin.set_fact:
+    _replacement_cert: >-
+      {{
+        (
+          (_replacement_candidates_valid | sort(attribute='expiration_epoch') | last)
+          if ((_replacement_candidates_valid | default([]) | length) > 0)
+          else ((_replacement_candidates_all | sort(attribute='expiration_epoch') | last))
+        )
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Definir metadados do certificado destino
+  ansible.builtin.set_fact:
+    _replacement_full_path: "{{ _replacement_cert.full_path | default('') }}"
+    _replacement_partition: "{{ _replacement_cert.tmPartition | default('Common') }}"
+    _replacement_name: "{{ _replacement_cert.name | default('') }}"
+    _replacement_profiles: "{{ _replacement_cert.used_by_profiles | default([]) }}"
+    _donor_profile_full: "{{ (_replacement_cert.used_by_profiles | default([]) | first) | default('') }}"
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Parse donor profile full path
+  ansible.builtin.set_fact:
+    _donor_profile_partition: "{{ (_donor_profile_full.split('/'))[1] }}"
+    _donor_profile_name: "{{ (_donor_profile_full.split('/'))[2] }}"
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_donor_profile_full | default('') | length) > 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Buscar donor profile no F5
+  ansible.builtin.uri:
+    url: >-
+      https://{{ f5_server_eff }}:{{ f5_server_port_eff }}/mgmt/tm/ltm/profile/client-ssl/~{{ _donor_profile_partition }}~{{ _donor_profile_name }}?$select=certKeyChain
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _donor_prof_raw
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_donor_profile_full | default('') | length) > 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Definir se donor é utilizável
+  ansible.builtin.set_fact:
+    _donor_available: >-
+      {{
+        (_donor_profile_full | default('') | length) > 0
+        and ((_donor_prof_raw.json.certKeyChain | default([]) | length) == 1)
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Definir trio via donor
+  ansible.builtin.set_fact:
+    _repoint_cert_name: "{{ (_donor_prof_raw.json.certKeyChain[0].cert | default('') | string).split('/')[-1] }}"
+    _repoint_key_name: "{{ (_donor_prof_raw.json.certKeyChain[0].key | default('') | string).split('/')[-1] }}"
+    _repoint_chain_name: "{{ (_donor_prof_raw.json.certKeyChain[0].chain | default('') | string).split('/')[-1] }}"
+    _repoint_source: "perfil existente"
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - _donor_available | default(false) | bool
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Definir trio via busca da key existente
+  ansible.builtin.set_fact:
+    _repoint_cert_name: "{{ _replacement_name }}"
+    _repoint_chain_name: ""
+    _repoint_source: "busca por chave existente"
+    _repoint_key_name_guess: >-
+      {{
+        (_replacement_name | regex_replace('\.crt$', '.key'))
+        if (_replacement_name is search('\.crt$'))
+        else (
+          (_replacement_name | regex_replace('\.cer$', '.key'))
+          if (_replacement_name is search('\.cer$'))
+          else (
+            (_replacement_name | regex_replace('\.pem$', '.key'))
+            if (_replacement_name is search('\.pem$'))
+            else (_replacement_name ~ '.key')
+          )
+        )
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Montar nomes candidatos de key
+  ansible.builtin.set_fact:
+    _key_candidate_names: >-
+      {%- set out = [] -%}
+      {%- set base = (_replacement_name | regex_replace('\.crt$','') | regex_replace('\.cer$','') | regex_replace('\.pem$','')) -%}
+      {%- for n in [
+            _replacement_name,
+            base,
+            base ~ '.key',
+            _repoint_key_name_guess,
+            _replacement_name ~ '.key'
+          ] -%}
+      {%- if (n | default('') | trim | length) > 0 and n not in out -%}
+      {%- set _ = out.append(n) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Probar cada key candidata no F5
+  ansible.builtin.uri:
+    url: >-
+      https://{{ f5_server_eff }}:{{ f5_server_port_eff }}/mgmt/tm/sys/file/ssl-key/~{{ _replacement_partition }}~{{ item }}?$select=name,partition
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200, 404]
+  delegate_to: localhost
+  register: _key_candidate_probes
+  loop: "{{ _key_candidate_names | default([]) }}"
+  loop_control:
+    label: "{{ _replacement_partition }}/{{ item }}"
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Escolher key destino encontrada de forma exata
+  ansible.builtin.set_fact:
+    _repoint_key_name: >-
+      {{
+        (
+          _key_candidate_probes.results
+          | selectattr('status', 'equalto', 200)
+          | map(attribute='item')
+          | list
+          | first
+        ) | default('')
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - not (_donor_available | default(false) | bool)
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Debug - valores escolhidos para ajuste do cleanup
+  ansible.builtin.debug:
+    msg:
+      cert_antigo: "{{ _dc_full_path }}"
+      cert_destino: "{{ _replacement_full_path | default('') }}"
+      origem_do_trio: "{{ _repoint_source | default('') }}"
+      donor_profile: "{{ _donor_profile_full | default('') }}"
+      cert_repoint: "{{ _repoint_cert_name | default('') }}"
+      key_repoint: "{{ _repoint_key_name | default('') }}"
+      chain_repoint: "{{ _repoint_chain_name | default('') }}"
+      candidatos_key: "{{ _key_candidate_names | default([]) }}"
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Pular - key do certificado destino não encontrada
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'PULADO',
+          'reason': 'Não foi encontrada uma key compatível do certificado destino no F5 para ajuste automático',
+          'cert_destino': (_replacement_full_path | default('')),
+          'profiles_ajustados': []
+        }]
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - not (_donor_available | default(false) | bool)
+    - (_repoint_key_name | default('') | length) == 0
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Parse profiles que usam o certificado antigo
+  ansible.builtin.set_fact:
+    _profiles_using_oldest_parsed: >-
+      {%- set out = [] -%}
+      {%- for p in (_profiles_using_oldest | default([])) -%}
+      {%- if (p | default('') | string | trim | length) > 0 -%}
+      {%- set parts = p.split('/') -%}
+      {%- if (parts | length) >= 3 -%}
+      {%- set _ = out.append({
+          'full_path': p,
+          'partition': parts[1],
+          'name': parts[2]
+        }) -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+  changed_when: false
+
+- name: Garantir que há profiles a ajustar
+  ansible.builtin.assert:
+    that:
+      - (_profiles_using_oldest_parsed | default([]) | length) > 0
+    fail_msg: >-
+      O certificado {{ _dc_full_path }} está marcado como em uso, mas nenhum profile utilizável foi encontrado para ajuste.
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Ajustar profiles do certificado antigo para o certificado destino
+  f5networks.f5_modules.bigip_profile_client_ssl:
+    name: "{{ item.name }}"
+    partition: "{{ item.partition }}"
+    cert_key_chain:
+      - cert: "{{ _repoint_cert_name }}"
+        key: "{{ _repoint_key_name }}"
+        true_names: true
+        chain: >-
+          {{
+            _repoint_chain_name
+            if (
+              (_repoint_chain_name | default('') | trim | length) > 0
+              and ((_repoint_chain_name | lower | trim) not in ['none', 'inherit'])
+            )
+            else omit
+          }}
+    state: present
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  loop: "{{ _profiles_using_oldest_parsed | default([]) }}"
+  loop_control:
+    label: "{{ item.full_path }}"
+  register: _repoint_results
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Salvar running-config após ajuste dos profiles
+  f5networks.f5_modules.bigip_config:
+    save: yes
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (_profiles_using_oldest_parsed | default([]) | length) > 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Deletar certificado antigo após ajuste dos profiles
+  f5networks.f5_modules.bigip_ssl_certificate:
+    name: "{{ _dc_name }}"
+    partition: "{{ _dc_partition }}"
+    true_names: true
+    state: absent
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Deletar key antiga após ajuste dos profiles
+  f5networks.f5_modules.bigip_ssl_key:
+    name: "{{ _dc_name }}"
+    partition: "{{ _dc_partition }}"
+    true_names: true
+    state: absent
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - f5_cleanup_delete_key | bool
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0
+
+- name: Registrar resultado DELETADO após ajuste dos profiles
+  ansible.builtin.set_fact:
+    f5_cleanup_results: >-
+      {{
+        f5_cleanup_results + [{
+          'cert': (_dc_full_path | default('—')),
+          'action': 'DELETADO',
+          'reason': 'Cert em uso foi ajustado para outro certificado válido antes da deleção (' ~ _repoint_source ~ ')',
+          'cert_destino': (_replacement_full_path | default('')),
+          'profiles_ajustados': (_profiles_using_oldest | default([]))
+        }]
+      }}
+  when:
+    - _dc_in_use | bool
+    - not (f5_duplicate_cleanup_only_if_not_in_use | bool)
+    - (_profiles_using_oldest_as_chain | default([]) | length) == 0
+    - (
+      (_donor_available | default(false) | bool)
+      or ((_repoint_key_name | default('') | length) > 0)
+      )
+    - (_profiles_using_oldest_server | default([]) | length) == 0

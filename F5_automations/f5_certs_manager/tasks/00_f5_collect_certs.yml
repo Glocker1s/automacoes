@@ -1,0 +1,83 @@
+---
+- name: Definir server/port efetivos
+  ansible.builtin.set_fact:
+    _f5_srv: "{{ f5_server_eff | default(f5_server) }}"
+    _f5_port: "{{ (f5_server_port_eff | default(f5_server_port | default(443))) | int }}"
+  changed_when: false
+
+- name: Consultar iControl REST - certificados (sys/file/ssl-cert)
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/sys/file/ssl-cert?$select=name,tmPartition,partition,expirationDate,expirationString,fingerprint,subject,subjectAlternativeName
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+    headers:
+      Content-Type: application/json
+  delegate_to: localhost
+  register: _f5_sslcerts_raw
+  changed_when: false
+
+- name: Normalizar lista de certificados instalados
+  ansible.builtin.set_fact:
+    f5_installed_certs: >-
+      {%- set out = [] -%}
+      {%- for c in (_f5_sslcerts_raw.json['items'] | default([])) -%}
+      {%- set part = c.tmPartition | default(c.partition | default('Common')) -%}
+      {%- set _ = out.append(c | combine({'tmPartition': part}, recursive=True)) -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Filtrar por partitions
+  ansible.builtin.set_fact:
+    f5_installed_certs: >-
+      {{
+        (f5_installed_certs | default([]))
+        | selectattr('tmPartition', 'in', (f5_partitions | default([])))
+        | list
+      }}
+  when: (f5_partitions | default([])) | length > 0
+  changed_when: false
+
+- name: Enriquecer inventário
+  ansible.builtin.set_fact:
+    f5_installed_certs_enriched: >-
+      {%- set out = [] -%}
+      {%- for item in (f5_installed_certs | default([])) -%}
+      {%- set exp_raw = (item.expirationDate | default(0) | int) -%}
+      {%- set exp_epoch = ((exp_raw // 1000) if (exp_raw > 1000000000000) else exp_raw) -%}
+      {%- set days_left = (((exp_epoch | int) - (_now_epoch | int)) // 86400) -%}
+      {%- set san_raw = (item.subjectAlternativeName | default('') | string | trim) -%}
+      {%- set san_list = (
+            san_raw
+            | regex_replace('DNS:', '')
+            | regex_replace(',\\s*', ',')
+            | split(',')
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          ) if (san_raw | length > 0) else [] -%}
+      {%- set san_list_norm = (san_list | map('lower') | unique | sort | list) -%}
+      {%- set row = item | combine({
+          'full_path': '/' ~ (item.tmPartition | default('Common')) ~ '/' ~ (item.name | default('')),
+          'expiration_epoch': (exp_epoch | int),
+          'days_left': (days_left | int),
+          'san': san_raw,
+          'san_list': san_list,
+          'san_list_norm': san_list_norm,
+          'san_norm': (san_list_norm | join(','))
+        }, recursive=True) -%}
+      {%- set _ = out.append(row) -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Garantir listas definidas
+  ansible.builtin.set_fact:
+    f5_installed_certs_enriched: "{{ f5_installed_certs_enriched | default([]) }}"
+  changed_when: false

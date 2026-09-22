@@ -1,0 +1,88 @@
+---
+- name: Definir server/port efetivos (cache)
+  ansible.builtin.set_fact:
+    _f5_srv: "{{ f5_server_eff }}"
+    _f5_port: "{{ (f5_server_port_eff | default(443)) | int }}"
+  changed_when: false
+
+- name: Consultar iControl REST - Virtual Servers (ltm/virtual) (cache)
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _f5_srv }}:{{ _f5_port }}/mgmt/tm/ltm/virtual?$select=name,partition,pool,destination,profilesReference
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _virt_raw_cache
+  changed_when: false
+
+- name: Filtrar virtuals candidatos (tem profilesReference.link)
+  ansible.builtin.set_fact:
+    _virt_candidates: >-
+      {%- set out=[] -%}
+      {%- for v in (_virt_raw_cache.json['items'] | default([])) -%}
+        {%- set link = (v.profilesReference.link | default('')) -%}
+        {%- if (link | length) > 0 -%}
+          {%- set _ = out.append(v) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Consultar profilesReference.link para cada virtual candidato (cache)
+  ansible.builtin.uri:
+    url: >-
+      {{
+        (
+          (item.profilesReference.link | regex_replace('https://localhost', 'https://' ~ _f5_srv ~ ':' ~ (_f5_port | string)))
+          ~ '&$select=name,partition'
+        )
+      }}
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _virt_profiles_cache
+  changed_when: false
+  failed_when: false
+  loop: "{{ _virt_candidates | default([]) }}"
+  loop_control:
+    label: "{{ (item.partition | default('Common')) ~ '/' ~ (item.name | default('')) }}"
+  when: (_virt_candidates | default([]) | length) > 0
+
+- name: Construir índice profile -> [virtual,pool,target]
+  ansible.builtin.set_fact:
+    f5_virtuals_index_by_profile: >-
+      {%- set idx = {} -%}
+      {%- for r in (_virt_profiles_cache.results | default([])) -%}
+        {%- set v = r.item -%}
+        {%- set vfull = '/' ~ (v.partition | default('Common')) ~ '/' ~ (v.name | string) -%}
+        {%- set pool = (v.pool | default('')) -%}
+        {%- set dest_raw = (v.destination | default('') | string) -%}
+        {%- set target = (
+              dest_raw
+              | regex_replace('^/[^/]+/', '')
+              | regex_replace('%[0-9]+:', ':')
+            ) -%}
+        {%- set prof_items = (r.json['items'] | default([])) if (r.json is defined) else [] -%}
+        {%- for p in prof_items -%}
+          {%- set pfull = '/' ~ (p.partition | default('Common')) ~ '/' ~ (p.name | string) -%}
+          {%- set cur = (idx.get(pfull, []) + [{'virtual': vfull, 'pool': pool, 'target': target}]) -%}
+          {%- set _ = idx.update({pfull: (cur | unique)}) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ idx }}
+  changed_when: false
+
+- name: Garantir índice definido
+  ansible.builtin.set_fact:
+    f5_virtuals_index_by_profile: "{{ f5_virtuals_index_by_profile | default({}) }}"
+  changed_when: false

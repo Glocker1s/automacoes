@@ -1,0 +1,221 @@
+---
+- name: Montar lista de sites válidos a partir de f5_sites
+  ansible.builtin.set_fact:
+    f5_valid_site_names: >-
+      {{
+        (f5_sites | default([]))
+        | map(attribute='name')
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+  changed_when: false
+
+- name: Normalizar f5_target_scope
+  ansible.builtin.set_fact:
+    f5_target_scope_norm: >-
+      {%- set raw = (f5_target_scope | default('')) -%}
+      {%- if raw is string -%}
+        {%- set parsed = (
+          raw
+          | replace('\n', ',')
+          | split(',')
+          | map('trim')
+          | reject('equalto', '')
+          | map('lower')
+          | unique
+          | list
+        ) -%}
+      {%- else -%}
+        {%- set parsed = (
+          raw
+          | map('string')
+          | map('trim')
+          | reject('equalto', '')
+          | map('lower')
+          | unique
+          | list
+        ) -%}
+      {%- endif -%}
+      {{ parsed if (parsed | length) > 0 else (f5_valid_site_names | default([])) }}
+  changed_when: false
+
+- name: Validar f5_target_scope
+  ansible.builtin.assert:
+    that:
+      - (f5_valid_site_names | default([]) | length) > 0
+      - (f5_target_scope_norm | default([]) | length) > 0
+      - (f5_target_scope_norm | difference(f5_valid_site_names | default([])) | length) == 0
+    fail_msg: >-
+      f5_target_scope inválido.
+      Valores recebidos: {{ f5_target_scope_norm | default([]) }}.
+      Valores aceitos conforme f5_sites: {{ f5_valid_site_names | default([]) }}.
+
+- name: Validar escopo de SSL Profiles
+  ansible.builtin.assert:
+    that:
+      - (f5_ssl_profile_scope | default('client') | string | trim | lower) in ['client', 'server', 'all']
+    fail_msg: >-
+      f5_ssl_profile_scope inválido: {{ f5_ssl_profile_scope | default('') }}.
+      Valores aceitos: client, server, all.
+  changed_when: false
+
+- name: Normalizar escopo de SSL Profiles
+  ansible.builtin.set_fact:
+    f5_ssl_profile_scope_eff: "{{ f5_ssl_profile_scope | default('client') | string | trim | lower }}"
+    f5_ssl_profile_types_for_action: >-
+      {{
+        ['client', 'server']
+        if (f5_ssl_profile_scope | default('client') | string | trim | lower) == 'all'
+        else [f5_ssl_profile_scope | default('client') | string | trim | lower]
+      }}
+  changed_when: false
+
+- name: Bloquear apply com escopo all sem confirmação explícita
+  ansible.builtin.assert:
+    that:
+      - f5_ssl_profile_scope_eff != 'all' or (f5_apply_allow_all_profile_types | default(false) | bool)
+    fail_msg: >-
+      f5_certs_mode=apply com f5_ssl_profile_scope=all está bloqueado por segurança.
+      Use f5_ssl_profile_scope=client ou server, ou habilite f5_apply_allow_all_profile_types=true no lab.
+  when: f5_certs_mode == 'apply'
+  changed_when: false
+
+- name: Definir coleta efetiva de Client/Server SSL
+  ansible.builtin.set_fact:
+    f5_collect_client_ssl_eff: >-
+      {{
+        f5_ssl_profile_scope_eff in ['client', 'all']
+        or (
+          (f5_collect_server_ssl_for_safety | default(true) | bool)
+          and (f5_certs_mode | default('check')) in ['check', 'list', 'compare']
+        )
+      }}
+    f5_collect_server_ssl_eff: >-
+      {{
+        f5_ssl_profile_scope_eff in ['server', 'all']
+        or (
+          (f5_collect_server_ssl_for_safety | default(true) | bool)
+          and (f5_certs_mode | default('check')) in ['check', 'list', 'compare']
+        )
+      }}
+  changed_when: false
+
+- name: Normalizar sites efetivos (porta default 443) conforme escopo
+  ansible.builtin.set_fact:
+    f5_sites_eff: >-
+      {%- set out=[] -%}
+      {%- for s in (f5_sites | default([])) -%}
+        {%- set nm = (s.name | default('') | string | trim | lower) -%}
+        {%- set srv = (s.server | default('') | string | trim) -%}
+        {%- if (nm | length) > 0 and (srv | length) > 0 and (nm in (f5_target_scope_norm | default([]))) -%}
+          {%- set _ = out.append({'name': nm, 'server': srv, 'port': (s.port | default(443) | int)}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Falhar se não houver sites efetivos
+  ansible.builtin.assert:
+    that:
+      - (f5_sites_eff | default([]) | length) > 0
+    fail_msg: |
+      Nenhum site efetivo encontrado após aplicar o escopo {{ f5_target_scope_norm }} em f5_sites.
+
+- name: Garantir ansible_date_time disponível
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", "date_time"]
+  when: ansible_date_time is not defined
+
+- name: Marcar horário de referência
+  ansible.builtin.set_fact:
+    _now_epoch: "{{ ansible_date_time.epoch | int }}"
+
+- name: (LAB) Aplicar timewarp no epoch
+  ansible.builtin.set_fact:
+    _now_epoch: "{{ (_now_epoch | int) + ((f5_timewarp_days | default(0) | int) * 86400) }}"
+  when: (f5_timewarp_days | default(0) | int) != 0
+
+- name: Definir provider base (sem server)
+  ansible.builtin.set_fact:
+    f5_provider_base:
+      user: "{{ f5_user }}"
+      password: "{{ f5_password }}"
+      validate_certs: "{{ f5_validate_certs | bool }}"
+      transport: "rest"
+      no_f5_teem: true
+  changed_when: false
+  no_log: true
+
+- name: Validar CIFS no modo APPLY
+  ansible.builtin.assert:
+    that:
+      - (mount_cifs | default('') | trim | length) > 0
+      - (mount_path | default('') | trim | length) > 0
+    fail_msg: |
+      Modo apply exige CIFS configurado:
+      - mount_cifs
+      - mount_path
+  when: f5_certs_mode == 'apply'
+
+- name: Coletar certificados fonte (CIFS)
+  ansible.builtin.include_tasks: 30_source_collect_from_cifs.yml
+  when: f5_certs_mode == 'apply'
+
+- name: Aplicar rotação (PRD/DR)
+  ansible.builtin.include_tasks: 40_apply_rotation.yml
+  when: f5_certs_mode == 'apply'
+
+- name: Inicializar resultados por site
+  ansible.builtin.set_fact:
+    f5_site_findings_by_site: {}
+
+- name: Coletar inventário + findings por site
+  ansible.builtin.include_tasks: 90_collect_one_site.yml
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}:{{ site.server }}"
+
+- name: Comparar certificados entre sites
+  ansible.builtin.include_tasks: 55_compare_sites.yml
+  when: f5_certs_mode == 'compare'
+
+- name: Montar report (HTML)
+  ansible.builtin.include_tasks: 60_build_report.yml
+
+- name: Desmontar CIFS (se montado)
+  become: true
+  become_user: root
+  ansible.builtin.shell: |
+    umount "{{ mount_path }}" || true
+  changed_when: false
+  failed_when: false
+  when:
+    - f5_certs_mode == 'apply'
+    - (mount_path | default('') | trim | length) > 0
+
+- name: Remover cred file
+  become: true
+  become_user: root
+  ansible.builtin.file:
+    path: "{{ _cred_file }}"
+    state: absent
+  when:
+    - f5_certs_mode == 'apply'
+    - _cred_file is defined
+
+- name: Remover diretório temporário de cadeias
+  become: true
+  become_user: root
+  ansible.builtin.file:
+    path: "{{ f5_source_chain_work_dir }}"
+    state: absent
+  failed_when: false
+  changed_when: false
+  when:
+    - f5_source_chain_work_dir is defined
+    - (f5_source_chain_work_dir | trim | length) > 0

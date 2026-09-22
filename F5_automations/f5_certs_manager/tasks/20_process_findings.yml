@@ -1,0 +1,122 @@
+---
+- name: Inicializar coleções do report
+  ansible.builtin.set_fact:
+    f5_expired: []
+    f5_critical: []
+    f5_warning: []
+    f5_ok: []
+    f5_duplicates: []
+    f5_installed_certs_with_usage: []
+  changed_when: false
+
+- name: Enriquecer certificados instalados com uso em profiles
+  ansible.builtin.set_fact:
+    f5_installed_certs_with_usage: >-
+      {%- set out = [] -%}
+      {%- for it in (f5_installed_certs_enriched | default([])) -%}
+        {%- set fp = it.full_path | default('') -%}
+        {%- set row = it | combine({
+            'used_by_profiles': (f5_profiles_by_cert.get(fp, []) if (f5_profiles_by_cert is defined) else []),
+            'used_as_chain_by_profiles': (f5_profiles_by_chain.get(fp, []) if (f5_profiles_by_chain is defined) else []),
+
+            'used_by_profiles_client': (f5_profiles_by_cert_by_type.client.get(fp, []) if (f5_profiles_by_cert_by_type is defined and f5_profiles_by_cert_by_type.client is defined) else []),
+            'used_by_profiles_server': (f5_profiles_by_cert_by_type.server.get(fp, []) if (f5_profiles_by_cert_by_type is defined and f5_profiles_by_cert_by_type.server is defined) else []),
+
+            'used_as_chain_by_profiles_client': (f5_profiles_by_chain_by_type.client.get(fp, []) if (f5_profiles_by_chain_by_type is defined and f5_profiles_by_chain_by_type.client is defined) else []),
+            'used_as_chain_by_profiles_server': (f5_profiles_by_chain_by_type.server.get(fp, []) if (f5_profiles_by_chain_by_type is defined and f5_profiles_by_chain_by_type.server is defined) else []),
+
+            'used_by_profile_details': (f5_profiles_by_cert_typed.get(fp, []) if (f5_profiles_by_cert_typed is defined) else []),
+            'used_as_chain_by_profile_details': (f5_profiles_by_chain_typed.get(fp, []) if (f5_profiles_by_chain_typed is defined) else [])
+          }, recursive=True) -%}
+        {%- set _ = out.append(row) -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Classificar certificados por vencimento
+  ansible.builtin.set_fact:
+    f5_expired: >-
+      {%- set out = [] -%}
+      {%- for row in (f5_installed_certs_with_usage | default([])) -%}
+        {%- if (row.days_left | int) < 0 -%}
+          {%- set _ = out.append(row) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    f5_critical: >-
+      {%- set out = [] -%}
+      {%- for row in (f5_installed_certs_with_usage | default([])) -%}
+        {%- set dl = (row.days_left | int) -%}
+        {%- if dl >= 0 and dl <= (f5_critical_days | int) -%}
+          {%- set _ = out.append(row) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    f5_warning: >-
+      {%- set out = [] -%}
+      {%- for row in (f5_installed_certs_with_usage | default([])) -%}
+        {%- set dl = (row.days_left | int) -%}
+        {%- if dl > (f5_critical_days | int) and dl <= (f5_warning_days | int) -%}
+          {%- set _ = out.append(row) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    f5_ok: >-
+      {%- set out = [] -%}
+      {%- for row in (f5_installed_certs_with_usage | default([])) -%}
+        {%- if (row.days_left | int) > (f5_warning_days | int) -%}
+          {%- set _ = out.append(row) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Construir buckets de duplicidade (SAN ou Subject)
+  ansible.builtin.set_fact:
+    _dup_buckets: >-
+      {%- set groups = {} -%}
+      {%- for row in (f5_installed_certs_with_usage | default([])) -%}
+        {%- set key = (row.san | default(row.subjectAlternativeName | default('')) | string | trim | lower) -%}
+        {%- if key | length == 0 -%}
+          {%- set key = (row.subject | default('') | string | trim | lower) -%}
+        {%- endif -%}
+        {%- if key | length == 0 -%}
+          {%- set key = (row.fingerprint | default(row.name) | string) -%}
+        {%- endif -%}
+        {%- set _ = groups.setdefault(key, []).append(row) -%}
+      {%- endfor -%}
+      {{ groups }}
+  changed_when: false
+
+- name: Montar lista de duplicados (grupos > 1)
+  ansible.builtin.set_fact:
+    f5_duplicates: >-
+      {%- set out = [] -%}
+      {%- for kv in (_dup_buckets | default({}) | dict2items) -%}
+        {%- set items = (kv.value | default([])) -%}
+        {%- if (items | length) > 1 -%}
+          {%- set sorted_items = items | sort(attribute='expiration_epoch') -%}
+          {%- set oldest = sorted_items[0] -%}
+          {%- set expired = ((oldest.days_left | int) < 0) -%}
+          {%- set days_since_expired = (((_now_epoch | int) - (oldest.expiration_epoch | int)) // 86400) if expired else 0 -%}
+          {%- set delete_candidate = (expired and (days_since_expired | int) >= (f5_duplicate_delete_grace_days | int)) -%}
+          {%- set delete_in_days = ((f5_duplicate_delete_grace_days | int) - (days_since_expired | int)) if expired else '' -%}
+          {%- set oldest_in_use = ((oldest.used_by_profiles | default([]) | length) > 0) or ((oldest.used_as_chain_by_profiles | default([]) | length) > 0) -%}
+          {%- set _ = out.append({
+              'dup_key': kv.key,
+              'count': (items | length),
+              'items': sorted_items,
+              'oldest': oldest,
+              'delete_grace_days': (f5_duplicate_delete_grace_days | int),
+              'days_since_expired_oldest': (days_since_expired | int),
+              'delete_candidate': delete_candidate,
+              'delete_in_days': delete_in_days,
+              'oldest_in_use': oldest_in_use
+            }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false

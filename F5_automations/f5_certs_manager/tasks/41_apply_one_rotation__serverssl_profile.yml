@@ -1,0 +1,160 @@
+---
+- name: Parse Server SSL profile path
+  ansible.builtin.set_fact:
+    _serverssl_profile_partition: "{{ (_target_profile | regex_replace('^/', '')).split('/')[0] }}"
+    _serverssl_profile_name: "{{ (_target_profile | regex_replace('^/', '')).split('/')[1] }}"
+  changed_when: false
+
+- name: Definir paths de cert/key/chain para Server SSL
+  ansible.builtin.set_fact:
+    _serverssl_new_cert_ref: "/{{ _serverssl_profile_partition }}/{{ _new_cert_name }}"
+    _serverssl_new_key_ref: "/{{ _serverssl_profile_partition }}/{{ _new_key_name }}"
+    _serverssl_new_chain_ref: >-
+      {{
+        ('/' ~ _serverssl_profile_partition ~ '/' ~ _new_chain_name)
+        if (_new_chain_name | default('') | string | trim | length) > 0
+        else ''
+      }}
+  changed_when: false
+
+- name: Buscar Server SSL Profile antes da alteração
+  ansible.builtin.uri:
+    url: >-
+      https://{{ f5_server_eff }}:{{ f5_server_port_eff | default(443) }}/mgmt/tm/ltm/profile/server-ssl/~{{ _serverssl_profile_partition }}~{{ _serverssl_profile_name }}
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _serverssl_before_raw
+  changed_when: false
+
+- name: Atualizar Server SSL Profile com novo cert/key/chain
+  ansible.builtin.uri:
+    url: >-
+      https://{{ f5_server_eff }}:{{ f5_server_port_eff | default(443) }}/mgmt/tm/ltm/profile/server-ssl/~{{ _serverssl_profile_partition }}~{{ _serverssl_profile_name }}
+    method: PATCH
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+    body_format: json
+    body: >-
+      {{
+        {
+          'cert': _serverssl_new_cert_ref,
+          'key': _serverssl_new_key_ref
+        }
+        | combine(
+            {'chain': _serverssl_new_chain_ref}
+            if (_serverssl_new_chain_ref | string | trim | length) > 0
+            else {},
+            recursive=True
+          )
+      }}
+  delegate_to: localhost
+  register: _serverssl_update_raw
+  changed_when: true
+
+- name: Buscar Server SSL Profile depois da alteração
+  ansible.builtin.uri:
+    url: >-
+      https://{{ f5_server_eff }}:{{ f5_server_port_eff | default(443) }}/mgmt/tm/ltm/profile/server-ssl/~{{ _serverssl_profile_partition }}~{{ _serverssl_profile_name }}
+    method: GET
+    user: "{{ f5_user }}"
+    password: "{{ f5_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ f5_validate_certs | bool }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: localhost
+  register: _serverssl_after_raw
+  changed_when: false
+
+- name: Validar configuração aplicada no Server SSL Profile
+  ansible.builtin.set_fact:
+    _serverssl_config_ok: >-
+      {{
+        (_serverssl_after_raw.json.cert | default('')) == _serverssl_new_cert_ref
+        and (_serverssl_after_raw.json.key | default('')) == _serverssl_new_key_ref
+        and (
+          (_serverssl_new_chain_ref | length) == 0
+          or (_serverssl_after_raw.json.chain | default('')) == _serverssl_new_chain_ref
+        )
+      }}
+    _serverssl_validation_row:
+      rotation_id: "{{ _rotation_id }}"
+      site: "{{ site.name | default('') }}"
+      f5_server: "{{ f5_server_eff }}"
+      profile: "{{ _target_profile }}"
+      profile_type: "server"
+      expected:
+        cert: "{{ _serverssl_new_cert_ref }}"
+        key: "{{ _serverssl_new_key_ref }}"
+        chain: "{{ _serverssl_new_chain_ref | default('') }}"
+      actual:
+        cert: "{{ _serverssl_after_raw.json.cert | default('') }}"
+        key: "{{ _serverssl_after_raw.json.key | default('') }}"
+        chain: "{{ _serverssl_after_raw.json.chain | default('') }}"
+      ok: "{{ _serverssl_config_ok | bool }}"
+  changed_when: false
+
+- name: Registrar validação de Server SSL
+  ansible.builtin.set_fact:
+    f5_serverssl_config_validation_results: >-
+      {{
+        (f5_serverssl_config_validation_results | default([]))
+        + [_serverssl_validation_row]
+      }}
+  changed_when: false
+
+- name: Falhar se Server SSL Profile não ficou com cert/key/chain esperado
+  ansible.builtin.fail:
+    msg: >-
+      Server SSL Profile {{ _target_profile }} não ficou com a configuração esperada.
+      Esperado cert={{ _serverssl_new_cert_ref }}, key={{ _serverssl_new_key_ref }},
+      chain={{ _serverssl_new_chain_ref | default('') }}.
+      Atual cert={{ _serverssl_after_raw.json.cert | default('') }},
+      key={{ _serverssl_after_raw.json.key | default('') }},
+      chain={{ _serverssl_after_raw.json.chain | default('') }}.
+  when:
+    - f5_server_ssl_validation_mode | default('config_only') == 'config_only'
+    - not (_serverssl_config_ok | bool)
+
+- name: Registrar resultado da rotação Server SSL
+  ansible.builtin.set_fact:
+    f5_rotation_results: >-
+      {{
+        (f5_rotation_results | default([]))
+        + [
+          {
+            'rotation_id': _rotation_id,
+            'site': site.name | default(''),
+            'f5_server': f5_server_eff,
+            'profile': _target_profile,
+            'profile_type': 'server',
+            'discovery_source': _discovery_source | default('server-ssl'),
+            'seed_profile': _seed_profile | default(''),
+            'current_shared_cert': _current_shared_cert | default(''),
+            'shared_current_cert': _current_shared_cert | default(''),
+            'cifs_folder': _src_cert.folder | default(_src_cert.path | default('')),
+            'before': {
+              'cert': _serverssl_before_raw.json.cert | default(''),
+              'key': _serverssl_before_raw.json.key | default(''),
+              'chain': _serverssl_before_raw.json.chain | default('')
+            },
+            'after': {
+              'cert': _serverssl_after_raw.json.cert | default(''),
+              'key': _serverssl_after_raw.json.key | default(''),
+              'chain': _serverssl_after_raw.json.chain | default('')
+            },
+            'virtuals': _profile_virtuals | default([])
+          }
+        ]
+      }}
+  changed_when: false

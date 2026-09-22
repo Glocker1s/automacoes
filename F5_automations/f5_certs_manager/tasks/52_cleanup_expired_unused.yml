@@ -1,0 +1,67 @@
+---
+- name: Garantir lista de resultados do cleanup de expirados sem uso
+  ansible.builtin.set_fact:
+    f5_expired_unused_cleanup_results: "{{ f5_expired_unused_cleanup_results | default([]) }}"
+  changed_when: false
+
+- name: Montar lista de certificados que fazem parte de grupos duplicados
+  ansible.builtin.set_fact:
+    _expired_unused_duplicate_full_paths: >-
+      {%- set out = [] -%}
+      {%- for dg in (f5_duplicates | default([])) -%}
+      {%- for it in (dg['items'] | default([])) -%}
+      {%- set fp = (it.full_path | default('')) -%}
+      {%- if (fp | length) > 0 and fp not in out -%}
+      {%- set _ = out.append(fp) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Selecionar certificados expirados sem uso candidatos a deleção
+  ansible.builtin.set_fact:
+    _expired_unused_cleanup_candidates: >-
+      {%- set out = [] -%}
+      {%- set already_deleted = (_deleted_certs_now | default([])) -%}
+      {%- for it in (f5_expired | default([])) -%}
+      {%- set full = (it.full_path | default('')) -%}
+      {%- set used_profiles = (it.used_by_profiles | default([])) -%}
+      {%- set used_chains = (it.used_as_chain_by_profiles | default([])) -%}
+      {%- set exp_epoch = (it.expiration_epoch | default(0) | int) -%}
+      {%- set days_since_expired = (((_now_epoch | int) - exp_epoch) // 86400) if exp_epoch > 0 else 0 -%}
+      {%- set in_duplicate = full in (_expired_unused_duplicate_full_paths | default([])) -%}
+      {%- set ns = namespace(protected=false) -%}
+      {%- for pat in (f5_expired_unused_protected_patterns | default([])) -%}
+      {%- if full is search(pat) -%}
+      {%- set ns.protected = true -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- if
+            (full | length) > 0
+            and (full not in already_deleted)
+            and ((it.days_left | default(0) | int) < 0)
+            and (days_since_expired | int) >= (f5_expired_unused_delete_grace_days | int)
+            and (used_profiles | length) == 0
+            and (used_chains | length) == 0
+            and (not ns.protected)
+            and (
+              (not (f5_expired_unused_only_non_duplicated | bool))
+              or (not in_duplicate)
+            )
+      -%}
+      {%- set _ = out.append(it | combine({
+          'days_since_expired': (days_since_expired | int),
+          'expired_unused_reason': 'Expirado sem uso há ' ~ (days_since_expired | string) ~ ' dias'
+        })) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Cleanup - processar certificados expirados sem uso
+  ansible.builtin.include_tasks: 53_cleanup_one_expired_unused.yml
+  loop: "{{ _expired_unused_cleanup_candidates | default([]) }}"
+  loop_control:
+    loop_var: expired_unused_cert
+    label: "{{ expired_unused_cert.full_path | default('unknown') }}"

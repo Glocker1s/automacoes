@@ -1,0 +1,210 @@
+---
+# ====== Modo de execução ======
+# list: apenas exibição/listagem de todos os certificados
+# check: inventário + report + cleanup opcional de duplicados
+# apply: rotação automática a partir do prefixo no CIFS + validação + report
+# compare: auditoria read-only de divergências entre sites
+f5_certs_mode: "check"
+
+# ====== Escopo / Sites ======
+# Escopo informado no survey: prd | dr | prd,dr
+f5_target_scope: "hml"
+
+# Ajuste estes IPs para os F5s reais do teu ambiente, se necessário
+f5_sites:
+  - name: "prd-interno"
+    server: "10.209.162.116"
+    port: 443
+  - name: "prd-externo"
+    server: "10.209.161.96"
+    port: 443
+  - name: "dr-interno"
+    server: "10.209.115.196"
+    port: 443
+  - name: "dr-externo"
+    server: "10.209.114.96"
+    port: 443
+  - name: "hml"
+    server: "10.209.116.67"
+    port: 443
+
+# ====== Comparação entre sites ======
+# Site base da comparação. Se vazio, usa o primeiro site informado em f5_target_scope.
+f5_compare_baseline_site: ""
+# true = compara somente certificados em uso por Client SSL/Server SSL profiles mapeados.
+# false = compara todo o inventário instalado no F5.
+f5_compare_only_in_use: true
+# Tolerância em dias para diferença de vencimento. 0 = qualquer diferença conta como drift.
+f5_compare_expiration_tolerance_days: 0
+# Se true, falha a job quando encontrar divergência.
+# Se false, apenas reporta no HTML/e-mail.
+f5_compare_fail_on_drift: false
+
+# ====== F5 conexão ======
+f5_user: "{{ f5_username }}"
+f5_password: "{{ f5_password }}"
+f5_validate_certs: false
+
+# ====== Escopo do inventário ======
+f5_partitions: []
+
+# ====== Escopo de SSL Profiles ======
+
+# Define quais profiles a automação deve considerar para ação/report principal.
+# client: comportamento atual, focado em Client SSL Profile
+# server: considera Server SSL Profile
+# all: considera Client SSL + Server SSL
+f5_ssl_profile_scope: "client"
+# Mesmo quando o escopo for client, coletar Server SSL para segurança.
+# Isso evita cleanup incorreto de certificados que parecem "sem uso",
+# mas na verdade estão em uso por Server SSL Profile.
+f5_collect_server_ssl_for_safety: true
+
+# ====== Regras de vencimento ======
+f5_warning_days: 30
+f5_critical_days: 7
+
+# ====== Cleanup de duplicados ======
+f5_enable_duplicate_cleanup: true
+f5_duplicate_cleanup_only_if_not_in_use: true
+f5_cleanup_delete_key: true
+# Duplicados: se expirou há >= grace_days, vira candidato a cleanup
+f5_duplicate_delete_grace_days: 10
+
+# ====== CIFS (fonte dos certificados novos) ======
+# Survey simples: 1 ou mais prefixes separados por vírgula
+certificate_prefix: ""
+
+mount_cifs: ""
+mount_path: "/opt/ansiblefiles/files/f5-certs"
+certificate_temp_folder: "/opt/ansiblefiles/files"
+_cred_file: "{{ certificate_temp_folder }}/ansible-autentication-cifs-{{ awx_job_id | default('local') }}"
+
+cifs_domain: "agorasenior.corp"
+cifs_vers: "3.0"
+
+# ====== Plano interno de rotação ======
+# Montado automaticamente pelo playbook a partir de certificate_prefix
+f5_rotation_plan: []
+
+# ====== Pré e pós-validação ======
+f5_min_valid_days_after_install: 25
+
+f5_enable_post_handshake_validation: true
+f5_enable_post_http_validation: true
+
+# Survey simples usa single_validate_path; internamente cai nesses defaults
+f5_validate_path_default: "/"
+f5_validate_ok_codes_default: [200]
+
+# CADEIA
+# ====== Import de chain ======
+f5_enable_chain_import: true
+f5_enable_chain_on_profile: true
+# Se true, quando não existir CADEIA.TXT, tenta montar a cadeia a partir de CADEIA*.zip.
+f5_source_chain_from_zip_enabled: true
+
+# Se true, falha quando não existir CADEIA.TXT nem CADEIA*.zip.
+f5_source_chain_required: false
+
+# Valida a cadeia gerada com openssl verify.
+f5_source_chain_verify: true
+
+# Se true, falha quando openssl verify não retornar OK.
+f5_source_chain_verify_strict: true
+
+# Diretório temporário para extrair zips de cadeia.
+f5_source_chain_work_dir: "/tmp/f5-certs-chain-{{ awx_job_id | default('local') }}"
+
+# ====== LAB / simulação ======
+# Deixar 0 normalmente
+f5_timewarp_days: 0
+
+# Config Sync HA
+# Habilita execução de Config Sync após alterações no F5.
+f5_enable_configsync: false
+f5_configsync_run_on_apply: true
+# Executa config-sync após CHECK quando o cleanup deletou/reapontou certificados.
+f5_configsync_run_on_cleanup: true
+# Se true, a automação falha caso o sync falhe ou não fique In Sync.
+# Se false, apenas registra no report.
+f5_configsync_fail_on_error: false
+
+# Valida status após executar o sync.
+f5_configsync_validate_after: true
+
+# Quantidade de tentativas e intervalo para aguardar o status In Sync.
+f5_configsync_retries: 20
+f5_configsync_delay: 15
+
+# Device group usado para sync por site.
+# Exemplo:
+# f5_configsync_device_group_by_site:
+#   hml: "grp_sync"
+#   prd: "grp_sync"
+#   dr: "grp_sync"
+f5_configsync_device_group_by_site:
+  hml: "grp_sync"
+  prd-interno: "grp_sync"
+  prd-externo: "grp_sync"
+  dr-interno: "grp_sync"
+  dr-externo: "grp_sync"
+
+# ======== Cleanup de certificados expirados sem uso =========
+
+# Habilita limpeza de certificados expirados sem uso no modo check.
+f5_enable_expired_unused_cleanup: false
+
+# Só apaga certificados expirados há pelo menos N dias.
+f5_expired_unused_delete_grace_days: 30
+
+# Se true, só remove certificados expirados que NÃO fazem parte de grupo duplicado.
+f5_expired_unused_only_non_duplicated: true
+
+# Se true, também tenta apagar a key com o mesmo nome.
+f5_expired_unused_delete_key: true
+
+# Lista de certificados protegidos contra deleção automática.
+# Regex aplicado contra full_path.
+f5_expired_unused_protected_patterns:
+  - "^/Common/default$"
+  - "^/Common/ca-bundle$"
+  - "^/Common/f5-ca-bundle$"
+  - "^/Common/f5-irule$"
+
+# ==== Nome dos objetos importados no F5 =====
+
+# Quando true, adiciona sufixo no nome do cert/key/chain importado no F5.
+# Exemplo: troca-modelo-webapp -> troca-modelo-webapp-05-2026
+f5_import_name_suffix_enabled: true
+
+# Formato do sufixo usando date/strftime.
+# %m-%Y = 05-2026
+# %Y-%m = 2026-05
+f5_import_name_suffix_format: "%m-%Y"
+
+# Timezone usado para montar o sufixo.
+f5_import_name_timezone: "{{ f5_report_timezone | default('America/Sao_Paulo') }}"
+
+# Estratégia quando o nome com mês/ano já existir no F5.
+# increment = tenta -2, -3, -4...
+# fail = falha e pede limpeza/ajuste manual.
+f5_import_name_collision_strategy: "increment"
+
+# Se preenchido, força um sufixo específico e ignora a data.
+# Útil para teste/lab.
+# Exemplo: "05-2026"
+f5_import_name_suffix_override: ""
+
+# Limite de tentativas para encontrar nome livre.
+f5_import_name_collision_max_attempts: 20
+
+# ====== Apply Server SSL ======
+# Validação pós-rotação para Server SSL.
+# config_only: relê o Server SSL Profile e valida se cert/key/chain foram aplicados
+# disabled: não valida após aplicar
+f5_server_ssl_validation_mode: "config_only"
+
+# Por segurança, não permite apply com client+server ao mesmo tempo,
+# a menos que seja explicitamente habilitado.
+f5_apply_allow_all_profile_types: false

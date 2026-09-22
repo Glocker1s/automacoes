@@ -1,0 +1,132 @@
+---
+- name: Definir full path e tipo do profile
+  ansible.builtin.set_fact:
+    _profile_full_path: "/{{ _profile.partition | default('Common') }}/{{ _profile.name }}"
+    _profile_type_eff: "{{ _profile_type | default('client') | string | trim | lower }}"
+  changed_when: false
+
+- name: Registrar tipo do profile
+  ansible.builtin.set_fact:
+    f5_profile_type_by_path: >-
+      {{
+        f5_profile_type_by_path | default({}) |
+        combine({ _profile_full_path: _profile_type_eff }, recursive=True)
+      }}
+  changed_when: false
+
+- name: Definir cert/key/chain efetivos do profile
+  ansible.builtin.set_fact:
+    _profile_ckc_eff: >-
+      {%- set ckc = _profile.certKeyChain | default([]) -%}
+      {%- if (ckc | length) > 0 -%}
+        {{ ckc }}
+      {%- elif _profile_type_eff == 'server' -%}
+        {%- set cert_top = (_profile.cert | default('') | string | trim) -%}
+        {%- set key_top = (_profile.key | default('') | string | trim) -%}
+        {%- set chain_top = (_profile.chain | default('') | string | trim) -%}
+        {%- if (cert_top | length) > 0 or (key_top | length) > 0 or (chain_top | length) > 0 -%}
+          {{
+            [
+              {
+                'cert': cert_top,
+                'key': key_top,
+                'chain': chain_top
+              }
+            ]
+          }}
+        {%- else -%}
+          []
+        {%- endif -%}
+      {%- else -%}
+        []
+      {%- endif -%}
+  changed_when: false
+
+- name: Iterar uso de certificado/cadeia do profile
+  ansible.builtin.set_fact:
+    f5_profiles_by_cert: "{{ f5_profiles_by_cert | combine(_cert_map_update, recursive=True) }}"
+    f5_profiles_by_chain: "{{ f5_profiles_by_chain | combine(_chain_map_update, recursive=True) }}"
+    f5_profiles_by_cert_by_type: "{{ f5_profiles_by_cert_by_type | combine(_cert_map_by_type_update, recursive=True) }}"
+    f5_profiles_by_chain_by_type: "{{ f5_profiles_by_chain_by_type | combine(_chain_map_by_type_update, recursive=True) }}"
+    f5_profiles_by_cert_typed: "{{ f5_profiles_by_cert_typed | combine(_cert_typed_update, recursive=True) }}"
+    f5_profiles_by_chain_typed: "{{ f5_profiles_by_chain_typed | combine(_chain_typed_update, recursive=True) }}"
+  vars:
+    _ckc: "{{ _profile_ckc_eff | default([]) }}"
+    _certs_in_profile: "{{ _ckc | map(attribute='cert') | list }}"
+    _chains_in_profile: "{{ _ckc | map(attribute='chain') | list }}"
+
+    _cert_map_update: >-
+      {%- set out = {} -%}
+      {%- for v in _certs_in_profile if (v | default('') | string | trim | length > 0) -%}
+        {%- if (v | string | trim | lower) not in ['none', 'inherit'] -%}
+          {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+          {%- set cur = (f5_profiles_by_cert.get(k, []) + [_profile_full_path]) -%}
+          {%- set _ = out.update({k: (cur | unique | list)}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    _chain_map_update: >-
+      {%- set out = {} -%}
+      {%- for v in _chains_in_profile if (v | default('') | string | trim | length > 0) -%}
+        {%- if (v | string | trim | lower) not in ['none', 'inherit'] -%}
+          {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+          {%- set cur = (f5_profiles_by_chain.get(k, []) + [_profile_full_path]) -%}
+          {%- set _ = out.update({k: (cur | unique | list)}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    _cert_map_by_type_update: >-
+      {%- set out = {'client': {}, 'server': {}} -%}
+      {%- for v in _certs_in_profile if (v | default('') | string | trim | length > 0) -%}
+        {%- if (v | string | trim | lower) not in ['none', 'inherit'] -%}
+          {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+          {%- set cur = (f5_profiles_by_cert_by_type.get(_profile_type_eff, {}).get(k, []) + [_profile_full_path]) -%}
+          {%- set _ = out[_profile_type_eff].update({k: (cur | unique | list)}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    _chain_map_by_type_update: >-
+      {%- set out = {'client': {}, 'server': {}} -%}
+      {%- for v in _chains_in_profile if (v | default('') | string | trim | length > 0) -%}
+        {%- if (v | string | trim | lower) not in ['none', 'inherit'] -%}
+          {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+          {%- set cur = (f5_profiles_by_chain_by_type.get(_profile_type_eff, {}).get(k, []) + [_profile_full_path]) -%}
+          {%- set _ = out[_profile_type_eff].update({k: (cur | unique | list)}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    _cert_typed_update: >-
+      {%- set out = {} -%}
+      {%- for v in _certs_in_profile if (v | default('') | string | trim | length > 0) -%}
+        {%- if (v | string | trim | lower) not in ['none', 'inherit'] -%}
+          {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+          {%- set cur = f5_profiles_by_cert_typed.get(k, []) -%}
+          {%- set existing = cur | map(attribute='profile') | list -%}
+          {%- if _profile_full_path not in existing -%}
+            {%- set cur = cur + [{'profile': _profile_full_path, 'type': _profile_type_eff}] -%}
+          {%- endif -%}
+          {%- set _ = out.update({k: cur}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    _chain_typed_update: >-
+      {%- set out = {} -%}
+      {%- for v in _chains_in_profile if (v | default('') | string | trim | length > 0) -%}
+        {%- if (v | string | trim | lower) not in ['none', 'inherit'] -%}
+          {%- set k = (v if v.startswith('/') else '/' ~ (_profile.partition | default('Common')) ~ '/' ~ v) -%}
+          {%- set cur = f5_profiles_by_chain_typed.get(k, []) -%}
+          {%- set existing = cur | map(attribute='profile') | list -%}
+          {%- if _profile_full_path not in existing -%}
+            {%- set cur = cur + [{'profile': _profile_full_path, 'type': _profile_type_eff}] -%}
+          {%- endif -%}
+          {%- set _ = out.update({k: cur}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  when: (_profile_ckc_eff | default([]) | length) > 0
+  changed_when: false

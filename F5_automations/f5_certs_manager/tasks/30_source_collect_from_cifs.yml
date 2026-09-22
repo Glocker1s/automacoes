@@ -1,0 +1,102 @@
+---
+- name: Garante diretório de montagem do CIFS
+  become: true
+  become_user: root
+  ansible.builtin.file:
+    path: "{{ mount_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Cria arquivo de credencial CIFS
+  become: true
+  become_user: root
+  ansible.builtin.copy:
+    dest: "{{ _cred_file }}"
+    content: "{{ ansible_password | default('') }}"
+    mode: "0600"
+
+- name: Monta CIFS (ansible_user + arquivo de senha)
+  become: true
+  become_user: root
+  ansible.builtin.shell: |
+    mount "{{ mount_cifs | lower }}" "{{ mount_path }}" \
+      -o username={{ ansible_user }},password=`cat {{ _cred_file }}`,domain={{ cifs_domain }},rw,vers={{ cifs_vers }}
+  register: mount_out
+  failed_when: false
+  changed_when: false
+
+- name: Normalizar lista de prefixes solicitados
+  ansible.builtin.set_fact:
+    _requested_prefixes_eff: >-
+      {%- set out = [] -%}
+      {%- for r in (f5_rotation_plan | default([])) -%}
+        {%- set raw = (r.certificate_prefix | default('') | string) -%}
+        {%- for p in (raw | replace('\n', ',') | split(',')) -%}
+          {%- set pref = (p | trim) -%}
+          {%- if pref | length > 0 and pref not in out -%}
+            {%- set _ = out.append(pref) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {%- for p in ((certificate_prefix | default('') | string | replace('\n', ',') | split(','))) -%}
+        {%- set pref = (p | trim) -%}
+        {%- if pref | length > 0 and pref not in out -%}
+          {%- set _ = out.append(pref) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Validar se há prefixos para procurar no CIFS
+  ansible.builtin.assert:
+    that:
+      - (_requested_prefixes_eff | default([]) | length) > 0
+    fail_msg: >-
+      Não há prefixes de certificado para procurar no CIFS.
+      Preencha certificate_prefix no survey simples
+      ou certificate_prefix/cert_folder no rotation_plan legado.
+
+- name: Buscar pastas de certificados pelos prefixes
+  ansible.builtin.find:
+    paths: "{{ mount_path }}"
+    file_type: directory
+    recurse: false
+    patterns: "{{ _requested_prefixes_eff | map('regex_replace', '^(.*)$', '\\1*') | list }}"
+  register: cert_dirs
+
+- name: Montar lista de candidatos únicos do CIFS
+  ansible.builtin.set_fact:
+    cifs_cert_dir_candidates: >-
+      {%- set out = [] -%}
+      {%- set seen = [] -%}
+      {%- for f in (cert_dirs.files | default([]) | sort(attribute='path')) -%}
+        {%- set nm = (f.path | basename) -%}
+        {%- if nm not in seen -%}
+          {%- set _ = seen.append(nm) -%}
+          {%- set _ = out.append({
+              'name': nm,
+              'path': f.path,
+              'mtime': (f.mtime | default(0) | float)
+            }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Falhar se não achar nenhuma pasta
+  ansible.builtin.fail:
+    msg: >-
+      Nenhuma pasta encontrada no CIFS com os prefixes: {{ _requested_prefixes_eff }}
+      (root={{ mount_path }})
+  when: (cifs_cert_dir_candidates | default([]) | length) == 0
+
+- name: Inicializar inventário de certificados-fonte
+  ansible.builtin.set_fact:
+    source_cert_inventory: []
+
+- name: Processar cada pasta de certificado
+  ansible.builtin.include_tasks: 31_source_process_cert_dir.yml
+  loop: "{{ cifs_cert_dir_candidates }}"
+  loop_control:
+    loop_var: cert_dir_item
+    label: "{{ cert_dir_item.name }}"

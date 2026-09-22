@@ -1,0 +1,466 @@
+---
+- name: Validar modo COMPARE com pelo menos dois sites
+  ansible.builtin.assert:
+    that:
+      - (f5_site_findings_by_site | default({}) | length) >= 2
+    fail_msg: |
+      O modo compare exige pelo menos dois sites no f5_target_scope.
+      Exemplo: f5_target_scope=prd-interno,dr-interno
+  changed_when: false
+
+- name: Definir site base da comparação
+  ansible.builtin.set_fact:
+    f5_compare_baseline_site_eff: >-
+      {{
+        (
+          (f5_compare_baseline_site | default('') | string | trim | lower)
+          if (f5_compare_baseline_site | default('') | string | trim | length) > 0
+          else ((f5_sites_eff | default([]) | first).name | default(''))
+        )
+      }}
+    f5_compare_site_names: >-
+      {{
+        f5_sites_eff
+        | default([])
+        | map(attribute='name')
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | list
+      }}
+  changed_when: false
+
+- name: Validar site base da comparação
+  ansible.builtin.assert:
+    that:
+      - (f5_compare_baseline_site_eff | length) > 0
+      - f5_compare_baseline_site_eff in (f5_compare_site_names | default([]))
+    fail_msg: >-
+      f5_compare_baseline_site inválido: {{ f5_compare_baseline_site | default('') }}.
+      Sites disponíveis no escopo: {{ f5_compare_site_names | default([]) }}.
+  changed_when: false
+
+- name: Montar índice de certificados e cadeias para comparação
+  ansible.builtin.set_fact:
+    f5_compare_cert_index: >-
+      {%- set idx = {} -%}
+      {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+        {%- set site_name = (si.key | string | trim | lower) -%}
+        {%- set s = (si.value | default({})) -%}
+        {%- set certs = (
+              s.all_certs
+              | default(
+                  (s.expired | default([]))
+                  + (s.critical | default([]))
+                  + (s.warning | default([]))
+                  + (s.ok | default([]))
+                )
+            ) -%}
+
+        {%- for c in certs -%}
+          {%- set scope_types = f5_ssl_profile_types_for_action | default(['client']) -%}
+
+          {%- set used_profiles = [] -%}
+          {%- set used_chain_profiles = [] -%}
+
+          {%- if 'client' in scope_types -%}
+            {%- set used_profiles = used_profiles + (c.used_by_profiles_client | default([])) -%}
+            {%- set used_chain_profiles = used_chain_profiles + (c.used_as_chain_by_profiles_client | default([])) -%}
+          {%- endif -%}
+
+          {%- if 'server' in scope_types -%}
+            {%- set used_profiles = used_profiles + (c.used_by_profiles_server | default([])) -%}
+            {%- set used_chain_profiles = used_chain_profiles + (c.used_as_chain_by_profiles_server | default([])) -%}
+          {%- endif -%}
+
+          {%- set used_profiles = used_profiles | unique | list -%}
+          {%- set used_chain_profiles = used_chain_profiles | unique | list -%}
+          {%- set in_use = ((used_profiles | length) > 0) or ((used_chain_profiles | length) > 0) -%}
+
+          {%- if (not (f5_compare_only_in_use | default(true) | bool)) or in_use -%}
+            {%- set key = (c.san_norm | default('') | string | trim | lower) -%}
+            {%- if (key | length) == 0 -%}
+              {%- set key = (c.subject | default('') | string | trim | lower) -%}
+            {%- endif -%}
+            {%- if (key | length) == 0 -%}
+              {%- set key = (c.full_path | default(c.name | default('')) | string | trim | lower) -%}
+            {%- endif -%}
+
+            {%- if (key | length) > 0 -%}
+              {%- set component = 'CERTIFICADO' -%}
+              {%- if (used_profiles | length) == 0 and (used_chain_profiles | length) > 0 -%}
+                {%- set component = 'CADEIA' -%}
+              {%- elif (used_profiles | length) > 0 and (used_chain_profiles | length) > 0 -%}
+                {%- set component = 'CERTIFICADO/CADEIA' -%}
+              {%- endif -%}
+
+              {%- set compare_profiles = ((used_profiles + used_chain_profiles) | unique | list) -%}
+
+              {%- set row = idx.get(key, {
+                    'compare_key': key,
+                    'component': component,
+                    'san': (c.san | default('')),
+                    'san_list_norm': (c.san_list_norm | default([])),
+                    'subject': (c.subject | default('')),
+                    'sites': {}
+                  }) -%}
+
+              {%- if row.component != component and row.component != 'CERTIFICADO/CADEIA' -%}
+                {%- set _ = row.update({'component': 'CERTIFICADO/CADEIA'}) -%}
+              {%- endif -%}
+
+              {%- set site_items = row.sites.get(site_name, []) -%}
+
+              {%- set cert_row = {
+                    'site': site_name,
+                    'component': component,
+                    'cert': (c.full_path | default('/' ~ (c.tmPartition | default('Common')) ~ '/' ~ (c.name | default('')))),
+                    'name': (c.name | default('')),
+                    'fingerprint': (c.fingerprint | default('')),
+                    'expiration_epoch': (c.expiration_epoch | default(0) | int),
+                    'days_left': (c.days_left | default(0) | int),
+                    'expirationString': (c.expirationString | default('')),
+                    'subject': (c.subject | default('')),
+                    'san': (c.san | default('')),
+                    'san_list_norm': (c.san_list_norm | default([])),
+                    'profile_scope': (scope_types | join(',')),
+                    'used_by_profiles': used_profiles,
+                    'used_as_chain_by_profiles': used_chain_profiles,
+                    'compare_profiles': compare_profiles,
+                    'compare_profile_count': (compare_profiles | length)
+                  } -%}
+
+              {%- set _ = row.sites.update({site_name: ((site_items + [cert_row]) | sort(attribute='expiration_epoch'))}) -%}
+              {%- set _ = idx.update({key: row}) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ idx }}
+  changed_when: false
+
+- name: Calcular divergências de certificados e cadeias entre sites
+  ansible.builtin.set_fact:
+    f5_compare_cert_drift: >-
+      {%- set out = [] -%}
+      {%- set base = f5_compare_baseline_site_eff -%}
+      {%- set sites = f5_compare_site_names | default([]) -%}
+      {%- set tolerance_seconds = (f5_compare_expiration_tolerance_days | default(0) | int) * 86400 -%}
+
+      {%- for kv in (f5_compare_cert_index | default({}) | dict2items) -%}
+        {%- set item = kv.value -%}
+        {%- set base_items = item.sites.get(base, []) -%}
+        {%- set base_latest = (base_items | sort(attribute='expiration_epoch') | last) if (base_items | length) > 0 else {} -%}
+
+        {%- for other in sites if other != base -%}
+          {%- set other_items = item.sites.get(other, []) -%}
+          {%- set other_latest = (other_items | sort(attribute='expiration_epoch') | last) if (other_items | length) > 0 else {} -%}
+
+          {%- if (base_items | length) == 0 and (other_items | length) > 0 -%}
+            {%- set _ = out.append({
+                  'status': 'EXTRA_NO_COMPARADO',
+                  'component': (item.component | default('CERTIFICADO')),
+                  'severity': 'warn',
+                  'compare_key': kv.key,
+                  'san': item.san,
+                  'subject': item.subject,
+                  'baseline_site': base,
+                  'other_site': other,
+                  'baseline_cert': {},
+                  'other_cert': other_latest,
+                  'message': 'Existe no site comparado, mas não existe no site base.'
+                }) -%}
+
+          {%- elif (base_items | length) > 0 and (other_items | length) == 0 -%}
+            {%- set _ = out.append({
+                  'status': 'AUSENTE_NO_COMPARADO',
+                  'component': (item.component | default('CERTIFICADO')),
+                  'severity': 'crit',
+                  'compare_key': kv.key,
+                  'san': item.san,
+                  'subject': item.subject,
+                  'baseline_site': base,
+                  'other_site': other,
+                  'baseline_cert': base_latest,
+                  'other_cert': {},
+                  'message': 'Existe no site base, mas não existe no site comparado.'
+                }) -%}
+
+          {%- else -%}
+            {%- set base_fp = (base_latest.fingerprint | default('') | string) -%}
+            {%- set other_fp = (other_latest.fingerprint | default('') | string) -%}
+            {%- set base_exp = (base_latest.expiration_epoch | default(0) | int) -%}
+            {%- set other_exp = (other_latest.expiration_epoch | default(0) | int) -%}
+            {%- set exp_delta = ((base_exp - other_exp) | abs) -%}
+            {%- set same_fp = ((base_fp | length) > 0 and (other_fp | length) > 0 and base_fp == other_fp) -%}
+            {%- set same_exp = (exp_delta <= tolerance_seconds) -%}
+
+            {%- if (not same_fp) or (not same_exp) -%}
+              {%- set outdated_side = '' -%}
+              {%- if base_exp > (other_exp + tolerance_seconds) -%}
+                {%- set outdated_side = other -%}
+              {%- elif other_exp > (base_exp + tolerance_seconds) -%}
+                {%- set outdated_side = base -%}
+              {%- endif -%}
+
+              {%- set _ = out.append({
+                    'status': 'VERSAO_DIFERENTE',
+                    'component': (item.component | default('CERTIFICADO')),
+                    'severity': 'warn',
+                    'compare_key': kv.key,
+                    'san': item.san,
+                    'subject': item.subject,
+                    'baseline_site': base,
+                    'other_site': other,
+                    'baseline_cert': base_latest,
+                    'other_cert': other_latest,
+                    'expiration_delta_days': (exp_delta // 86400),
+                    'same_fingerprint': same_fp,
+                    'same_expiration': same_exp,
+                    'outdated_side': outdated_side,
+                    'message': 'Existe nos dois sites, mas o fingerprint e/ou vencimento não bate.'
+                  }) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Montar índice de certKeyChain por profile para comparação de KEY
+  ansible.builtin.set_fact:
+    f5_compare_profile_index: >-
+      {%- set idx = {} -%}
+      {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+        {%- set site_name = (si.key | string | trim | lower) -%}
+        {%- set s = (si.value | default({})) -%}
+        {%- set profiles = (s.clientssl_profiles | default([])) + (s.serverssl_profiles | default([])) -%}
+
+        {%- for p in profiles -%}
+          {%- set part = (p.partition | default('Common')) -%}
+          {%- set pname = (p.name | default('')) -%}
+          {%- set ppath = '/' ~ part ~ '/' ~ pname -%}
+          {%- set ckc = (p.certKeyChain | default([])) -%}
+          {%- if (ckc | length) == 0 -%}
+            {%- set cert_top = (p.cert | default('') | string | trim) -%}
+            {%- set key_top = (p.key | default('') | string | trim) -%}
+            {%- set chain_top = (p.chain | default('') | string | trim) -%}
+            {%- if (cert_top | length) > 0 or (key_top | length) > 0 or (chain_top | length) > 0 -%}
+              {%- set ckc = [{
+                'cert': cert_top,
+                'key': key_top,
+                'chain': chain_top
+              }] -%}
+            {%- endif -%}
+          {%- endif -%}
+
+          {%- if pname | length > 0 and (ckc | length) > 0 -%}
+            {%- set first = ckc[0] -%}
+
+            {%- set cert_raw = (first.cert | default('') | string | trim) -%}
+            {%- set key_raw = (first.key | default('') | string | trim) -%}
+            {%- set chain_raw = (first.chain | default('') | string | trim) -%}
+
+            {%- set cert_ref = '' -%}
+            {%- if (cert_raw | length) > 0 and (cert_raw | lower) not in ['none', 'inherit'] -%}
+              {%- set cert_ref = cert_raw if cert_raw.startswith('/') else '/' ~ part ~ '/' ~ cert_raw -%}
+            {%- endif -%}
+
+            {%- set key_ref = '' -%}
+            {%- if (key_raw | length) > 0 and (key_raw | lower) not in ['none', 'inherit'] -%}
+              {%- set key_ref = key_raw if key_raw.startswith('/') else '/' ~ part ~ '/' ~ key_raw -%}
+            {%- endif -%}
+
+            {%- set chain_ref = '' -%}
+            {%- if (chain_raw | length) > 0 and (chain_raw | lower) not in ['none', 'inherit'] -%}
+              {%- set chain_ref = chain_raw if chain_raw.startswith('/') else '/' ~ part ~ '/' ~ chain_raw -%}
+            {%- endif -%}
+
+            {%- set row = idx.get(ppath, {'profile': ppath, 'sites': {}}) -%}
+            {%- set _ = row.sites.update({
+                  site_name: {
+                    'profile': ppath,
+                    'cert_ref': cert_ref,
+                    'key_ref': key_ref,
+                    'chain_ref': chain_ref
+                  }
+                }) -%}
+            {%- set _ = idx.update({ppath: row}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ idx }}
+  changed_when: false
+
+- name: Calcular divergências de KEY referenciada nos profiles
+  ansible.builtin.set_fact:
+    f5_compare_key_drift: >-
+      {%- set out = [] -%}
+      {%- set base = f5_compare_baseline_site_eff -%}
+      {%- set sites = f5_compare_site_names | default([]) -%}
+
+      {%- for kv in (f5_compare_profile_index | default({}) | dict2items) -%}
+        {%- set item = kv.value -%}
+        {%- set base_item = item.sites.get(base, {}) -%}
+
+        {%- for other in sites if other != base -%}
+          {%- set other_item = item.sites.get(other, {}) -%}
+
+          {%- if (base_item | length) > 0 and (other_item | length) > 0 -%}
+            {%- set base_key = base_item.key_ref | default('') -%}
+            {%- set other_key = other_item.key_ref | default('') -%}
+
+            {%- set base_cert = base_item.cert_ref | default('') -%}
+            {%- set other_cert = other_item.cert_ref | default('') -%}
+            {%- set base_chain = base_item.chain_ref | default('') -%}
+            {%- set other_chain = other_item.chain_ref | default('') -%}
+
+            {%- if (base_key | length) > 0 and (other_key | length) > 0 and base_key != other_key and base_cert == other_cert and base_chain == other_chain -%}
+              {%- set _ = out.append({
+                    'status': 'KEY_REFERENCIADA_DIFERENTE',
+                    'component': 'KEY',
+                    'severity': 'warn',
+                    'compare_key': kv.key,
+                    'san': '',
+                    'subject': '',
+                    'baseline_site': base,
+                    'other_site': other,
+                    'baseline_cert': {},
+                    'other_cert': {},
+                    'baseline_value': base_key,
+                    'other_value': other_key,
+                    'profile': kv.key,
+                    'message': 'O profile referencia uma key diferente entre os sites, mantendo o mesmo certificado/cadeia.'
+                  }) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Consolidar divergências do compare
+  ansible.builtin.set_fact:
+    f5_compare_drift: "{{ (f5_compare_cert_drift | default([])) + (f5_compare_key_drift | default([])) }}"
+  changed_when: false
+
+- name: Montar índice de certificados instalados por site para enriquecer compare
+  ansible.builtin.set_fact:
+    f5_compare_installed_index_by_site: >-
+      {%- set sites = {} -%}
+      {%- for si in (f5_site_findings_by_site | default({}) | dict2items) -%}
+        {%- set site_name = (si.key | string | trim | lower) -%}
+        {%- set idx = {} -%}
+        {%- set certs = (
+              si.value.all_certs
+              | default(
+                  (si.value.expired | default([]))
+                  + (si.value.critical | default([]))
+                  + (si.value.warning | default([]))
+                  + (si.value.ok | default([]))
+                )
+            ) -%}
+        {%- for c in certs -%}
+          {%- set san_norm = (c.san_norm | default('') | string | trim | lower) -%}
+          {%- set san = (c.san | default('') | string | trim | lower) -%}
+          {%- set subject = (c.subject | default('') | string | trim | lower) -%}
+          {%- set key = san_norm if (san_norm | length) > 0 else san -%}
+          {%- if (key | length) == 0 -%}
+            {%- set key = subject -%}
+          {%- endif -%}
+          {%- if (key | length) > 0 -%}
+            {%- set cur = idx.get(key, []) -%}
+            {%- set _ = idx.update({key: cur + [c]}) -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set _ = sites.update({site_name: idx}) -%}
+      {%- endfor -%}
+      {{ sites }}
+  changed_when: false
+
+- name: Reclassificar itens ausentes que existem instalados mas não estão referenciados
+  ansible.builtin.set_fact:
+    f5_compare_drift: >-
+      {%- set out = [] -%}
+      {%- set baseline_site = f5_compare_baseline_site_eff | default('') | string | trim | lower -%}
+
+      {%- for d in (f5_compare_drift | default([])) -%}
+        {%- set status = d.status | default('') -%}
+
+        {%- if status in ['AUSENTE_NO_COMPARADO', 'EXTRA_NO_COMPARADO'] -%}
+          {%- set lookup_site = (d.other_site | default('') | string | trim | lower) -%}
+          {%- if status == 'EXTRA_NO_COMPARADO' -%}
+            {%- set lookup_site = baseline_site -%}
+          {%- endif -%}
+
+          {%- set key = d.compare_key | default('') | string | trim | lower -%}
+          {%- if (key | length) == 0 -%}
+            {%- set san = d.san | default('') | string | trim | lower -%}
+            {%- set subject = d.subject | default('') | string | trim | lower -%}
+            {%- set key = san if (san | length) > 0 else subject -%}
+          {%- endif -%}
+
+          {%- set installed_matches = f5_compare_installed_index_by_site.get(lookup_site, {}).get(key, []) -%}
+
+          {%- if (installed_matches | length) > 0 -%}
+            {%- set installed = installed_matches[0] -%}
+
+            {%- if status == 'AUSENTE_NO_COMPARADO' -%}
+              {%- set nd = d | combine({
+                'status': 'NAO_REFERENCIADO_NO_COMPARADO',
+                'severity': 'warn',
+                'other_cert': installed,
+                'installed_but_not_referenced': true,
+                'message': 'O item existe instalado no site comparado, mas não está referenciado por profile no escopo analisado.'
+              }, recursive=True) -%}
+              {%- set _ = out.append(nd) -%}
+
+            {%- elif status == 'EXTRA_NO_COMPARADO' -%}
+              {%- set nd = d | combine({
+                'status': 'NAO_REFERENCIADO_NO_BASE',
+                'severity': 'warn',
+                'baseline_cert': installed,
+                'installed_but_not_referenced': true,
+                'message': 'O item existe instalado no site base, mas não está referenciado por profile no escopo analisado.'
+              }, recursive=True) -%}
+              {%- set _ = out.append(nd) -%}
+            {%- endif -%}
+
+          {%- else -%}
+            {%- set _ = out.append(d) -%}
+          {%- endif -%}
+
+        {%- else -%}
+          {%- set _ = out.append(d) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Calcular resumo da comparação
+  ansible.builtin.set_fact:
+    f5_compare_summary:
+      baseline_site: "{{ f5_compare_baseline_site_eff }}"
+      compared_sites: "{{ (f5_compare_site_names | default([])) | difference([f5_compare_baseline_site_eff]) }}"
+      scope: "{{ 'em uso por profiles' if (f5_compare_only_in_use | default(true) | bool) else 'inventário instalado' }}"
+      total_identities: "{{ f5_compare_cert_index | default({}) | length }}"
+      total_drift: "{{ f5_compare_drift | default([]) | length }}"
+      missing_on_compared: "{{ (f5_compare_drift | default([]) | selectattr('status', 'equalto', 'AUSENTE_NO_COMPARADO') | list | length) }}"
+      extra_on_compared: "{{ (f5_compare_drift | default([]) | selectattr('status', 'equalto', 'EXTRA_NO_COMPARADO') | list | length) }}"
+      not_referenced_on_compared: "{{ (f5_compare_drift | default([]) | selectattr('status', 'equalto', 'NAO_REFERENCIADO_NO_COMPARADO') | list | length) }}"
+      not_referenced_on_baseline: "{{ (f5_compare_drift | default([]) | selectattr('status', 'equalto', 'NAO_REFERENCIADO_NO_BASE') | list | length) }}"
+      different_versions: "{{ (f5_compare_drift | default([]) | selectattr('status', 'equalto', 'VERSAO_DIFERENTE') | list | length) }}"
+      key_differences: "{{ (f5_compare_drift | default([]) | selectattr('status', 'equalto', 'KEY_REFERENCIADA_DIFERENTE') | list | length) }}"
+      cert_differences: "{{ (f5_compare_drift | default([]) | selectattr('component', 'equalto', 'CERTIFICADO') | list | length) }}"
+      chain_differences: "{{ (f5_compare_drift | default([]) | selectattr('component', 'equalto', 'CADEIA') | list | length) }}"
+  changed_when: false
+
+- name: Falhar quando compare encontrar divergência e fail_on_drift estiver habilitado
+  ansible.builtin.assert:
+    that:
+      - (f5_compare_drift | default([]) | length) == 0
+    fail_msg: >-
+      Foram encontradas {{ f5_compare_drift | default([]) | length }} divergência(s)
+      na comparação de certificados entre sites.
+  when: f5_compare_fail_on_drift | default(false) | bool

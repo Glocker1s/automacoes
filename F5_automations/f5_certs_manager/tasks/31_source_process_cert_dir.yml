@@ -1,0 +1,290 @@
+---
+- name: Definir nome e diretório do certificado
+  ansible.builtin.set_fact:
+    cert_name: "{{ cert_dir_item.name | default(cert_dir_item.path | basename) }}"
+    cert_dir: "{{ cert_dir_item.path }}"
+  changed_when: false
+
+- name: Localiza .cer/.crt/.pem
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    patterns:
+      - "*.cer"
+      - "*.CER"
+      - "*.crt"
+      - "*.CRT"
+      - "*.pem"
+      - "*.PEM"
+    recurse: false
+  register: cer_found
+
+- name: Filtrar certificado principal ignorando arquivos de cadeia
+  ansible.builtin.set_fact:
+    cer_leaf_candidates: >-
+      {{
+        (cer_found.files | default([]))
+        | rejectattr('path', 'search', '(?i)/(cadeia.*|.*chain.*)\.(cer|crt|pem)$')
+        | list
+      }}
+  changed_when: false
+
+- name: Localiza .key
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    patterns:
+      - "*.key"
+      - "*.KEY"
+    recurse: false
+  register: key_found
+
+- name: Localiza cadeia pronta (CADEIA*.TXT/.CRT/.PEM ou *chain*)
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    recurse: false
+    use_regex: true
+    patterns:
+      - '(?i)^cadeia.*\.(txt|crt|cer|pem)$'
+      - '(?i).*chain.*\.(crt|cer|pem|txt)$'
+  register: chain_ready_found
+
+- name: Localiza CADEIA*.zip quando não houver cadeia pronta
+  ansible.builtin.find:
+    paths: "{{ cert_dir }}"
+    recurse: false
+    use_regex: true
+    patterns:
+      - '(?i)^cadeia.*\.zip$'
+  register: chain_zip_found
+  when:
+    - f5_source_chain_from_zip_enabled | default(true) | bool
+    - (chain_ready_found.files | default([]) | length) == 0
+
+- name: Falhar se não houver exatamente 1 certificado
+  ansible.builtin.assert:
+    that:
+      - cer_leaf_candidates | length == 1
+    fail_msg: >-
+      Esperado exatamente 1 arquivo de certificado principal (*.cer|*.crt|*.pem) em {{ cert_dir }}.
+      Encontrados candidatos principal: {{ cer_leaf_candidates | map(attribute='path') | list }}.
+      Arquivos de cadeia como CADEIA*.crt/pem ou *chain* são ignorados nessa validação.
+
+- name: Caminho do cert original
+  ansible.builtin.set_fact:
+    _cer_path: "{{ cer_leaf_candidates[0].path }}"
+  changed_when: false
+
+- name: Tenta ler como PEM
+  ansible.builtin.shell: "openssl x509 -in '{{ _cer_path }}' -noout"
+  register: cer_pem_probe
+  failed_when: false
+  changed_when: false
+
+- name: Converte DER -> PEM se necessário
+  ansible.builtin.shell: |
+    openssl x509 -inform der -in "{{ _cer_path }}" -out "{{ _cer_path }}.pem"
+  when: cer_pem_probe.rc != 0
+  register: der_conv
+  failed_when: der_conv.rc != 0
+  changed_when: true
+
+- name: Define caminho efetivo do PEM
+  ansible.builtin.set_fact:
+    cer_effective_path: "{{ (cer_pem_probe.rc == 0) | ternary(_cer_path, _cer_path ~ '.pem') }}"
+  changed_when: false
+
+- name: Definir diretório temporário da cadeia
+  ansible.builtin.set_fact:
+    _source_chain_tmp_dir: >-
+      {{
+        (
+          f5_source_chain_work_dir
+          | default('/tmp/f5-certs-chain-' ~ (awx_job_id | default('local')))
+        )
+        ~ '/'
+        ~ (cert_name | regex_replace('[^A-Za-z0-9_.-]', '_'))
+      }}
+  when:
+    - f5_source_chain_from_zip_enabled | default(true) | bool
+    - (chain_ready_found.files | default([]) | length) == 0
+    - (chain_zip_found.files | default([]) | length) > 0
+  changed_when: false
+
+- name: Remover diretório temporário da cadeia antes de recriar
+  ansible.builtin.file:
+    path: "{{ _source_chain_tmp_dir }}"
+    state: absent
+  when:
+    - _source_chain_tmp_dir is defined
+    - (_source_chain_tmp_dir | trim | length) > 0
+
+- name: Criar diretório temporário da cadeia
+  ansible.builtin.file:
+    path: "{{ _source_chain_tmp_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - _source_chain_tmp_dir is defined
+    - (_source_chain_tmp_dir | trim | length) > 0
+
+- name: Descompactar CADEIA*.zip
+  ansible.builtin.unarchive:
+    src: "{{ item.path }}"
+    dest: "{{ _source_chain_tmp_dir }}"
+    remote_src: true
+  loop: "{{ chain_zip_found.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - _source_chain_tmp_dir is defined
+    - (_source_chain_tmp_dir | trim | length) > 0
+
+- name: Gerar CADEIA.TXT a partir dos arquivos extraídos
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    OUT="{{ _source_chain_tmp_dir }}/CADEIA.TXT"
+    rm -f "${OUT}"
+
+    found=0
+
+    while IFS= read -r -d '' f; do
+      found=1
+      cat "${f}" >> "${OUT}"
+      printf '\n' >> "${OUT}"
+    done < <(
+      find "{{ _source_chain_tmp_dir }}" -type f \
+        \( -iname "*.crt" -o -iname "*.cer" -o -iname "*.pem" -o -iname "*.txt" \) \
+        ! -iname "CADEIA.TXT" \
+        -print0 | sort -z
+    )
+
+    if [ "${found}" -eq 0 ]; then
+      echo "Nenhum arquivo .crt/.cer/.pem/.txt encontrado dentro do ZIP da cadeia."
+      exit 20
+    fi
+
+    test -s "${OUT}"
+  args:
+    executable: /bin/bash
+  register: chain_zip_build_out
+  changed_when: true
+  when:
+    - _source_chain_tmp_dir is defined
+    - (_source_chain_tmp_dir | trim | length) > 0
+
+- name: Definir caminho efetivo da cadeia
+  ansible.builtin.set_fact:
+    _source_ca_chain_path: >-
+      {%- if (chain_ready_found.files | default([]) | length) > 0 -%}
+      {{ (chain_ready_found.files | sort(attribute='path'))[0].path }}
+      {%- elif (_source_chain_tmp_dir is defined) and ((_source_chain_tmp_dir | trim | length) > 0) -%}
+      {{ _source_chain_tmp_dir }}/CADEIA.TXT
+      {%- else -%}
+      {{ '' }}
+      {%- endif -%}
+    _source_ca_chain_generated_from_zip: >-
+      {{
+        (chain_ready_found.files | default([]) | length) == 0
+        and (_source_chain_tmp_dir is defined)
+        and ((_source_chain_tmp_dir | trim | length) > 0)
+      }}
+  changed_when: false
+
+- name: Validar obrigatoriedade da cadeia
+  ansible.builtin.assert:
+    that:
+      - (_source_ca_chain_path | default('') | trim | length) > 0
+    fail_msg: >-
+      Nenhuma cadeia encontrada para {{ cert_dir }}.
+      Esperado um arquivo CADEIA*.TXT/.CRT/.PEM, *chain* ou CADEIA*.zip.
+  when:
+    - f5_source_chain_required | default(false) | bool
+
+- name: Validar cadeia com openssl verify
+  ansible.builtin.shell: |
+    openssl verify -CAfile "{{ _source_ca_chain_path }}" "{{ cer_effective_path }}"
+  register: source_chain_verify
+  changed_when: false
+  failed_when: >
+    (f5_source_chain_verify_strict | default(false) | bool)
+    and (source_chain_verify.rc | int != 0)
+  when:
+    - f5_source_chain_verify | default(true) | bool
+    - (_source_ca_chain_path | default('') | trim | length) > 0
+
+- name: Extrai SANs
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -text |
+    awk '/X509v3 Subject Alternative Name/ {getline; print}' |
+    sed 's/DNS://g; s/, /,/g'
+  register: cer_sans_raw
+  failed_when: false
+  changed_when: false
+
+- name: Extrai notAfter
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -enddate | cut -d= -f2
+  register: cer_end_raw
+  changed_when: false
+
+- name: Converter notAfter -> epoch (se possível)
+  ansible.builtin.shell: |
+    date -u -d "{{ cer_end_raw.stdout | trim }}" +%s
+  register: cer_end_epoch_raw
+  failed_when: false
+  changed_when: false
+
+- name: Validar se cert tem pelo menos N dias de validade (pré)
+  ansible.builtin.shell: |
+    openssl x509 -in "{{ cer_effective_path }}" -noout -checkend {{ (f5_min_valid_days_after_install | int) * 86400 }}
+  register: cer_checkend
+  failed_when: false
+  changed_when: false
+
+- name: Validar se key casa com cert (modulus)
+  ansible.builtin.shell: |
+    set -o pipefail
+    CERT_MD5=$(openssl x509 -noout -modulus -in "{{ cer_effective_path }}" | openssl md5 | awk '{print $2}')
+    KEY_MD5=$(openssl rsa -noout -modulus -in "{{ key_found.files[0].path }}" 2>/dev/null | openssl md5 | awk '{print $2}')
+    echo "${CERT_MD5}:${KEY_MD5}"
+  args:
+    executable: /bin/bash
+  register: cert_key_md5
+  failed_when: false
+  changed_when: false
+  when: (key_found.files | length) == 1
+
+- name: Normalizar SAN list
+  ansible.builtin.set_fact:
+    cer_sans_list: "{{ cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | list }}"
+    cer_sans_list_norm: "{{ cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | map('lower') | unique | sort | list }}"
+    cer_primary_san: "{{ (cer_sans_raw.stdout.split(',') | map('trim') | reject('equalto','') | list | first) | default('') }}"
+  changed_when: false
+
+- name: Registrar cert no inventário de fonte
+  ansible.builtin.set_fact:
+    source_cert_inventory: >-
+      {{
+        source_cert_inventory + [ {
+          'cert_name': cert_name,
+          'cert_dir': cert_dir,
+          'cer_path': cer_effective_path,
+          'key_path': (key_found.files[0].path if (key_found.files | length) == 1 else ''),
+          'ca_chain_path': (_source_ca_chain_path | default('')),
+          'ca_chain_generated_from_zip': (_source_ca_chain_generated_from_zip | default(false) | bool),
+          'ca_chain_verify_stdout': (source_chain_verify.stdout | default('')),
+          'sans': cer_sans_list,
+          'sans_norm': cer_sans_list_norm,
+          'primary_san': cer_primary_san,
+          'not_after': (cer_end_raw.stdout | default('') | trim),
+          'not_after_epoch': (cer_end_epoch_raw.stdout | default('0') | int),
+          'precheck_min_valid_ok': (cer_checkend.rc == 0),
+          'cert_key_md5': (cert_key_md5.stdout | default('')),
+          'cert_key_match': (
+            (cert_key_md5.stdout.split(':')[0] == cert_key_md5.stdout.split(':')[1])
+            if (cert_key_md5.stdout | default('') | trim | length > 0 and (cert_key_md5.stdout is search(':')))
+            else true
+          )
+        } ]
+      }}
+  changed_when: false

@@ -1,0 +1,44 @@
+---
+- name: Definir alvo do cleanup de expirado sem uso
+  ansible.builtin.set_fact:
+    _eu_cert: "{{ expired_unused_cert }}"
+    _eu_full_path: "{{ expired_unused_cert.full_path | default('') }}"
+    _eu_partition: "{{ expired_unused_cert.tmPartition | default('Common') }}"
+    _eu_name: "{{ expired_unused_cert.name | default('') }}"
+    _eu_days_since_expired: "{{ expired_unused_cert.days_since_expired | default(0) | int }}"
+  changed_when: false
+
+- name: Deletar certificado expirado sem uso no F5
+  f5networks.f5_modules.bigip_ssl_certificate:
+    name: "{{ _eu_name }}"
+    partition: "{{ _eu_partition }}"
+    true_names: true
+    state: absent
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+
+- name: Deletar key do certificado expirado sem uso
+  f5networks.f5_modules.bigip_ssl_key:
+    name: "{{ _eu_name }}"
+    partition: "{{ _eu_partition }}"
+    true_names: true
+    state: absent
+    provider: "{{ f5_provider_eff }}"
+  delegate_to: localhost
+  register: _eu_key_delete_result
+  when:
+    - f5_expired_unused_delete_key | default(true) | bool
+
+- name: Registrar resultado DELETADO - expirado sem uso
+  ansible.builtin.set_fact:
+    f5_expired_unused_cleanup_results: >-
+      {{
+        f5_expired_unused_cleanup_results + [{
+          'cert': (_eu_full_path | default('—')),
+          'action': 'DELETADO',
+          'reason': 'Certificado expirado sem uso há ' ~ (_eu_days_since_expired | string) ~ ' dias',
+          'days_since_expired': (_eu_days_since_expired | int),
+          'key_deleted': (f5_expired_unused_delete_key | default(true) | bool)
+        }]
+      }}
+  changed_when: false

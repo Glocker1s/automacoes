@@ -1,0 +1,178 @@
+---
+- name: Garantir lista f5_handshake_results existe
+  ansible.builtin.set_fact:
+    f5_handshake_results: "{{ f5_handshake_results | default([]) }}"
+  changed_when: false
+
+- name: Expandir entradas de validação (deduplicado)
+  ansible.builtin.set_fact:
+    _validate_entries_expanded: >-
+      {%- set out = [] -%}
+      {%- set seen = [] -%}
+      {%- for e in (_validate_entries | default([])) -%}
+        {%- set target = (e.target | default('') | string | trim) -%}
+        {%- set path = (e.path | default(_validate_default_path | default('/')) | string | trim) -%}
+        {%- set ok_codes = (e.ok_codes | default(_validate_default_ok_codes | default([200]))) -%}
+        {%- set sni_raw = (e.sni | default(_validate_default_sni | default(''))) -%}
+        {%- if sni_raw is string -%}
+          {%- set sni_list = (sni_raw | replace(',', '|') | split('|') | map('trim') | reject('equalto','') | list) -%}
+        {%- elif sni_raw is sequence -%}
+          {%- set sni_list = (sni_raw | map('string') | map('trim') | reject('equalto','') | list) -%}
+        {%- else -%}
+          {%- set sni_list = [] -%}
+        {%- endif -%}
+        {%- if target | length > 0 -%}
+          {%- if (sni_list | length) > 0 -%}
+            {%- for one_sni in sni_list -%}
+              {%- set k = target ~ '|' ~ one_sni ~ '|' ~ path -%}
+              {%- if k not in seen -%}
+                {%- set _ = seen.append(k) -%}
+                {%- set _ = out.append({
+                    'target': target,
+                    'sni': one_sni,
+                    'path': path,
+                    'ok_codes': ok_codes
+                  }) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- else -%}
+            {%- set k = target ~ '||' ~ path -%}
+            {%- if k not in seen -%}
+              {%- set _ = seen.append(k) -%}
+              {%- set _ = out.append({
+                  'target': target,
+                  'sni': '',
+                  'path': path,
+                  'ok_codes': ok_codes
+                }) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Detectar caminho do curl (se existir)
+  ansible.builtin.shell: "command -v curl 2>/dev/null || true"
+  register: _curl_path_raw
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+
+- name: Normalizar curl_path
+  ansible.builtin.set_fact:
+    _curl_path: "{{ _curl_path_raw.stdout | default('') | trim }}"
+    _curl_available: "{{ (_curl_path_raw.stdout | default('') | trim | length) > 0 }}"
+  changed_when: false
+
+- name: Coletar enddate via openssl s_client
+  ansible.builtin.shell: |
+    TARGET="{{ item.target }}"
+    IP="${TARGET%:*}"
+    PORT="${TARGET#*:}"
+    SNI="{{ item.sni | default('') }}"
+
+    if [ -n "$SNI" ]; then
+      echo | openssl s_client -connect "${IP}:${PORT}" -servername "$SNI" -showcerts 2>/dev/null \
+        | openssl x509 -noout -enddate 2>/dev/null || true
+    else
+      echo | openssl s_client -connect "${IP}:${PORT}" -showcerts 2>/dev/null \
+        | openssl x509 -noout -enddate 2>/dev/null || true
+    fi
+  loop: "{{ _validate_entries_expanded }}"
+  loop_control:
+    label: "{{ item.target }} | {{ item.sni | default('') }}"
+  register: _tls_enddate_raw
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+
+- name: Coletar HTTP code via curl
+  ansible.builtin.shell: |
+    TARGET="{{ item.target }}"
+    IP="${TARGET%:*}"
+    PORT="${TARGET#*:}"
+    PATH_EFF="{{ item.path | default('/') }}"
+    SNI="{{ item.sni | default('') }}"
+
+    if [ -n "$SNI" ]; then
+      "{{ _curl_path }}" -k -s -o /dev/null -w "%{http_code}" --resolve "${SNI}:${PORT}:${IP}" "https://${SNI}:${PORT}${PATH_EFF}" || true
+    else
+      "{{ _curl_path }}" -k -s -o /dev/null -w "%{http_code}" "https://${IP}:${PORT}${PATH_EFF}" || true
+    fi
+  loop: "{{ _validate_entries_expanded }}"
+  loop_control:
+    label: "{{ item.target }} | {{ item.sni | default('') }}"
+  register: _http_code_raw
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  when: _curl_available | bool
+
+- name: Coletar HTTP code via openssl (fallback)
+  ansible.builtin.shell: |
+    TARGET="{{ item.target }}"
+    IP="${TARGET%:*}"
+    PORT="${TARGET#*:}"
+    PATH_EFF="{{ item.path | default('/') }}"
+    SNI="{{ item.sni | default('') }}"
+
+    if [ -n "$SNI" ]; then
+      LINE=$(
+        printf "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$PATH_EFF" "$SNI" \
+        | openssl s_client -connect "${IP}:${PORT}" -servername "$SNI" -quiet 2>/dev/null \
+        | { IFS= read -r L; echo "$L"; }
+      )
+    else
+      LINE=$(
+        printf "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" "$PATH_EFF" "$IP" \
+        | openssl s_client -connect "${IP}:${PORT}" -quiet 2>/dev/null \
+        | { IFS= read -r L; echo "$L"; }
+      )
+    fi
+
+    CODE="${LINE#* }"
+    CODE="${CODE%% *}"
+    echo "$CODE"
+  loop: "{{ _validate_entries_expanded }}"
+  loop_control:
+    label: "{{ item.target }} | {{ item.sni | default('') }}"
+  register: _http_code_fallback_raw
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+  when: not (_curl_available | bool)
+
+- name: Consolidar resultados TLS/HTTP
+  ansible.builtin.set_fact:
+    f5_handshake_results: "{{ f5_handshake_results + [ {
+      'rotation_id': (_rotation_id | default('')),
+      'target': _entry.target,
+      'sni': (_entry.sni | default('')),
+      'path': (_entry.path | default('/')),
+      'enddate': _end,
+      'expected_enddate': (_expected_not_after | default('')),
+      'tls_ok': _tls_ok,
+      'http_code': _code,
+      'http_ok': _http_ok,
+      'http_error': _herr,
+      'ok': (_tls_ok and _http_ok)
+      } ] }}"
+  vars:
+    _entry: "{{ _validate_entries_expanded[idx] }}"
+    _end_line: "{{ (_tls_enddate_raw.results[idx].stdout | default('') | trim) }}"
+    _end: "{{ _end_line | regex_replace('^notAfter=', '') | trim }}"
+    _code: >-
+      {{
+        (_curl_available | bool)
+        | ternary(
+            (_http_code_raw.results[idx].stdout | default('') | trim),
+            (_http_code_fallback_raw.results[idx].stdout | default('') | trim)
+          )
+      }}
+    _herr: "{{ '' if (_curl_available | bool) else 'curl_not_found' }}"
+    _tls_ok: "{{ (_end | length > 0) and ((_expected_not_after | default('') | length == 0) or (_end == _expected_not_after)) }}"
+    _http_ok: "{{ (_code | length > 0) and ((_code | int) in ((_entry.ok_codes | default(_validate_default_ok_codes | default([200]))) | map('int') | list)) }}"
+  loop: "{{ range(0, (_validate_entries_expanded | length)) | list }}"
+  loop_control:
+    loop_var: idx
