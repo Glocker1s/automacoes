@@ -174,26 +174,25 @@ f5_expired_unused_protected_patterns:
 
 # ==== Nome dos objetos importados no F5 =====
 
-# Quando true, adiciona sufixo no nome do cert/key/chain importado no F5.
-# Exemplo: troca-modelo-webapp -> troca-modelo-webapp-05-2026
+# Quando true, adiciona ao nome do cert/key/chain um sufixo baseado
+# na data de expiração do certificado novo.
+# Exemplo: certificado expira em 19/03/2027
+# troca-modelo-webapp -> troca-modelo-webapp-03-2027
 f5_import_name_suffix_enabled: true
 
-# Formato do sufixo usando date/strftime.
-# %m-%Y = 05-2026
-# %Y-%m = 2026-05
+# Formato da data de expiração usada no sufixo.
+# %m-%Y = 03-2027
+# %Y-%m = 2027-03
 f5_import_name_suffix_format: "%m-%Y"
 
-# Timezone usado para montar o sufixo.
-f5_import_name_timezone: "{{ f5_report_timezone | default('America/Sao_Paulo') }}"
-
-# Estratégia quando o nome com mês/ano já existir no F5.
+# Estratégia quando o nome com mês/ano de expiração já existir no F5.
 # increment = tenta -2, -3, -4...
 # fail = falha e pede limpeza/ajuste manual.
 f5_import_name_collision_strategy: "increment"
 
-# Se preenchido, força um sufixo específico e ignora a data.
+# Se preenchido, força um sufixo específico e ignora a data de expiração.
 # Útil para teste/lab.
-# Exemplo: "05-2026"
+# Exemplo: "03-2027"
 f5_import_name_suffix_override: ""
 
 # Limite de tentativas para encontrar nome livre.
