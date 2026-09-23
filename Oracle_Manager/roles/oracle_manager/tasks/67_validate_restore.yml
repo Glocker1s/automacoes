@@ -114,7 +114,7 @@
     - orm_restore_unlock_users | bool
     - _orm_accounts_not_open.stdout | default('0') | trim | int > 0
 
-- name: Restore validation | Contar objetos inválidos
+- name: Restore validation | Listar objetos inválidos antes da recompilação
   ansible.builtin.shell: |
     PDB="{{ orm_pdb_effective | default('') }}"
     if [ -n "$PDB" ]; then
@@ -124,32 +124,163 @@
     fi
     "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
     whenever sqlerror exit sql.sqlcode
-    set heading off feedback off pages 0 verify off echo off
-    select count(*) from dba_objects
+    set heading off feedback off pages 0 verify off echo off lines 4000 trimspool on
+    select owner || '|' || object_name || '|' || object_type || '|' || status
+      from dba_objects
      where upper(owner) in ({{ _orm_schema_sql_list }})
-       and status = 'INVALID';
+       and status = 'INVALID'
+     order by owner, object_type, object_name;
     exit
     SQL
   environment:
     ORACLE_SID: "{{ orm_sid_effective }}"
     ORACLE_HOME: "{{ orm_oracle_home_effective }}"
     PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
-  register: _orm_invalid_objects
+  register: _orm_invalid_objects_before
   changed_when: false
   become: true
   become_user: "{{ orm_os_user_effective }}"
   when: orm_restore_validate_invalid_objects | bool
 
-- name: Restore validation | Publicar quantidade de objetos inválidos
+- name: Restore validation | Publicar objetos inválidos antes da recompilação
   ansible.builtin.set_fact:
-    orm_invalid_objects_count: "{{ _orm_invalid_objects.stdout | default('0') | trim | int }}"
+    orm_invalid_objects_before: >-
+      {{
+        _orm_invalid_objects_before.stdout_lines
+        | default([])
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+    orm_invalid_objects_before_count: >-
+      {{
+        _orm_invalid_objects_before.stdout_lines
+        | default([])
+        | map('trim')
+        | reject('equalto', '')
+        | list
+        | length
+      }}
   when: orm_restore_validate_invalid_objects | bool
+
+- name: Restore validation | Recompilar schemas quando houver objetos inválidos
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set serveroutput on feedback off verify off
+    begin
+    {% for schema in orm_schemas | map('upper') | unique | list %}
+      UTL_RECOMP.RECOMP_SERIAL('{{ schema }}');
+    {% endfor %}
+    end;
+    /
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_recompile_schema
+  changed_when: true
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_validate_invalid_objects | bool
+    - orm_invalid_objects_before_count | default(0) | int > 0
+    - not (orm_sequence_repair_completed | default(false) | bool)
+
+- name: Restore validation | Listar objetos inválidos após recompilação
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off lines 4000 trimspool on
+    select owner || '|' || object_name || '|' || object_type || '|' || status
+      from dba_objects
+     where upper(owner) in ({{ _orm_schema_sql_list }})
+       and status = 'INVALID'
+     order by owner, object_type, object_name;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_invalid_objects_after
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_restore_validate_invalid_objects | bool
+
+- name: Restore validation | Publicar quantidade final de objetos inválidos
+  ansible.builtin.set_fact:
+    orm_invalid_objects_after: >-
+      {{
+        _orm_invalid_objects_after.stdout_lines
+        | default([])
+        | map('trim')
+        | reject('equalto', '')
+        | list
+      }}
+    orm_invalid_objects_count: >-
+      {{
+        _orm_invalid_objects_after.stdout_lines
+        | default([])
+        | map('trim')
+        | reject('equalto', '')
+        | list
+        | length
+      }}
+  when: orm_restore_validate_invalid_objects | bool
+
+- name: Restore validation | Consultar erros de compilação remanescentes
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off lines 4000 long 4000 trimspool on
+    select owner || '|' || name || '|' || type || '|' || line || '|' || position || '|' || replace(text, chr(10), ' ')
+      from dba_errors
+     where upper(owner) in ({{ _orm_schema_sql_list }})
+     order by owner, name, sequence;
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_dba_errors_after
+  changed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_validate_invalid_objects | bool
+    - orm_invalid_objects_count | default(0) | int > 0
 
 - name: Restore validation | Registrar falha por objetos inválidos
   ansible.builtin.set_fact:
     orm_host_failed: true
     orm_host_failed_task: "Validar objetos inválidos"
-    orm_host_error_msg: "Foram encontrados {{ orm_invalid_objects_count }} objetos INVALID após o restore."
+    orm_host_error_msg: >-
+      Foram encontrados {{ orm_invalid_objects_count }} objetos INVALID após a recompilação do schema.
+      Consulte {{ orm_validation_log_file }} para os objetos e erros de compilação.
   when:
     - orm_restore_validate_invalid_objects | bool
     - orm_restore_fail_on_invalid_objects | bool
@@ -158,11 +289,23 @@
 - name: Restore validation | Registrar aviso por objetos inválidos
   ansible.builtin.set_fact:
     orm_host_warning: true
-    orm_restore_invalid_objects_warning: "Foram encontrados {{ orm_invalid_objects_count }} objetos INVALID após o restore."
+    orm_restore_invalid_objects_warning: >-
+      Foram encontrados {{ orm_invalid_objects_count }} objetos INVALID após a recompilação do schema.
   when:
     - orm_restore_validate_invalid_objects | bool
     - not (orm_restore_fail_on_invalid_objects | bool)
     - orm_invalid_objects_count | int > 0
+
+- name: Restore validation | Registrar aviso quando recompilação retorna erro
+  ansible.builtin.set_fact:
+    orm_host_warning: true
+    orm_restore_recompile_warning: >-
+      UTL_RECOMP.RECOMP_SERIAL retornou rc={{ _orm_recompile_schema.rc | default('N/A') }}.
+      A validação final de objetos INVALID foi executada mesmo assim.
+  when:
+    - orm_restore_validate_invalid_objects | bool
+    - _orm_recompile_schema is defined
+    - _orm_recompile_schema.rc | default(0) | int != 0
 
 - name: Restore validation | Gravar log de validação
   ansible.builtin.copy:
@@ -178,8 +321,53 @@
       PDB: {{ orm_pdb_effective | default('') }}
       Schemas esperados: {{ orm_schemas | join(', ') }}
       Schemas encontrados: {{ orm_schemas_after_restore | default([]) | join(', ') }}
-      Objetos INVALID: {{ orm_invalid_objects_count | default('não verificado') }}
 
-      Status das contas:
+      ============================================================
+      OBJETOS INVALID ANTES DA RECOMPILAÇÃO
+      ============================================================
+      Quantidade: {{ orm_invalid_objects_before_count | default('não verificado') }}
+      {% for item in orm_invalid_objects_before | default([]) %}
+      {{ item }}
+      {% else %}
+      Nenhum objeto INVALID encontrado antes da recompilação.
+      {% endfor %}
+
+      ============================================================
+      UTL_RECOMP.RECOMP_SERIAL
+      ============================================================
+      {% if orm_sequence_repair_completed | default(false) | bool %}
+      Recompilação já executada durante a tratativa automática de ORA-02289.
+      {% elif _orm_recompile_schema is defined and not (_orm_recompile_schema.skipped | default(false) | bool) %}
+      RC: {{ _orm_recompile_schema.rc | default('N/A') }}
+      STDOUT:
+      {{ _orm_recompile_schema.stdout | default('') }}
+      STDERR:
+      {{ _orm_recompile_schema.stderr | default('') }}
+      {% else %}
+      Recompilação não necessária.
+      {% endif %}
+
+      ============================================================
+      OBJETOS INVALID APÓS RECOMPILAÇÃO
+      ============================================================
+      Quantidade: {{ orm_invalid_objects_count | default('não verificado') }}
+      {% for item in orm_invalid_objects_after | default([]) %}
+      {{ item }}
+      {% else %}
+      Nenhum objeto INVALID encontrado após a recompilação.
+      {% endfor %}
+
+      ============================================================
+      ERROS DE COMPILAÇÃO REMANESCENTES
+      ============================================================
+      {% if _orm_dba_errors_after is defined and (_orm_dba_errors_after.stdout | default('') | trim | length > 0) %}
+      {{ _orm_dba_errors_after.stdout }}
+      {% else %}
+      Nenhum erro de compilação remanescente encontrado em DBA_ERRORS.
+      {% endif %}
+
+      ============================================================
+      STATUS DAS CONTAS
+      ============================================================
       {{ _orm_account_status_after.stdout | default('') }}
   become: true
