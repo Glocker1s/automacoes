@@ -49,13 +49,649 @@
   when:
     - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
 
-- name: Data Pump | Registrar falha do impdp
+- name: Data Pump | Inicializar estado da tratativa de sequences
+  ansible.builtin.set_fact:
+    orm_sequence_repair_detected: false
+    orm_sequence_repair_attempted: false
+    orm_sequence_repair_completed: false
+    orm_sequence_repair_items: []
+    orm_sequence_repair_missing_items: []
+    orm_sequence_repair_missing_after: []
+    orm_sequence_repair_table_check_failed: false
+    orm_sequence_repair_sequence_check_failed: false
+    orm_sequence_repair_log_file: >-
+      {{ orm_restore_dir }}/sequence_repair_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log
+    orm_sequence_repair_parfile: >-
+      {{ orm_restore_dir }}/impdp_sequence_repair_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.par
+    orm_sequence_repair_impdp_log_basename: >-
+      impdp_sequence_repair_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log
+    orm_sequence_repair_impdp_log_file: >-
+      {{ orm_restore_dir }}/impdp_sequence_repair_{{ orm_profile_key }}_{{ orm_env }}_job_{{ tower_job_id | default(awx_job_id | default('local')) }}.log
+  when:
+    - orm_scope_effective == 'schema'
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+
+- name: Data Pump | Verificar log para tratativa de ORA-02289
+  ansible.builtin.stat:
+    path: "{{ orm_impdp_log_file }}"
+  register: _orm_sequence_repair_log_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_scope_effective == 'schema'
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+
+- name: Data Pump | Ler log para tratativa de ORA-02289
+  ansible.builtin.slurp:
+    src: "{{ orm_impdp_log_file }}"
+  register: _orm_sequence_repair_log_raw
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  failed_when: false
+  when:
+    - orm_scope_effective == 'schema'
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+    - _orm_sequence_repair_log_stat.stat.exists | default(false)
+    - _orm_sequence_repair_log_stat.stat.size | default(0) | int > 0
+
+- name: Data Pump | Identificar tabelas e sequences ausentes no log
+  ansible.builtin.shell: |
+    awk '
+    {
+      u=toupper($0)
+    }
+
+    index(u, "ORA-39083:") > 0 && index(u, "TABLE:\"") > 0 {
+      s=u
+      marker="TABLE:\""
+      p=index(s, marker)
+
+      if (p > 0) {
+        s=substr(s, p + length(marker))
+        sep="\".\""
+        q=index(s, sep)
+
+        if (q > 0) {
+          owner=substr(s, 1, q - 1)
+          s=substr(s, q + length(sep))
+          q=index(s, "\"")
+
+          if (q > 0) {
+            table_name=substr(s, 1, q - 1)
+            candidate=1
+            has_02289=0
+          }
+        }
+      }
+
+      next
+    }
+
+    candidate && index(u, "ORA-02289:") > 0 {
+      has_02289=1
+      next
+    }
+
+    candidate && has_02289 &&
+    index(u, "CREATE TABLE") > 0 &&
+    index(u, "ISEQ$$_") > 0 &&
+    index(u, ".NEXTVAL") > 0 {
+      s=u
+      p=index(s, "ISEQ$$_")
+
+      if (p > 0) {
+        seq=substr(s, p)
+        q=index(seq, "\"")
+
+        if (q > 0) {
+          seq=substr(seq, 1, q - 1)
+        } else {
+          q=index(seq, ".NEXTVAL")
+          if (q > 0) {
+            seq=substr(seq, 1, q - 1)
+          }
+        }
+
+        print owner "|" table_name "|" seq
+      }
+
+      candidate=0
+      has_02289=0
+      next
+    }
+
+    candidate && index(u, "ORA-39083:") > 0 {
+      candidate=0
+      has_02289=0
+    }
+    ' "{{ orm_impdp_log_file }}"
+  args:
+    executable: /bin/bash
+  register: _orm_sequence_repair_parse
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_scope_effective == 'schema'
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+    - _orm_sequence_repair_log_stat.stat.exists | default(false)
+    - _orm_sequence_repair_log_stat.stat.size | default(0) | int > 0
+
+- name: Data Pump | Exibir detecções de ORA-02289
+  ansible.builtin.debug:
+    msg:
+      rc_parser: "{{ _orm_sequence_repair_parse.rc | default('N/A') }}"
+      quantidade: "{{ _orm_sequence_repair_parse.stdout_lines | default([]) | unique | list | length }}"
+      objetos: "{{ _orm_sequence_repair_parse.stdout_lines | default([]) | unique | list }}"
+  when:
+    - orm_scope_effective == 'schema'
+    - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+
+- name: Data Pump | Montar mapeamento de recuperação de sequences
+  ansible.builtin.set_fact:
+    _orm_sequence_repair_items_json: >-
+      {%- set out = [] -%}
+      {%- for line in (_orm_sequence_repair_parse.stdout_lines | default([]) | unique | list) -%}
+        {%- set parts = line.split('|') -%}
+        {%- if parts | length == 3 -%}
+          {%- set _ = out.append({
+                'owner': parts[0] | upper,
+                'table': parts[1] | upper,
+                'sequence_owner': parts[0] | upper,
+                'sequence': parts[2] | upper
+              }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  when:
+    - orm_scope_effective == 'schema'
+    - _orm_sequence_repair_parse is defined
+    - _orm_sequence_repair_parse.rc | default(1) | int == 0
+    - _orm_sequence_repair_parse.stdout_lines | default([]) | length > 0
+
+- name: Data Pump | Publicar mapeamento de recuperação de sequences
+  ansible.builtin.set_fact:
+    orm_sequence_repair_items: "{{ _orm_sequence_repair_items_json | from_json }}"
+    orm_sequence_repair_detected: true
+  when:
+    - _orm_sequence_repair_items_json is defined
+    - (_orm_sequence_repair_items_json | from_json) | length > 0
+
+- name: Data Pump | Validar objetos detectados para recuperação
+  ansible.builtin.assert:
+    that:
+      - item.owner is match('^[A-Z0-9_$#]+$')
+      - item.table is match('^[A-Z0-9_$#]+$')
+      - item.sequence_owner is match('^[A-Z0-9_$#]+$')
+      - item.sequence is match('^ISEQ\\$\\$_[A-Z0-9_$#]+$')
+      - item.owner == item.sequence_owner
+    fail_msg: >-
+      Mapeamento inválido detectado no log do impdp para recuperação de sequence:
+      {{ item }}.
+  loop: "{{ orm_sequence_repair_items | default([]) }}"
+  loop_control:
+    label: "{{ item.owner }}.{{ item.table }} -> {{ item.sequence }}"
+  when: orm_sequence_repair_detected | default(false) | bool
+
+- name: Data Pump | Validar existência das tabelas que falharam
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*)
+      from dba_tables
+     where owner = '{{ item.owner }}'
+       and table_name = '{{ item.table }}';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sequence_table_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  loop: "{{ orm_sequence_repair_items | default([]) }}"
+  loop_control:
+    label: "{{ item.owner }}.{{ item.table }}"
+  when: orm_sequence_repair_detected | default(false) | bool
+
+- name: Data Pump | Publicar tabelas ausentes para reimport
+  ansible.builtin.set_fact:
+    orm_sequence_repair_missing_items: >-
+      {{
+        orm_sequence_repair_missing_items
+        + [item.item]
+      }}
+  loop: "{{ _orm_sequence_table_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.owner }}.{{ item.item.table }}"
+  when:
+    - orm_sequence_repair_detected | default(false) | bool
+    - item.rc | default(1) | int == 0
+    - item.stdout | default('0') | trim | int == 0
+
+- name: Data Pump | Registrar falha ao validar existência das tabelas
+  ansible.builtin.set_fact:
+    orm_sequence_repair_table_check_failed: true
+  loop: "{{ _orm_sequence_table_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.owner }}.{{ item.item.table }}"
+  when:
+    - orm_sequence_repair_detected | default(false) | bool
+    - item.rc | default(1) | int != 0
+
+- name: Data Pump | Registrar plano de recuperação de sequences
+  ansible.builtin.copy:
+    dest: "{{ orm_sequence_repair_log_file }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+    content: |
+      Oracle Manager - Tratativa de ORA-02289
+      Host: {{ inventory_hostname }}
+      Ambiente: {{ orm_env }}
+      Profile: {{ orm_profile_key }}
+      SID: {{ orm_sid_effective }}
+      PDB: {{ orm_pdb_effective | default('') }}
+      Dump: {{ orm_effective_dump_name | default('') }}
+      IMPDP principal RC: {{ _orm_impdp_exec.rc | default('N/A') }}
+
+      Objetos detectados:
+      {% for item in orm_sequence_repair_items | default([]) %}
+      - {{ item.owner }}.{{ item.table }} -> {{ item.sequence_owner }}.{{ item.sequence }}
+      {% endfor %}
+
+      Tabelas ausentes antes da tratativa:
+      {% for item in orm_sequence_repair_missing_items | default([]) %}
+      - {{ item.owner }}.{{ item.table }}
+      {% endfor %}
+  become: true
+  when: orm_sequence_repair_detected | default(false) | bool
+
+- name: Data Pump | Marcar início da recuperação de sequences
+  ansible.builtin.set_fact:
+    orm_sequence_repair_attempted: true
+  when:
+    - orm_sequence_repair_detected | default(false) | bool
+    - orm_sequence_repair_missing_items | default([]) | length > 0
+
+- name: Data Pump | Criar sequences ausentes conforme runbook
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<'SQL'
+    whenever sqlerror exit sql.sqlcode
+    set serveroutput on feedback off verify off
+    declare
+      v_count number;
+    begin
+    {% for item in orm_sequence_repair_missing_items %}
+      select count(*)
+        into v_count
+        from dba_sequences
+       where sequence_owner = '{{ item.sequence_owner }}'
+         and sequence_name = '{{ item.sequence }}';
+
+      if v_count = 0 then
+        execute immediate 'create sequence "{{ item.sequence_owner }}"."{{ item.sequence }}" start with 1 increment by 1 nocache';
+      end if;
+    {% endfor %}
+    end;
+    /
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sequence_create
+  changed_when: true
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - orm_sequence_repair_missing_items | length > 0
+
+- name: Data Pump | Validar sequences após criação
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<'SQL'
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*)
+      from dba_sequences
+     where sequence_owner = '{{ item.sequence_owner }}'
+       and sequence_name = '{{ item.sequence }}';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sequence_create_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  loop: "{{ orm_sequence_repair_missing_items | default([]) }}"
+  loop_control:
+    label: "{{ item.sequence_owner }}.{{ item.sequence }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+
+- name: Data Pump | Registrar falha na validação das sequences criadas
+  ansible.builtin.set_fact:
+    orm_sequence_repair_sequence_check_failed: true
+  loop: "{{ _orm_sequence_create_check.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.sequence_owner }}.{{ item.item.sequence }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - item.rc | default(1) | int != 0 or item.stdout | default('0') | trim | int == 0
+
+- name: Data Pump | Registrar criação das sequences
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_sequence_repair_log_file }}"
+
+    ============================================================
+    CRIAÇÃO DAS SEQUENCES
+    ============================================================
+    RC: {{ _orm_sequence_create.rc | default('N/A') }}
+    STDOUT:
+    {{ _orm_sequence_create.stdout | default('') }}
+    STDERR:
+    {{ _orm_sequence_create.stderr | default('') }}
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+  failed_when: false
+  when: orm_sequence_repair_attempted | default(false) | bool
+
+- name: Data Pump | Montar lista de tabelas para reimport
+  ansible.builtin.set_fact:
+    _orm_sequence_repair_tables_json: >-
+      {%- set out = [] -%}
+      {%- for item in orm_sequence_repair_missing_items -%}
+        {%- set table_name = item.owner ~ '.' ~ item.table -%}
+        {%- if table_name not in out -%}
+          {%- set _ = out.append(table_name) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+    - not (orm_sequence_repair_sequence_check_failed | default(false) | bool)
+
+- name: Data Pump | Publicar lista de tabelas para reimport
+  ansible.builtin.set_fact:
+    orm_sequence_repair_tables: "{{ _orm_sequence_repair_tables_json | from_json }}"
+  when:
+    - _orm_sequence_repair_tables_json is defined
+
+- name: Data Pump | Gerar parfile para reimport das tabelas faltantes
+  ansible.builtin.copy:
+    dest: "{{ orm_sequence_repair_parfile }}"
+    owner: "{{ orm_os_user_effective }}"
+    group: "{{ orm_os_group_effective }}"
+    mode: "0640"
+    content: |
+      TABLES={{ orm_sequence_repair_tables | join(',') }}
+      DIRECTORY={{ orm_directory_name_effective }}
+      DUMPFILE={{ orm_effective_dump_name }}
+      LOGFILE={{ orm_datapump_log_directory_name_effective }}:{{ orm_sequence_repair_impdp_log_basename }}
+  become: true
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+    - not (orm_sequence_repair_sequence_check_failed | default(false) | bool)
+    - orm_sequence_repair_tables | default([]) | length > 0
+
+- name: Data Pump | Reimportar somente tabelas faltantes
+  ansible.builtin.command:
+    argv:
+      - "{{ orm_oracle_home_effective }}/bin/impdp"
+      - '"/ as sysdba"'
+      - "parfile={{ orm_sequence_repair_parfile }}"
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    ORACLE_PDB_SID: "{{ orm_pdb_effective if (orm_is_cdb | bool and orm_pdb_effective | length > 0) else '' }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+    TZ: "{{ orm_report_timezone | default('America/Sao_Paulo') }}"
+  register: _orm_sequence_reimport
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+    - not (orm_sequence_repair_sequence_check_failed | default(false) | bool)
+    - orm_sequence_repair_tables | default([]) | length > 0
+
+- name: Data Pump | Registrar reimport das tabelas faltantes
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_sequence_repair_log_file }}"
+
+    ============================================================
+    REIMPORT DAS TABELAS FALTANTES
+    ============================================================
+    Tabelas: {{ orm_sequence_repair_tables | default([]) | join(', ') }}
+    RC: {{ _orm_sequence_reimport.rc | default('N/A') }}
+    STDOUT:
+    {{ _orm_sequence_reimport.stdout | default('') }}
+    STDERR:
+    {{ _orm_sequence_reimport.stderr | default('') }}
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+  failed_when: false
+  when: orm_sequence_repair_attempted | default(false) | bool
+
+- name: Data Pump | Validar tabelas após reimport
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set heading off feedback off pages 0 verify off echo off
+    select count(*)
+      from dba_tables
+     where owner = '{{ item.owner }}'
+       and table_name = '{{ item.table }}';
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sequence_table_check_after
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  loop: "{{ orm_sequence_repair_missing_items | default([]) }}"
+  loop_control:
+    label: "{{ item.owner }}.{{ item.table }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+    - not (orm_sequence_repair_sequence_check_failed | default(false) | bool)
+
+- name: Data Pump | Publicar tabelas ainda ausentes após reimport
+  ansible.builtin.set_fact:
+    orm_sequence_repair_missing_after: >-
+      {{
+        orm_sequence_repair_missing_after
+        + [item.item.owner ~ '.' ~ item.item.table]
+      }}
+  loop: "{{ _orm_sequence_table_check_after.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.owner }}.{{ item.item.table }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - item.rc | default(1) | int != 0 or item.stdout | default('0') | trim | int == 0
+
+- name: Data Pump | Recompilar schemas após reimport
+  ansible.builtin.shell: |
+    PDB="{{ orm_pdb_effective | default('') }}"
+    if [ -n "$PDB" ]; then
+      export ORACLE_PDB_SID="$PDB"
+    else
+      unset ORACLE_PDB_SID
+    fi
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL
+    whenever sqlerror exit sql.sqlcode
+    set serveroutput on feedback off verify off
+    begin
+    {% for owner in orm_sequence_repair_missing_items | map(attribute='owner') | unique | list %}
+      UTL_RECOMP.RECOMP_SERIAL('{{ owner }}');
+    {% endfor %}
+    end;
+    /
+    exit
+    SQL
+  environment:
+    ORACLE_SID: "{{ orm_sid_effective }}"
+    ORACLE_HOME: "{{ orm_oracle_home_effective }}"
+    PATH: "{{ orm_oracle_home_effective }}/bin:/usr/local/bin:/usr/bin:/bin"
+  register: _orm_sequence_recompile
+  changed_when: true
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+    - not (orm_sequence_repair_sequence_check_failed | default(false) | bool)
+    - orm_sequence_repair_missing_after | default([]) | length == 0
+
+- name: Data Pump | Registrar recompilação e validação da recuperação
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_sequence_repair_log_file }}"
+
+    ============================================================
+    RECOMPILAÇÃO E VALIDAÇÃO
+    ============================================================
+    Tabelas ainda ausentes: {{ orm_sequence_repair_missing_after | default([]) | join(', ') if (orm_sequence_repair_missing_after | default([]) | length > 0) else 'nenhuma' }}
+    UTL_RECOMP RC: {{ _orm_sequence_recompile.rc | default('N/A') }}
+    UTL_RECOMP STDOUT:
+    {{ _orm_sequence_recompile.stdout | default('') }}
+    UTL_RECOMP STDERR:
+    {{ _orm_sequence_recompile.stderr | default('') }}
+    EOF
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+  failed_when: false
+  when: orm_sequence_repair_attempted | default(false) | bool
+
+- name: Data Pump | Marcar recuperação concluída
+  ansible.builtin.set_fact:
+    orm_sequence_repair_completed: true
+  when:
+    - orm_sequence_repair_attempted | default(false) | bool
+    - _orm_sequence_create.rc | default(1) | int == 0
+    - not (orm_sequence_repair_sequence_check_failed | default(false) | bool)
+    - orm_sequence_repair_missing_after | default([]) | length == 0
+    - _orm_sequence_recompile.rc | default(1) | int == 0
+
+- name: Data Pump | Marcar recuperação desnecessária quando tabelas já existem
+  ansible.builtin.set_fact:
+    orm_sequence_repair_completed: true
+  when:
+    - orm_sequence_repair_detected | default(false) | bool
+    - not (orm_sequence_repair_attempted | default(false) | bool)
+    - orm_sequence_repair_missing_items | default([]) | length == 0
+    - not (orm_sequence_repair_table_check_failed | default(false) | bool)
+
+- name: Data Pump | Registrar tratativa de sequence concluída no log de controle
+  ansible.builtin.shell: |
+    {
+      echo
+      echo "============================================================"
+      echo "TRATATIVA AUTOMÁTICA DE ORA-02289"
+      echo "============================================================"
+      if [ -f "{{ orm_sequence_repair_log_file }}" ]; then
+        cat "{{ orm_sequence_repair_log_file }}"
+      else
+        echo "Log da tratativa não encontrado: {{ orm_sequence_repair_log_file }}"
+      fi
+      if [ -f "{{ orm_sequence_repair_impdp_log_file }}" ]; then
+        echo
+        echo "--- IMPDP DE REIMPORT ---"
+        cat "{{ orm_sequence_repair_impdp_log_file }}"
+      fi
+    } >> "{{ orm_control_log_file }}"
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  changed_when: false
+  failed_when: false
+  when:
+    - orm_sequence_repair_detected | default(false) | bool
+
+- name: Data Pump | Registrar import concluído após recuperação de sequence
+  ansible.builtin.set_fact:
+    orm_restore_import_completed: true
+    orm_host_warning: true
+    orm_restore_sequence_repair_warning: >-
+      O impdp principal retornou rc={{ _orm_impdp_exec.rc | default('N/A') }}, mas a tratativa
+      de ORA-02289 foi concluída conforme o runbook: sequences criadas, tabelas faltantes
+      reimportadas e schemas recompilados. As validações pós-restore serão executadas normalmente.
+    orm_restore_database_state: >-
+      impdp concluiu com erros de sequence tratados automaticamente; iniciando pós-restore.
+  when:
+    - orm_scope_effective == 'schema'
+    - orm_sequence_repair_completed | default(false) | bool
+
+- name: Data Pump | Registrar falha do impdp sem recuperação concluída
   ansible.builtin.set_fact:
     orm_host_failed: true
     orm_host_failed_task: "Executar impdp"
     orm_host_error_msg: >-
       impdp falhou ou não concluiu corretamente. rc={{ _orm_impdp_exec.rc | default('N/A') }}.
-      Verifique {{ orm_impdp_log_file }} e {{ orm_control_log_file }}.
+      {% if orm_sequence_repair_detected | default(false) | bool %}
+      Foi detectado ORA-02289, porém a tratativa automática não concluiu com sucesso.
+      Tabelas ainda ausentes: {{ orm_sequence_repair_missing_after | default([]) | join(', ') }}.
+      {% endif %}
+      Verifique {{ orm_impdp_log_file }}, {{ orm_sequence_repair_log_file | default('') }}
+      e {{ orm_control_log_file }}.
     orm_restore_database_state: >-
       {{
         (
@@ -66,13 +702,14 @@
         if orm_scope_effective == 'tables'
         else
         (
-          'O schema anterior já pode ter sido removido e o impdp não concluiu. '
+          'O schema anterior já pode ter sido removido e o impdp/tratativa não concluiu. '
           ~ 'Recuperação manual deve usar o dump '
           ~ (orm_effective_dump_reference | default(orm_effective_dump_file))
         )
       }}
   when:
     - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
+    - not (orm_sequence_repair_completed | default(false) | bool)
 
 - name: Data Pump | Registrar import concluído
   ansible.builtin.set_fact:
