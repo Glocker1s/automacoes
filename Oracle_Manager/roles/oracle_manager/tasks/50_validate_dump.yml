@@ -2,6 +2,9 @@
 - name: Backup validation | Verificar dump gerado
   ansible.builtin.stat:
     path: "{{ orm_dump_file }}"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
   register: _orm_dump_stat
   become: true
   become_user: "{{ orm_os_user_effective }}"
@@ -9,6 +12,9 @@
 - name: Backup validation | Verificar log do Data Pump
   ansible.builtin.stat:
     path: "{{ orm_datapump_log_file }}"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
   register: _orm_datapump_log_stat
   become: true
   become_user: "{{ orm_os_user_effective }}"
