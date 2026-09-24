@@ -411,20 +411,71 @@
     - name: Restore | Preparar lista filtrada do pg_restore
       ansible.builtin.shell: |
         set -o pipefail
+
         RAW="{{ pgm_restore_list_file }}.raw"
         FILTERED="{{ pgm_restore_list_file }}"
-        pg_restore -l "{{ pgm_effective_dump_dir }}" > "$RAW" 2>> "{{ pgm_restore_log_file }}"
+
+        pg_restore -l "{{ pgm_effective_dump_dir }}" \
+          > "$RAW" \
+          2>> "{{ pgm_restore_log_file }}"
+
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "[ERROR] Falha ao gerar lista do pg_restore. rc=${rc}" >> "{{ pgm_restore_log_file }}"
+          exit "$rc"
+        fi
+
         cp "$RAW" "$FILTERED"
+
+        echo "" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] Aplicando filtros no TOC do pg_restore" >> "{{ pgm_restore_log_file }}"
+
         while IFS= read -r pattern; do
           [ -z "$pattern" ] && continue
-          grep -F -v "$pattern" "$FILTERED" > "$FILTERED.tmp" || true
+
+          echo "[INFO] Excluindo pattern: ${pattern}" >> "{{ pgm_restore_log_file }}"
+
+          grep -F -v -- "$pattern" "$FILTERED" > "$FILTERED.tmp" || true
           mv "$FILTERED.tmp" "$FILTERED"
+
         done <<'PATTERNS'
         {% for pattern in pgm_db_cfg.restore.exclude_toc_patterns | default([]) %}
         {{ pattern }}
         {% endfor %}
         PATTERNS
+
+        echo "[INFO] Validando filtros aplicados no TOC" >> "{{ pgm_restore_log_file }}"
+
+        filter_failed=0
+
+        while IFS= read -r pattern; do
+          [ -z "$pattern" ] && continue
+
+          if grep -F -q -- "$pattern" "$FILTERED"; then
+            echo "[ERROR] Pattern ainda presente após filtro: ${pattern}" >> "{{ pgm_restore_log_file }}"
+            filter_failed=1
+          else
+            echo "[INFO] Pattern removido com sucesso: ${pattern}" >> "{{ pgm_restore_log_file }}"
+          fi
+
+        done <<'PATTERNS'
+        {% for pattern in pgm_db_cfg.restore.exclude_toc_patterns | default([]) %}
+        {{ pattern }}
+        {% endfor %}
+        PATTERNS
+
+        if [ "$filter_failed" -ne 0 ]; then
+          exit 31
+        fi
+
+        RAW_TOTAL=$(grep -cv '^;' "$RAW" || true)
+        FILTERED_TOTAL=$(grep -cv '^;' "$FILTERED" || true)
+
+        echo "[INFO] TOC original: ${RAW_TOTAL} entradas" >> "{{ pgm_restore_log_file }}"
+        echo "[INFO] TOC filtrado: ${FILTERED_TOTAL} entradas" >> "{{ pgm_restore_log_file }}"
         echo "[INFO] Lista de restore gerada em $FILTERED" >> "{{ pgm_restore_log_file }}"
+
+        exit 0
       args:
         executable: /bin/bash
       environment:
@@ -434,7 +485,65 @@
       changed_when: true
       become: true
       become_user: root
-      when: not (pgm_host_failed | bool)
+      when:
+        - not (pgm_host_failed | bool)
+
+    - name: Restore | Exibir filtros efetivos do TOC
+      ansible.builtin.debug:
+        msg:
+          - "Filtros configurados:"
+          - "{{ pgm_db_cfg.restore.exclude_toc_patterns | default([]) }}"
+      when:
+        - not (pgm_host_failed | bool)
+
+    - name: Restore | Verificar resultado dos filtros no TOC
+      ansible.builtin.shell: |
+        FILTERED="{{ pgm_restore_list_file }}"
+
+        if [ ! -f "$FILTERED" ]; then
+          echo "ERRO|Lista filtrada não encontrada: $FILTERED"
+          exit 0
+        fi
+
+        echo "Arquivo filtrado: $FILTERED"
+        echo "----------------------------------------"
+
+        while IFS= read -r pattern; do
+          [ -z "$pattern" ] && continue
+
+          COUNT=$(grep -F -c -- "$pattern" "$FILTERED" || true)
+
+          echo "PATTERN=${pattern} | OCORRENCIAS_RESTANTES=${COUNT}"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo ">>> LINHAS AINDA PRESENTES:"
+            grep -F -- "$pattern" "$FILTERED" | head -20 || true
+          fi
+
+          echo "----------------------------------------"
+
+        done <<'PATTERNS'
+        {% for pattern in pgm_db_cfg.restore.exclude_toc_patterns | default([]) %}
+        {{ pattern }}
+        {% endfor %}
+        PATTERNS
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+      register: _pgm_toc_filter_debug
+      changed_when: false
+      failed_when: false
+      become: true
+      become_user: root
+      when:
+        - not (pgm_host_failed | bool)
+
+    - name: Restore | Exibir resultado dos filtros do TOC
+      ansible.builtin.debug:
+        var: _pgm_toc_filter_debug.stdout_lines
+      when:
+        - _pgm_toc_filter_debug is defined
 
     - name: Restore | Registrar falha ao preparar lista
       ansible.builtin.set_fact:
