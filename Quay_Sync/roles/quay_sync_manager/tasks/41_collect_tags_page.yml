@@ -17,11 +17,16 @@
       - 200
       - 403
       - 404
-    timeout: "{{ quay_api_timeout | default(30) }}"
+    timeout: "{{ quay_api_timeout | default(120) }}"
   loop: "{{ _quay_source_page_repositories }}"
   loop_control:
     label: "{{ item.repository }} page={{ _quay_tag_current_page }}"
   register: _quay_source_page_query
+  retries: "{{ quay_tag_request_retries | default(3) | int }}"
+  delay: "{{ quay_tag_request_retry_delay | default(10) | int }}"
+  until: >-
+    (_quay_source_page_query.status | default(-1) | int) in [200, 403, 404]
+  failed_when: false
   no_log: "{{ quay_hide_sensitive_logs | bool }}"
   when:
     - (_quay_source_page_repositories | length) > 0
@@ -39,11 +44,16 @@
       - 200
       - 403
       - 404
-    timeout: "{{ quay_api_timeout | default(30) }}"
+    timeout: "{{ quay_api_timeout | default(120) }}"
   loop: "{{ _quay_target_page_repositories }}"
   loop_control:
     label: "{{ item.repository }} page={{ _quay_tag_current_page }}"
   register: _quay_target_page_query
+  retries: "{{ quay_tag_request_retries | default(3) | int }}"
+  delay: "{{ quay_tag_request_retry_delay | default(10) | int }}"
+  until: >-
+    (_quay_target_page_query.status | default(-1) | int) in [200, 403, 404]
+  failed_when: false
   no_log: "{{ quay_hide_sensitive_logs | bool }}"
   when:
     - (_quay_target_page_repositories | length) > 0
@@ -59,31 +69,37 @@
   ansible.builtin.set_fact:
     _quay_source_next_page_repositories_json: >-
       {%- set out = [] -%}
-      {%- if quay_tag_pagination_stop_when_page_not_full | default(true) | bool -%}
-        {%- for r in (_quay_source_page_query.results | default([])) -%}
-          {%- set status = r.status | default(0) | int -%}
-          {%- set tags_count = r.json.tags | default([]) | length -%}
-          {%- if status == 200 and tags_count >= (quay_tag_page_limit | int) -%}
+      {%- for r in (_quay_source_page_query.results | default([])) -%}
+        {%- set status = r.status | default(-1) | int -%}
+        {%- set body = r.json | default({}) -%}
+        {%- set tags_count = body.tags | default([]) | length -%}
+        {%- if status == 200 -%}
+          {%- if quay_tag_pagination_stop_when_page_not_full | default(true) | bool -%}
+            {%- if tags_count >= (quay_tag_page_limit | int) -%}
+              {%- set _ = out.append(r.item) -%}
+            {%- endif -%}
+          {%- else -%}
             {%- set _ = out.append(r.item) -%}
           {%- endif -%}
-        {%- endfor -%}
-      {%- else -%}
-        {%- set out = _quay_source_page_repositories | default([]) -%}
-      {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
       {{ out | to_json }}
     _quay_target_next_page_repositories_json: >-
       {%- set out = [] -%}
-      {%- if quay_tag_pagination_stop_when_page_not_full | default(true) | bool -%}
-        {%- for r in (_quay_target_page_query.results | default([])) -%}
-          {%- set status = r.status | default(0) | int -%}
-          {%- set tags_count = r.json.tags | default([]) | length -%}
-          {%- if status == 200 and tags_count >= (quay_tag_page_limit | int) -%}
+      {%- for r in (_quay_target_page_query.results | default([])) -%}
+        {%- set status = r.status | default(-1) | int -%}
+        {%- set body = r.json | default({}) -%}
+        {%- set tags_count = body.tags | default([]) | length -%}
+        {%- if status == 200 -%}
+          {%- if quay_tag_pagination_stop_when_page_not_full | default(true) | bool -%}
+            {%- if tags_count >= (quay_tag_page_limit | int) -%}
+              {%- set _ = out.append(r.item) -%}
+            {%- endif -%}
+          {%- else -%}
             {%- set _ = out.append(r.item) -%}
           {%- endif -%}
-        {%- endfor -%}
-      {%- else -%}
-        {%- set out = _quay_target_page_repositories | default([]) -%}
-      {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
       {{ out | to_json }}
 
 - name: Tags {{ quay_compare_stage }} | Page {{ _quay_tag_current_page }} | Publicar próxima página
