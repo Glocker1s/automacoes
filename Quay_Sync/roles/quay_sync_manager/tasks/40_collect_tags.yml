@@ -20,7 +20,8 @@
       {%- for r in (_quay_source_tag_results | default([])) -%}
         {%- set repo = r.item.repository -%}
         {%- if (r.status | default(0) | int) == 200 -%}
-          {%- for t in (r.json.tags | default([])) -%}
+          {%- set body = r.json | default({}) -%}
+          {%- for t in (body.tags | default([])) -%}
             {%- set tag_name = t.name | default('') -%}
             {%- set key = repo ~ '::' ~ tag_name -%}
             {%- if tag_name | length > 0 and key not in seen -%}
@@ -47,7 +48,8 @@
       {%- for r in (_quay_target_tag_results | default([])) -%}
         {%- set repo = r.item.repository -%}
         {%- if (r.status | default(0) | int) == 200 -%}
-          {%- for t in (r.json.tags | default([])) -%}
+          {%- set body = r.json | default({}) -%}
+          {%- for t in (body.tags | default([])) -%}
             {%- set tag_name = t.name | default('') -%}
             {%- set key = repo ~ '::' ~ tag_name -%}
             {%- if tag_name | length > 0 and key not in seen -%}
@@ -79,22 +81,36 @@
     quay_current_tag_collection_errors_json: >-
       {%- set out = [] -%}
       {%- for r in (_quay_source_tag_results | default([])) -%}
-        {%- if (r.status | default(0) | int) not in [200] -%}
+        {%- set status = r.status | default(-1) | int -%}
+        {%- set body = r.json | default({}) -%}
+        {%- if status != 200 -%}
           {%- set _ = out.append({
             'side': 'source',
             'repository': r.item.repository,
-            'http_status': r.status | default(0),
-            'message': r.json.detail | default(r.json.error_message | default(r.msg | default('Falha ao coletar tags no PRD')))
+            'http_status': status,
+            'attempts': r.attempts | default(1),
+            'message': body.detail | default(
+              body.error_message | default(
+                r.msg | default('Falha ao coletar tags no PRD')
+              )
+            )
           }) -%}
         {%- endif -%}
       {%- endfor -%}
       {%- for r in (_quay_target_tag_results | default([])) -%}
-        {%- if (r.status | default(0) | int) not in [200] -%}
+        {%- set status = r.status | default(-1) | int -%}
+        {%- set body = r.json | default({}) -%}
+        {%- if status != 200 -%}
           {%- set _ = out.append({
             'side': 'target',
             'repository': r.item.repository,
-            'http_status': r.status | default(0),
-            'message': r.json.detail | default(r.json.error_message | default(r.msg | default('Falha ao coletar tags no DR')))
+            'http_status': status,
+            'attempts': r.attempts | default(1),
+            'message': body.detail | default(
+              body.error_message | default(
+                r.msg | default('Falha ao coletar tags no DR')
+              )
+            )
           }) -%}
         {%- endif -%}
       {%- endfor -%}
