@@ -5,6 +5,7 @@
     orm_profile_key_normalized: "{{ orm_profile_key | default('') | string | lower | trim }}"
     orm_scope_normalized: "{{ orm_scope | default('schema') | string | lower | trim }}"
     orm_table_exists_action_normalized: "{{ orm_table_exists_action | default('truncate') | string | lower | trim }}"
+    orm_dump_storage_protocol_normalized: "{{ orm_dump_storage_protocol | default('cifs') | string | lower | trim }}"
     orm_job_id: "{{ tower_job_id | default(awx_job_id | default('local')) }}"
     orm_job_template_name_effective: "{{ tower_job_template_name | default(awx_job_template_name | default('Oracle Manager')) }}"
     orm_run_timestamp: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date +%Y%m%d_%H%M%S') }}"
@@ -16,6 +17,14 @@
     fail_msg: >-
       orm_action inválida: {{ orm_action }}.
       Valores aceitos: backup, restore, sync.
+
+- name: Validar protocolo do storage de dumps
+  ansible.builtin.assert:
+    that:
+      - orm_dump_storage_protocol_normalized in ['cifs', 'nfs']
+    fail_msg: >-
+      orm_dump_storage_protocol inválido: {{ orm_dump_storage_protocol | default('') }}.
+      Valores aceitos: cifs, nfs.
 
 - name: Validar profile informado
   ansible.builtin.assert:
