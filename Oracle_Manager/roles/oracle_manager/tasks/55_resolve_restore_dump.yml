@@ -1,59 +1,23 @@
 ---
-- name: Restore dump | Resolver dump via CIFS com staging local
+- name: Restore dump | Resolver dump via storage compartilhado com staging local
   when:
     - orm_restore_storage_mode == 'local'
-    - orm_cifs_enabled | bool
+    - orm_dump_storage_enabled_effective | bool
     - not (orm_host_failed | bool)
   block:
 
-    - name: Restore dump | Resolver endereço CIFS
-      ansible.builtin.set_fact:
-        _orm_restore_cifs_server: "{{ (orm_cifs_addresses | default({})).get(orm_cifs_label | default('') | lower, '') }}"
+    - name: Restore dump | Montar storage compartilhado para staging
+      ansible.builtin.import_tasks: 36_mount_storage.yml
 
-    - name: Restore dump | Validar endereço CIFS
-      ansible.builtin.fail:
-        msg: "CIFS não mapeado: orm_cifs_label={{ orm_cifs_label }}"
-      when: _orm_restore_cifs_server | length == 0
-
-    - name: Restore dump | Criar diretório de montagem CIFS
-      ansible.builtin.file:
-        path: "{{ orm_cifs_mount_dir }}"
-        state: directory
-        mode: "0755"
-      become: true
-
-    - name: Restore dump | Criar arquivo temporário de senha CIFS
-      ansible.builtin.copy:
-        dest: "{{ orm_cifs_password_file }}"
-        content: "{{ ansible_password | default('') }}"
-        mode: "0600"
-      become: true
-      no_log: true
-
-    - name: Restore dump | Montar CIFS
+    - name: Restore dump | Resolver nome efetivo no storage compartilhado
       ansible.builtin.shell: |
         set -euo pipefail
 
-        if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
-          umount "{{ orm_cifs_mount_dir }}" || true
-        fi
-
-        mount -t cifs "{{ _orm_restore_cifs_server }}" "{{ orm_cifs_mount_dir }}" \
-          -o username="{{ ansible_user }}",password="$(cat {{ orm_cifs_password_file }})",domain="{{ orm_cifs_domain }}",rw,vers="{{ orm_cifs_vers }}"
-      args:
-        executable: /bin/bash
-      become: true
-      no_log: true
-
-    - name: Restore dump | Resolver nome efetivo no CIFS
-      ansible.builtin.shell: |
-        set -euo pipefail
-
-        CIFS_DIR="{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
+        STORAGE_DIR="{{ orm_dump_storage_data_dir_effective }}"
         REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
 
         if [ "$REQUESTED" = "latest" ]; then
-          MANIFEST="$CIFS_DIR/{{ orm_latest_manifest_name }}"
+          MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
 
           [ -s "$MANIFEST" ] || {
             echo "Manifest latest não encontrado: $MANIFEST" >&2
@@ -76,6 +40,7 @@
       register: _orm_restore_dump_name_resolved
       changed_when: false
       become: true
+      become_user: "{{ orm_os_user_effective }}"
 
     - name: Restore dump | Validar nome retornado pelo manifesto/Survey
       ansible.builtin.assert:
@@ -87,97 +52,89 @@
           Nome de dump inválido:
           {{ _orm_restore_dump_name_resolved.stdout | default('') | trim }}
 
-    - name: Restore dump | Definir paths do dump CIFS e staging local
+    - name: Restore dump | Definir paths do dump compartilhado e staging local
       ansible.builtin.set_fact:
         orm_effective_dump_name: "{{ _orm_restore_dump_name_resolved.stdout | trim }}"
         orm_effective_dump_file: "{{ orm_restore_dir }}/{{ _orm_restore_dump_name_resolved.stdout | trim }}"
         orm_effective_dump_reference: >-
           {{
-            orm_cifs_label
+            (orm_dump_storage_protocol_effective | upper)
             ~ ':'
-            ~ (orm_cifs_path | regex_replace('/$', ''))
+            ~ orm_dump_storage_label_effective
+            ~ ':'
+            ~ (orm_dump_storage_path | regex_replace('/$', ''))
             ~ '/'
             ~ (_orm_restore_dump_name_resolved.stdout | trim)
           }}
-        orm_restore_dump_source: "CIFS -> LOCAL"
+        orm_restore_dump_source: "{{ orm_dump_storage_protocol_effective | upper }} -> LOCAL"
 
-    - name: Restore dump | Validar dump no CIFS
+    - name: Restore dump | Validar dump no storage compartilhado
       ansible.builtin.stat:
-        path: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}/{{ orm_effective_dump_name }}"
+        path: "{{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_name }}"
         get_checksum: false
         get_mime: false
         get_attributes: false
-      register: _orm_restore_cifs_dump_stat
+      register: _orm_restore_shared_dump_stat
       become: true
+      become_user: "{{ orm_os_user_effective }}"
 
-    - name: Restore dump | Confirmar dump válido no CIFS
+    - name: Restore dump | Confirmar dump válido no storage compartilhado
       ansible.builtin.assert:
         that:
-          - _orm_restore_cifs_dump_stat.stat.exists | default(false)
-          - _orm_restore_cifs_dump_stat.stat.isreg | default(false)
-          - _orm_restore_cifs_dump_stat.stat.size | default(0) | int > 0
+          - _orm_restore_shared_dump_stat.stat.exists | default(false)
+          - _orm_restore_shared_dump_stat.stat.isreg | default(false)
+          - _orm_restore_shared_dump_stat.stat.size | default(0) | int > 0
         fail_msg: >-
-          Dump não encontrado ou vazio no CIFS:
-          {{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}/{{ orm_effective_dump_name }}.
+          Dump não encontrado ou vazio no storage {{ orm_dump_storage_protocol_effective | upper }}:
+          {{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_name }}.
 
-    - name: Restore dump | Copiar dump do CIFS para restore.root_dir
-      ansible.builtin.copy:
-        src: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}/{{ orm_effective_dump_name }}"
-        dest: "{{ orm_effective_dump_file }}"
-        remote_src: true
-        owner: "{{ orm_os_user_effective }}"
-        group: "{{ orm_os_group_effective }}"
-        mode: "0640"
+    - name: Restore dump | Copiar dump para restore.root_dir
+      ansible.builtin.command:
+        argv:
+          - cp
+          - -f
+          - "{{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_name }}"
+          - "{{ orm_effective_dump_file }}"
       become: true
+      become_user: "{{ orm_os_user_effective }}"
 
   rescue:
 
-    - name: Restore dump | Registrar falha de resolução/cópia CIFS
+    - name: Restore dump | Registrar falha de resolução/cópia do storage compartilhado
       ansible.builtin.set_fact:
         orm_host_failed: true
-        orm_host_failed_task: "Resolver/copiar dump do CIFS"
+        orm_host_failed_task: "Resolver/copiar dump do storage compartilhado"
         orm_host_error_msg: >-
           {{
             ansible_failed_result.msg
             | default(
                 ansible_failed_result.stderr
-                | default('Falha ao resolver/copiar dump do CIFS.')
+                | default('Falha ao resolver/copiar dump do storage compartilhado.')
               )
           }}
 
   always:
 
-    - name: Restore dump | Desmontar CIFS
-      ansible.builtin.shell: "umount {{ orm_cifs_mount_dir }} || true"
-      become: true
-      changed_when: false
-      failed_when: false
-
-    - name: Restore dump | Remover senha temporária CIFS
-      ansible.builtin.file:
-        path: "{{ orm_cifs_password_file }}"
-        state: absent
-      become: true
-      failed_when: false
-      no_log: true
+    - name: Restore dump | Desmontar storage compartilhado de staging
+      ansible.builtin.import_tasks: 37_unmount_storage.yml
 
 
-- name: Restore dump | Resolver dump diretamente no CIFS
+- name: Restore dump | Resolver dump diretamente no storage compartilhado
   when:
-    - orm_restore_storage_mode == 'cifs'
-    - orm_cifs_enabled | bool
+    - orm_restore_storage_mode == 'shared'
+    - orm_dump_storage_enabled_effective | bool
     - not (orm_host_failed | bool)
   block:
 
-    - name: Restore dump | Resolver nome efetivo no CIFS montado
+    - name: Restore dump | Resolver nome efetivo no storage montado
       ansible.builtin.shell: |
         set -euo pipefail
 
-        CIFS_DIR="{{ orm_cifs_data_dir_effective }}"
+        STORAGE_DIR="{{ orm_dump_storage_data_dir_effective }}"
         REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
 
         if [ "$REQUESTED" = "latest" ]; then
-          MANIFEST="$CIFS_DIR/{{ orm_latest_manifest_name }}"
+          MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
 
           [ -s "$MANIFEST" ] || {
             echo "Manifest latest não encontrado: $MANIFEST" >&2
@@ -212,60 +169,62 @@
           Nome de dump inválido:
           {{ _orm_restore_dump_name_resolved.stdout | default('') | trim }}
 
-    - name: Restore dump | Definir dump CIFS efetivo
+    - name: Restore dump | Definir dump compartilhado efetivo
       ansible.builtin.set_fact:
         orm_effective_dump_name: "{{ _orm_restore_dump_name_resolved.stdout | trim }}"
-        orm_effective_dump_file: "{{ orm_cifs_data_dir_effective }}/{{ _orm_restore_dump_name_resolved.stdout | trim }}"
+        orm_effective_dump_file: "{{ orm_dump_storage_data_dir_effective }}/{{ _orm_restore_dump_name_resolved.stdout | trim }}"
         orm_effective_dump_reference: >-
           {{
-            orm_cifs_label
+            (orm_dump_storage_protocol_effective | upper)
             ~ ':'
-            ~ (orm_cifs_path | regex_replace('/$', ''))
+            ~ orm_dump_storage_label_effective
+            ~ ':'
+            ~ (orm_dump_storage_path | regex_replace('/$', ''))
             ~ '/'
             ~ (_orm_restore_dump_name_resolved.stdout | trim)
           }}
-        orm_restore_dump_source: "CIFS DIRETO"
+        orm_restore_dump_source: "{{ orm_dump_storage_protocol_effective | upper }} DIRETO"
 
-    - name: Restore dump | Validar dump diretamente no CIFS
+    - name: Restore dump | Validar dump diretamente no storage compartilhado
       ansible.builtin.stat:
         path: "{{ orm_effective_dump_file }}"
         get_checksum: false
         get_mime: false
         get_attributes: false
-      register: _orm_restore_cifs_dump_stat
+      register: _orm_restore_shared_dump_stat
       become: true
       become_user: "{{ orm_os_user_effective }}"
 
-    - name: Restore dump | Confirmar dump válido no CIFS
+    - name: Restore dump | Confirmar dump válido no storage compartilhado
       ansible.builtin.assert:
         that:
-          - _orm_restore_cifs_dump_stat.stat.exists | default(false)
-          - _orm_restore_cifs_dump_stat.stat.isreg | default(false)
-          - _orm_restore_cifs_dump_stat.stat.size | default(0) | int > 0
+          - _orm_restore_shared_dump_stat.stat.exists | default(false)
+          - _orm_restore_shared_dump_stat.stat.isreg | default(false)
+          - _orm_restore_shared_dump_stat.stat.size | default(0) | int > 0
         fail_msg: >-
-          Dump não encontrado ou vazio no CIFS:
+          Dump não encontrado ou vazio no storage {{ orm_dump_storage_protocol_effective | upper }}:
           {{ orm_effective_dump_file }}.
 
   rescue:
 
-    - name: Restore dump | Registrar falha de resolução CIFS direta
+    - name: Restore dump | Registrar falha de resolução direta do storage compartilhado
       ansible.builtin.set_fact:
         orm_host_failed: true
-        orm_host_failed_task: "Resolver dump diretamente do CIFS"
+        orm_host_failed_task: "Resolver dump diretamente do storage compartilhado"
         orm_host_error_msg: >-
           {{
             ansible_failed_result.msg
             | default(
                 ansible_failed_result.stderr
-                | default('Falha ao resolver dump diretamente do CIFS.')
+                | default('Falha ao resolver dump diretamente do storage compartilhado.')
               )
           }}
 
 
-- name: Restore dump | Resolver dump local quando CIFS desabilitado
+- name: Restore dump | Resolver dump local quando storage compartilhado estiver desabilitado
   when:
     - orm_restore_storage_mode == 'local'
-    - not (orm_cifs_enabled | bool)
+    - not (orm_dump_storage_enabled_effective | bool)
     - not (orm_host_failed | bool)
   block:
 
