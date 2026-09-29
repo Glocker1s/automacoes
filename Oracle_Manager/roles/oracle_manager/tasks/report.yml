@@ -17,8 +17,8 @@
 - name: Report | Limpar artefatos locais dos destinos
   ansible.builtin.import_tasks: 87_cleanup_restore_artifacts.yml
 
-- name: Report | Limpar dump consumido do CIFS
-  ansible.builtin.import_tasks: 88_cleanup_cifs_dump.yml
+- name: Report | Limpar dump consumido do storage compartilhado
+  ansible.builtin.import_tasks: 88_cleanup_shared_dump.yml
 
 - name: Report | Limpar artefatos locais do backup
   ansible.builtin.import_tasks: 89_cleanup_local_sync_backup.yml
