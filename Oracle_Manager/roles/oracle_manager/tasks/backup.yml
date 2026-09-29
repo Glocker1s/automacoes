@@ -17,28 +17,53 @@
     orm_activity_started_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
     orm_activity_started_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
     orm_backup_dir: "{{ orm_backup_root_dir_effective | default(orm_profile_cfg.backup.root_dir | default(orm_backup_root_dir)) }}"
-    orm_backup_storage_mode: "{{ orm_profile_cfg.backup.storage_mode | default(orm_backup_storage_mode_default) | string | lower | trim }}"
+    orm_backup_storage_mode_raw: "{{ orm_profile_cfg.backup.storage_mode | default(orm_backup_storage_mode_default) | string | lower | trim }}"
     orm_backup_compression: "{{ orm_profile_cfg.backup.compression | default(orm_backup_compression_default) | string | upper }}"
     orm_backup_parallel: "{{ orm_profile_cfg.backup.parallel | default(orm_backup_parallel_default) | int }}"
     orm_backup_exclude: "{{ orm_profile_cfg.backup.exclude | default(orm_backup_exclude_default) }}"
     orm_backup_extra_args: "{{ orm_profile_cfg.backup.extra_args | default(orm_backup_extra_args_default) }}"
     orm_backup_validate_dump: "{{ orm_profile_cfg.backup.validate_dump | default(orm_backup_validate_dump_default) | bool }}"
     orm_datapump_log_directory_name_effective: "{{ orm_profile_cfg.oracle.log_directory_name | default(orm_default_log_directory_name) }}"
-    orm_cifs_data_dir_effective: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
-    orm_cifs_storage_mounted: false
-    orm_cifs_upload_failed: false
-    orm_cifs_upload_error: ""
+    orm_shared_storage_mounted: false
+    orm_storage_upload_failed: false
+    orm_storage_upload_error: ""
     orm_dump_size_bytes: 0
     orm_datapump_binary_required: "expdp"
     orm_require_existing_schemas: true
+
+- name: Backup | Normalizar modo e protocolo do storage
+  ansible.builtin.set_fact:
+    orm_backup_storage_mode: >-
+      {{ 'shared' if orm_backup_storage_mode_raw == 'cifs' else orm_backup_storage_mode_raw }}
+    orm_dump_storage_protocol_effective: >-
+      {{
+        hostvars[inventory_hostname].get(
+          'orm_dump_storage_protocol_effective',
+          orm_dump_storage_protocol | default('cifs')
+        )
+        | string | lower | trim
+      }}
+
+- name: Backup | Resolver storage compartilhado efetivo
+  ansible.builtin.set_fact:
+    orm_dump_storage_label_effective: >-
+      {{ orm_nfs_label if orm_dump_storage_protocol_effective == 'nfs' else orm_cifs_label }}
+    orm_dump_storage_enabled_effective: >-
+      {{
+        (orm_nfs_enabled | default(true) | bool)
+        if orm_dump_storage_protocol_effective == 'nfs'
+        else (orm_cifs_enabled | default(true) | bool)
+      }}
+    orm_dump_storage_data_dir_effective: >-
+      {{ orm_dump_storage_mount_dir ~ (orm_dump_storage_path | regex_replace('/$', '')) }}
 
 - name: Backup | Resolver paths da operação
   ansible.builtin.set_fact:
     orm_dump_file: >-
       {{
         (
-          orm_cifs_data_dir_effective
-          if orm_backup_storage_mode == 'cifs'
+          orm_dump_storage_data_dir_effective
+          if orm_backup_storage_mode == 'shared'
           else orm_backup_dir
         )
         ~ '/' ~ orm_dump_basename
@@ -51,8 +76,8 @@
     orm_latest_manifest_file: >-
       {{
         (
-          orm_cifs_data_dir_effective
-          if orm_backup_storage_mode == 'cifs'
+          orm_dump_storage_data_dir_effective
+          if orm_backup_storage_mode == 'shared'
           else orm_backup_dir
         )
         ~ '/' ~ orm_latest_manifest_name
@@ -60,13 +85,15 @@
     orm_dump_reference: >-
       {{
         (
-          orm_cifs_label
+          (orm_dump_storage_protocol_effective | upper)
           ~ ':'
-          ~ (orm_cifs_path | regex_replace('/$', ''))
+          ~ orm_dump_storage_label_effective
+          ~ ':'
+          ~ (orm_dump_storage_path | regex_replace('/$', ''))
           ~ '/'
           ~ orm_dump_basename
         )
-        if orm_cifs_enabled | bool
+        if orm_dump_storage_enabled_effective | bool
         else
         (
           orm_backup_dir
@@ -102,12 +129,13 @@
       ansible.builtin.assert:
         that:
           - orm_backup_parallel | int == 1
-          - orm_backup_storage_mode in ['local', 'cifs']
-          - (orm_backup_storage_mode != 'cifs') or (orm_cifs_enabled | bool)
+          - orm_backup_storage_mode in ['local', 'shared']
+          - orm_dump_storage_protocol_effective in ['cifs', 'nfs']
+          - (orm_backup_storage_mode != 'shared') or (orm_dump_storage_enabled_effective | bool)
         fail_msg: >-
-          Oracle Manager V1 exige backup.parallel=1 e backup.storage_mode
-          em local ou cifs. Para storage_mode=cifs,
-          orm_cifs_enabled deve estar habilitado.
+          Oracle Manager exige backup.parallel=1, backup.storage_mode em local ou shared
+          e orm_dump_storage_protocol em cifs ou nfs.
+          Para storage_mode=shared, o protocolo selecionado deve estar habilitado.
 
     - name: Backup | Validar tabelas solicitadas
       ansible.builtin.import_tasks: 42_validate_backup_tables.yml
@@ -143,6 +171,7 @@
           DIRECTORY dump: {{ orm_directory_name_effective }}
           DIRECTORY log: {{ orm_datapump_log_directory_name_effective }}
           Storage mode: {{ orm_backup_storage_mode }}
+          Storage protocol: {{ orm_dump_storage_protocol_effective | upper }}
           Root local: {{ orm_backup_dir }}
           Dump: {{ orm_dump_reference }}
           Motivo: {{ orm_execution_reason | default('') }}
@@ -154,16 +183,16 @@
           {% endif %}
       become: true
 
-    - name: Backup | Montar CIFS para gravação direta
-      ansible.builtin.import_tasks: 36_mount_cifs_storage.yml
-      when: orm_backup_storage_mode == 'cifs'
+    - name: Backup | Montar storage compartilhado para gravação direta
+      ansible.builtin.import_tasks: 36_mount_storage.yml
+      when: orm_backup_storage_mode == 'shared'
 
     - name: Backup | Definir path do Oracle DIRECTORY do dump
       ansible.builtin.set_fact:
         orm_directory_path_effective: >-
           {{
-            orm_cifs_data_dir_effective
-            if orm_backup_storage_mode == 'cifs'
+            orm_dump_storage_data_dir_effective
+            if orm_backup_storage_mode == 'shared'
             else orm_backup_dir
           }}
 
@@ -247,7 +276,7 @@
         - not (orm_host_failed | bool)
         - orm_backup_storage_mode == 'local'
 
-    - name: Backup | Criar manifesto latest diretamente no CIFS
+    - name: Backup | Criar manifesto latest diretamente no storage compartilhado
       ansible.builtin.shell: |
         set -euo pipefail
         printf '%s\n' "{{ orm_dump_basename }}" > "{{ orm_latest_manifest_file }}"
@@ -259,77 +288,39 @@
       changed_when: true
       when:
         - not (orm_host_failed | bool)
-        - orm_backup_storage_mode == 'cifs'
+        - orm_backup_storage_mode == 'shared'
 
-    - name: Backup | Publicar dump local no CIFS
+    - name: Backup | Publicar dump local no storage compartilhado
       when:
         - orm_backup_storage_mode == 'local'
-        - orm_cifs_enabled | bool
+        - orm_dump_storage_enabled_effective | bool
         - not (orm_host_failed | bool)
       block:
 
-        - name: Backup | Resolver endereço CIFS
-          ansible.builtin.set_fact:
-            _orm_cifs_server: "{{ (orm_cifs_addresses | default({})).get(orm_cifs_label | default('') | lower, '') }}"
+        - name: Backup | Montar storage compartilhado para publicação
+          ansible.builtin.import_tasks: 36_mount_storage.yml
 
-        - name: Backup | Validar endereço CIFS
-          ansible.builtin.fail:
-            msg: "CIFS não mapeado: orm_cifs_label={{ orm_cifs_label }}"
-          when: _orm_cifs_server | length == 0
-
-        - name: Backup | Criar diretório de montagem CIFS
-          ansible.builtin.file:
-            path: "{{ orm_cifs_mount_dir }}"
-            state: directory
-            mode: "0755"
-          become: true
-
-        - name: Backup | Criar arquivo temporário de senha CIFS
-          ansible.builtin.copy:
-            dest: "{{ orm_cifs_password_file }}"
-            content: "{{ ansible_password | default('') }}"
-            mode: "0600"
-          become: true
-          no_log: true
-
-        - name: Backup | Montar CIFS
+        - name: Backup | Copiar dump e manifesto para storage compartilhado
           ansible.builtin.shell: |
             set -euo pipefail
 
-            if mountpoint -q "{{ orm_cifs_mount_dir }}"; then
-              umount "{{ orm_cifs_mount_dir }}" || true
-            fi
-
-            mount -t cifs "{{ _orm_cifs_server }}" "{{ orm_cifs_mount_dir }}" \
-              -o username="{{ ansible_user }}",password="$(cat {{ orm_cifs_password_file }})",domain="{{ orm_cifs_domain }}",rw,vers="{{ orm_cifs_vers }}"
-          args:
-            executable: /bin/bash
-          become: true
-          no_log: true
-
-        - name: Backup | Copiar dump e manifesto para CIFS
-          ansible.builtin.shell: |
-            set -euo pipefail
-
-            DST="{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
-
+            DST="{{ orm_dump_storage_data_dir_effective }}"
             mkdir -p "$DST"
-
             cp -f "{{ orm_dump_file }}" "$DST/"
             cp -f "{{ orm_latest_manifest_file }}" "$DST/"
-
             sync
           args:
             executable: /bin/bash
           become: true
+          become_user: "{{ orm_os_user_effective }}"
 
       rescue:
 
-        - name: Backup | Registrar falha de publicação CIFS
+        - name: Backup | Registrar falha de publicação no storage compartilhado
           ansible.builtin.set_fact:
             orm_host_warning: true
-            orm_cifs_upload_failed: true
-            orm_cifs_upload_error: >-
+            orm_storage_upload_failed: true
+            orm_storage_upload_error: >-
               {{
                 ansible_failed_result.msg
                 | default(
@@ -337,32 +328,21 @@
                     | default(ansible_failed_result | to_json)
                   )
               }}
-            orm_host_failed: "{{ orm_fail_on_cifs_error | bool }}"
-            orm_host_failed_task: "Publicar dump no CIFS"
+            orm_host_failed: "{{ orm_fail_on_storage_error | default(false) | bool }}"
+            orm_host_failed_task: "Publicar dump no storage compartilhado"
             orm_host_error_msg: >-
               {{
                 ansible_failed_result.msg
                 | default(
                     ansible_failed_result.stderr
-                    | default('Falha ao publicar dump no CIFS.')
+                    | default('Falha ao publicar dump no storage compartilhado.')
                   )
               }}
 
       always:
 
-        - name: Backup | Desmontar CIFS de publicação
-          ansible.builtin.shell: "umount {{ orm_cifs_mount_dir }} || true"
-          become: true
-          changed_when: false
-          failed_when: false
-
-        - name: Backup | Remover senha temporária CIFS de publicação
-          ansible.builtin.file:
-            path: "{{ orm_cifs_password_file }}"
-            state: absent
-          become: true
-          failed_when: false
-          no_log: true
+        - name: Backup | Desmontar storage compartilhado de publicação
+          ansible.builtin.import_tasks: 37_unmount_storage.yml
 
   rescue:
 
@@ -384,9 +364,9 @@
 
   always:
 
-    - name: Backup | Desmontar CIFS usado pelo Data Pump
-      ansible.builtin.import_tasks: 37_unmount_cifs_storage.yml
-      when: orm_backup_storage_mode == 'cifs'
+    - name: Backup | Desmontar storage compartilhado usado pelo Data Pump
+      ansible.builtin.import_tasks: 37_unmount_storage.yml
+      when: orm_backup_storage_mode == 'shared'
 
     - name: Backup | Coletar trecho dos logs quando houver falha
       ansible.builtin.shell: |
@@ -487,6 +467,7 @@
           directory_name: "{{ orm_directory_name_effective | default(orm_directory_name | default('')) }}"
           root_dir: "{{ orm_backup_dir }}"
           storage_mode: "{{ orm_backup_storage_mode }}"
+          storage_protocol: "{{ orm_dump_storage_protocol_effective }}"
           dump: "{{ orm_dump_basename }}"
           dump_file: "{{ orm_dump_file }}"
           dump_reference: "{{ orm_dump_reference }}"
