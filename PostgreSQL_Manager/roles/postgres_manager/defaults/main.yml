@@ -1,238 +1,509 @@
 ---
-# Oracle Manager
+# ============================================================================
+# PostgreSQL Manager
+# ============================================================================
 # Ações aceitas: backup | restore | sync
+# backup  = executa pg_dump no ambiente de origem
+# restore = restaura um dump no(s) destino(s)
+# sync    = executa backup na origem e restore no(s) destino(s)
 
-orm_action: "backup"
-orm_profile_key: ""
-orm_execution_reason: ""
+pgm_action: "backup"
+pgm_database_key: ""
 
-# ESCOPO DA OPERAÇÃO
-
-# schema = backup/restore do schema completo
-# tables = backup/restore somente das tabelas informadas no Survey
-orm_scope: "schema"
-
-# Usado somente quando orm_scope=tables.
-# Aceita OWNER.TABELA separado por vírgula.
-orm_tables: ""
-
-# Usado somente no restore/sync com orm_scope=tables.
-# Valores aceitos: truncate | replace | skip
-orm_table_exists_action: "truncate"
-
+# ============================================================================
 # SELEÇÃO DE ORIGEM / DESTINO
+# ============================================================================
+# Quando vazio, a role usa os valores padrão definidos no arquivo do banco.
 
-orm_source_env: ""
-orm_source_host: ""             # aceita name ou ansible_host
-orm_target_envs: ""             # lista/comma-separated: tu, ti, th, fix
-orm_target_hosts: ""            # lista/comma-separated: nome ou ansible_host
-orm_restore_dump_name: "latest" # latest ou nome do .dmp
-orm_schemas: ""                 # vazio = usa schemas do profile
+pgm_source_env: ""
+pgm_source_host: ""          # aceita name ou ansible_host
+pgm_target_envs: ""          # lista de ambientes: tu, ti, th, fix
+pgm_target_hosts: ""         # lista de hosts: th-db-01,192.168.0.10
+pgm_restore_dump_name: "latest" # latest ou nome do diretório .dump.dir
 
+# ============================================================================
 # CONFIRMAÇÕES E SEGURANÇA
+# ============================================================================
 
-orm_confirm_restore: "nao"
-orm_confirm_multi_target_restore: "nao"
-orm_fail_job_on_error: true
+pgm_confirm_restore: "nao"              # restore/sync exigem sim
+pgm_confirm_multi_target_restore: "sim" # restore puro com mais de 1 target exige sim
+pgm_fail_job_on_error: true
 
+# ============================================================================
 # CONFIGURAÇÃO
+# ============================================================================
 
-orm_config_root: "{{ playbook_dir }}/config/oracle_manager"
-orm_databases_dir: "{{ orm_config_root }}/databases"
+pgm_config_root: "{{ playbook_dir }}/config/postgres_manager"
+pgm_databases_dir: "{{ pgm_config_root }}/databases"
 
-# ORACLE - DEFAULTS TÉCNICOS
+# ============================================================================
+# POSTGRESQL - DEFAULTS TÉCNICOS
+# ============================================================================
 
-orm_default_os_user: "oracle"
-orm_default_os_group: "oinstall"
-orm_default_sid: ""
-orm_default_pdb: ""
-orm_default_service_name: ""
-orm_default_oracle_home: ""
-orm_default_directory_name: "DB_MANAGER"
-orm_default_log_directory_name: "DB_MANAGER_LOG"
+pgm_pg_bin_path: "/usr/bin"
+pgm_default_port: 5432
+pgm_default_db_host: "127.0.0.1"
+pgm_default_os_user: "postgres"
+pgm_default_db_user: "{{ databases_username }}"
+pgm_default_jobs: 8
+pgm_db_password: "{{ databases_password }}"
 
+# ============================================================================
 # DIRETÓRIOS
+# ============================================================================
 
-orm_backup_root_dir: "/backup/oracle_manager"
-orm_restore_root_dir: "/backup/oracle_manager_restore"
-orm_controller_tmp_dir: "/tmp/oracle-manager-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+pgm_backup_root_dir: "/backup/postgres_manager"
+pgm_restore_root_dir: "/backup/postgres_manager_restore"
+pgm_controller_tmp_dir: "/tmp/postgres-manager-{{ tower_job_id | default(awx_job_id | default('local')) }}"
 
+# ============================================================================
 # INVENTÁRIO DINÂMICO / CONECTIVIDADE
+# ============================================================================
 
-orm_ssh_port: 22
-orm_wait_timeout: 5
-orm_probe_ssh_enabled: true
-orm_fail_on_unreachable: true
+pgm_ssh_port: 22
+pgm_wait_timeout: 5
 
-# DATA PUMP - BACKUP
+# Testa SSH antes de adicionar/executar hosts do plano.
+pgm_probe_ssh_enabled: true
 
-orm_backup_compression_default: "none"
-orm_backup_parallel_default: 1
-orm_backup_exclude_default:
-  - "STATISTICS"
-orm_backup_extra_args_default: ""
-orm_backup_validate_dump_default: true
-orm_backup_storage_mode_default: "local"
+# Teste adicional da porta PostgreSQL.
+# Mantido desligado por padrão.
+pgm_probe_postgres_enabled: false
 
-# DATA PUMP - RESTORE
+# Falha o planejamento quando algum host necessário estiver inacessível.
+pgm_fail_on_unreachable: true
 
-orm_restore_parallel_default: 1
-orm_restore_extra_args_default: ""
-orm_restore_capture_grants_default: true
-orm_restore_apply_grants_default: true
-orm_restore_kill_sessions_default: true
-orm_restore_lock_users_default: true
-orm_restore_drop_users_default: true
-orm_restore_unlock_users_default: true
-orm_restore_fail_on_grant_error_default: false
-orm_restore_require_password_default: true
-orm_restore_session_wait_retries_default: 12
-orm_restore_session_wait_delay_default: 5
-orm_restore_validate_schemas_default: true
-orm_restore_validate_invalid_objects_default: true
-orm_restore_fail_on_invalid_objects_default: false
-orm_restore_storage_mode_default: "local"
+# ============================================================================
+# RESTORE - DEFAULTS GERAIS
+# ============================================================================
 
-# MASKING / MASCARAMENTO
+# Estratégia padrão.
+# Modos aceitos: promote | drop_in_place | restore_only
+pgm_restore_mode: "promote"
 
-orm_masking_enabled_default: false
-orm_masking_fail_on_error_default: true
-orm_masking_run_on_envs_default: []
-orm_masking_protected_envs_default:
-  - "prd"
-orm_masking_run_on_scopes_default:
-  - "schema"
+# Nomes auxiliares usados pelos modos de restore.
+pgm_restore_temp_suffix: "_restoring"
+pgm_restore_old_suffix: "_old"
 
-#ALTER USER
+# Sufixo da database criada pelo modo restore_only.
+# Ex.: corePaqueta -> corePaqueta_new
+pgm_restore_only_suffix: "_new"
 
-# Senha de restore/sync recebida em runtime
-orm_restore_password_default_var: "orm_password"
-orm_restore_password_env_vars: {}
+# Evita trazer owner e ACLs do ambiente de origem.
+pgm_restore_no_owner: true
+pgm_restore_no_privileges: true
 
-# Política padrão da senha
-orm_restore_password_min_length: 6
-orm_restore_password_require_upper: false
-orm_restore_password_require_lower: false
-orm_restore_password_require_digit: false
-
-# Segurança: por padrão não aplica uma única senha a vários schemas
-orm_restore_password_allow_multi_schema: false
-
-# STORAGE COMPARTILHADO DOS DUMPS
-# orm_dump_storage_protocol é informado pelo Survey: cifs | nfs.
-# storage_mode do profile controla somente o modo de uso:
-# local = Data Pump local + cópia para o storage compartilhado
-# shared = Data Pump acessa o storage compartilhado diretamente
-# O valor legado cifs em storage_mode continua aceito como alias de shared.
-
-orm_dump_storage_protocol: "cifs"
-orm_dump_storage_path: "/Ansible/oracle_manager"
-orm_dump_storage_mount_dir: "/opt/ansiblefiles/oracle_manager"
-
-# CIFS dos dumps e também do fluxo de anexos/e-mail.
-orm_cifs_enabled: true
-orm_cifs_label: "producao"
-orm_cifs_addresses:
-  tutihofix: "//192.168.0.247/certs"
-  producao: "//192.168.0.149/certs"
-orm_cifs_workgroup: "agorasenior.corp"
-orm_cifs_domain: "{{ orm_cifs_workgroup }}"
-orm_cifs_vers: "3.0"
-orm_cifs_password_file: "/tmp/.oracle-manager-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
-
-# NFS usado somente pelos dumps/manifesto quando selecionado no Survey.
-orm_nfs_enabled: true
-orm_nfs_label: "producao"
-orm_nfs_addresses:
-  tutihofix: "st-dump.mca.corp:/dump"
-  producao: "st-dump.mca.corp:/dump"
-orm_nfs_mount_options: "rw"
-
-orm_fail_on_storage_error: false
-
-# Diretório usado exclusivamente pelos anexos do relatório/e-mail.
-orm_cifs_attachment_path: "/Ansible/mail_attachments"
-# Host que possui smbclient e realiza a publicação dos anexos.
-orm_cifs_delegate_host: "192.168.0.149"
-
-# CLEANUP
+# Preservação/reaplicação das permissões atuais do destino.
+pgm_preserve_target_grants: true
+pgm_apply_target_grants: true
+pgm_fail_on_grant_apply_error: false
 
 # Remove os artefatos locais dos hosts destino após restore/sync,
 # independentemente do resultado da execução.
-orm_cleanup_restore_artifacts: false
+pgm_cleanup_restore_artifacts: true
 
-# Remove do storage compartilhado o dump consumido após restore/sync concluído com sucesso.
-orm_cleanup_shared_dump_after_restore: false
+# Mantido por compatibilidade até confirmação de uso no restante da role.
+pgm_keep_remote_logs: false
 
-# Remove da origem os artefatos do backup criado pelo sync após conclusão com sucesso.
-# Backup puro continua mantendo os artefatos localmente.
-orm_cleanup_local_backup_after_sync: false
+# ============================================================================
+# CONNECTION CONTROL
+# ============================================================================
+# Controle de conexões durante o cutover.
+# Desabilitado por padrão para não alterar profiles antigos automaticamente.
 
-# REPORT
+pgm_connection_control_enabled_default: false
 
-orm_report_timezone: "America/Sao_Paulo"
-orm_report_title: "Oracle Manager"
-orm_report_subject_prefix: "Ansible-Report"
-orm_report_max_error_chars: 12000
-ansible_url: ""
+# Quando habilitado, impede novas conexões na database atual antes do promote.
+pgm_connection_control_block_new_connections_default: true
 
-# DEFAULTS DE PROFILE
+# Encerra sessões já conectadas antes da troca das databases.
+pgm_connection_control_terminate_sessions_default: true
 
-orm_profile_defaults:
+# Mantém a database _old bloqueada após o promote.
+pgm_connection_control_keep_old_blocked_default: true
+
+# ============================================================================
+# DATABASE CREATE
+# ============================================================================
+# Controla como a database _restoring é criada.
+
+# Quando true, herda propriedades da database atual do ambiente destino.
+pgm_database_create_inherit_from_current_default: false
+
+# Compara as propriedades da database criada com a database atual.
+pgm_database_create_validate_inheritance_default: true
+
+# ============================================================================
+# MASKING
+# ============================================================================
+# Por padrão fica desligado e só executa quando habilitado no profile do banco.
+
+pgm_masking_enabled_default: false
+
+# Falha de masking impede o promote quando a feature estiver habilitada.
+pgm_masking_fail_on_error_default: true
+
+# Ambientes protegidos contra execução de masking.
+pgm_masking_protected_envs_default:
+  - "prd"
+
+# Diretório temporário utilizado para os scripts SQL de masking.
+pgm_masking_remote_dir: "{{ pgm_restore_root_dir }}/masking_{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# Remove scripts temporários após a execução.
+pgm_masking_cleanup_remote_files: true
+
+# ============================================================================
+# PRESERVE DATA
+# ============================================================================
+# Preserva dados específicos do ambiente destino antes do promote.
+
+pgm_preserve_data_enabled_default: false
+
+# Falha durante captura/truncate/restore dos dados preservados impede promote.
+pgm_preserve_data_fail_on_error_default: true
+
+# Diretório temporário utilizado pelos dumps de preserve_data.
+pgm_preserve_data_remote_dir: "{{ pgm_restore_dir_root | default(pgm_restore_root_dir) }}/preserve_data_{{ pgm_job_id | default(tower_job_id | default(awx_job_id | default('local'))) }}"
+
+# Remove dumps temporários de preserve_data ao final.
+pgm_preserve_data_cleanup_remote_files: true
+
+# ============================================================================
+# POST RESTORE
+# ============================================================================
+# Truncates declarativos executados após o restore principal.
+
+pgm_post_restore_truncate_enabled_default: false
+
+# Falha em truncate pós-restore impede promote.
+pgm_post_restore_truncate_fail_on_error_default: true
+
+# ============================================================================
+# MANUTENÇÃO PÓS-RESTORE
+# ============================================================================
+# Substitui o antigo restore.vacuum_analyze.
+#
+# Modos previstos:
+# none | analyze | vacuum_analyze
+#
+# Mantemos vacuum_analyze como default para preservar o comportamento
+# histórico de profiles que ainda não definem explicitamente maintenance.
+
+pgm_maintenance_enabled_default: true
+pgm_maintenance_mode_default: "vacuum_analyze"
+
+# ============================================================================
+# CIFS
+# ============================================================================
+# Usado para transferência dos dumps e publicação dos anexos do relatório.
+# É configuração operacional da role, não uma regra específica de database.
+
+pgm_cifs_enabled: true
+pgm_cifs_label: "producao"
+
+# Diretório remoto principal da automação.
+pgm_cifs_path: "/Ansible/postgres_manager"
+
+# Diretório onde dumps são armazenados.
+pgm_cifs_dump_path: "{{ pgm_cifs_path }}"
+
+# Diretório usado pelo fluxo genérico de anexos/e-mail.
+pgm_cifs_attachment_path: "/Ansible/mail_attachments"
+
+# Mount temporário no host que acessa o compartilhamento.
+pgm_cifs_mount_dir: "/tmp/postgres-manager-cifs"
+
+# Arquivo temporário de senha utilizado no mount/smbclient.
+pgm_cifs_password_file: "/tmp/.postgres-manager-cifs-pass-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+pgm_cifs_workgroup: "WORKGROUP"
+pgm_cifs_domain: "{{ pgm_cifs_workgroup }}"
+pgm_cifs_vers: "3.0"
+
+# Compartilhamentos disponíveis.
+pgm_cifs_address:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.149/certs"
+
+# Mantido até confirmação de uso em todos os fluxos CIFS.
+pgm_fail_on_cifs_error: false
+
+# ============================================================================
+# COMPATIBILIDADE COM FLUXO GENÉRICO DE E-MAIL
+# ============================================================================
+
+send_mail_cifs: "{{ pgm_cifs_label }}"
+send_mail_cifs_path: "{{ pgm_cifs_attachment_path }}"
+send_mail_cifs_address: "{{ pgm_cifs_address }}"
+cifs_workgroup: "{{ pgm_cifs_workgroup }}"
+
+# Remove do CIFS o dump consumido após restore/sync concluído com sucesso.
+# Backup puro mantém dump, log e latest publicados no CIFS.
+pgm_cleanup_cifs_dump_after_restore: true
+
+# Remove da origem o dump criado pelo sync após conclusão com sucesso.
+# Backup puro continua mantendo dump, log e latest localmente.
+pgm_cleanup_local_backup_after_sync: true
+
+# ============================================================================
+# RELATÓRIO
+# ============================================================================
+
+pgm_report_timezone: "America/Sao_Paulo"
+pgm_report_title: "PostgreSQL Manager"
+pgm_report_subject_prefix: "Ansible-Report"
+ansible_url: "https://ansible.hml.mca.corp"
+
+# ============================================================================
+# DEFAULTS DOS PROFILES DE DATABASE
+# ============================================================================
+# Este bloco representa a estrutura base de qualquer arquivo localizado em:
+#
+#   config/postgres_manager/databases/
+#
+# O profile específico do banco sobrescreve esses valores e o resultado
+# consolidado é publicado em pgm_db_cfg.
+# ============================================================================
+
+pgm_database_defaults:
+
+  # --------------------------------------------------------------------------
+  # IDENTIFICAÇÃO
+  # --------------------------------------------------------------------------
+
   description: ""
-  schemas: []
+  database_name: ""
+
+  # Ambiente padrão de origem.
   default_source_env: "prd"
+
+  # Destinos padrão da ação sync.
   default_sync_targets: []
+
+  # Destinos padrão do restore puro.
   default_restore_targets: []
 
-  oracle:
-    os_user: "{{ orm_default_os_user }}"
-    os_group: "{{ orm_default_os_group }}"
-    sid: "{{ orm_default_sid }}"
-    pdb: "{{ orm_default_pdb }}"
-    service_name: "{{ orm_default_service_name }}"
-    oracle_home: "{{ orm_default_oracle_home }}"
-    directory_name: "{{ orm_default_directory_name }}"
-    log_directory_name: "{{ orm_default_log_directory_name }}"
+  # --------------------------------------------------------------------------
+  # BACKUP
+  # --------------------------------------------------------------------------
 
   backup:
-    root_dir: "{{ orm_backup_root_dir }}"
-    compression: "{{ orm_backup_compression_default }}"
-    parallel: "{{ orm_backup_parallel_default }}"
-    exclude: "{{ orm_backup_exclude_default }}"
-    extra_args: "{{ orm_backup_extra_args_default }}"
-    validate_dump: "{{ orm_backup_validate_dump_default }}"
-    storage_mode: "{{ orm_backup_storage_mode_default }}"
+
+    # Diretório onde o dump será criado na origem.
+    root_dir: "{{ pgm_backup_root_dir }}"
+
+    # Paralelismo padrão.
+    jobs: "{{ pgm_default_jobs }}"
+
+    # Formato atualmente homologado pela automação.
+    format: "directory"
+
+    # Argumentos adicionais opcionais.
+    extra_args: ""
+
+    # Executa validação do dump depois do pg_dump.
+    validate_dump: true
+
+  # --------------------------------------------------------------------------
+  # RESTORE
+  # --------------------------------------------------------------------------
 
   restore:
-    root_dir: "{{ orm_restore_root_dir }}"
-    parallel: "{{ orm_restore_parallel_default }}"
-    extra_args: "{{ orm_restore_extra_args_default }}"
-    capture_grants: "{{ orm_restore_capture_grants_default }}"
-    apply_grants: "{{ orm_restore_apply_grants_default }}"
-    kill_sessions: "{{ orm_restore_kill_sessions_default }}"
-    lock_users: "{{ orm_restore_lock_users_default }}"
-    drop_users: "{{ orm_restore_drop_users_default }}"
-    unlock_users: "{{ orm_restore_unlock_users_default }}"
-    fail_on_grant_error: "{{ orm_restore_fail_on_grant_error_default }}"
-    require_password: "{{ orm_restore_require_password_default }}"
-    session_wait_retries: "{{ orm_restore_session_wait_retries_default }}"
-    session_wait_delay: "{{ orm_restore_session_wait_delay_default }}"
-    validate_schemas: "{{ orm_restore_validate_schemas_default }}"
-    validate_invalid_objects: "{{ orm_restore_validate_invalid_objects_default }}"
-    fail_on_invalid_objects: "{{ orm_restore_fail_on_invalid_objects_default }}"
-    storage_mode: "{{ orm_restore_storage_mode_default }}"
+
+    # Estratégia utilizada para restauração.
+    mode: "{{ pgm_restore_mode }}"
+
+    # Nome temporário criado no modo promote.
+    target_temp_suffix: "{{ pgm_restore_temp_suffix }}"
+
+    # Nome usado para preservar a database anterior.
+    old_suffix: "{{ pgm_restore_old_suffix }}"
+
+    # Nome da database criada no modo restore_only.
+    # A database atual permanece ativa e não é renomeada pela automação.
+    restore_only_suffix: "{{ pgm_restore_only_suffix }}"
+
+    # Não restaura ownership da origem.
+    no_owner: "{{ pgm_restore_no_owner }}"
+
+    # Não restaura ACLs da origem.
+    no_privileges: "{{ pgm_restore_no_privileges }}"
+
+    # Paralelismo padrão do pg_restore.
+    jobs: "{{ pgm_default_jobs }}"
+
+    # Argumentos adicionais opcionais.
+    extra_args: ""
+
+    # Itens excluídos da lista do pg_restore.
+    # User Mapping é tratado separadamente pela etapa DBLink.
+    exclude_toc_patterns:
+      - "USER MAPPING"
+
+  # --------------------------------------------------------------------------
+  # DATABASE CREATE
+  # --------------------------------------------------------------------------
+
+  database_create:
+
+    # Quando true, a database criada para restore (_restoring/_new) herda propriedades da database atual:
+    # owner, encoding, locale, tablespace e connection limit.
+    inherit_from_current: "{{ pgm_database_create_inherit_from_current_default }}"
+
+    # Compara as propriedades após a criação.
+    validate_inheritance: "{{ pgm_database_create_validate_inheritance_default }}"
+
+  # --------------------------------------------------------------------------
+  # GRANTS
+  # --------------------------------------------------------------------------
+
+  grants:
+
+    # Captura permissões atuais do destino antes do restore.
+    capture_before_restore: "{{ pgm_preserve_target_grants }}"
+
+    # Reaplica as permissões capturadas na database restaurada.
+    apply_after_restore: "{{ pgm_apply_target_grants }}"
+
+    # Define se erro ao reaplicar grants deve impedir o promote.
+    fail_on_apply_error: "{{ pgm_fail_on_grant_apply_error }}"
+
+  # --------------------------------------------------------------------------
+  # PRESERVE DATA
+  # --------------------------------------------------------------------------
+
+  preserve_data:
+
+    # Feature desligada por padrão.
+    enabled: "{{ pgm_preserve_data_enabled_default }}"
+
+    # Quando habilitada, erro impede promote por padrão.
+    fail_on_error: "{{ pgm_preserve_data_fail_on_error_default }}"
+
+    # Ambientes onde a preservação poderá executar.
+    run_on_envs: []
+
+    # Grupos declarativos de tabelas.
+    groups: []
+
+  # --------------------------------------------------------------------------
+  # POST RESTORE
+  # --------------------------------------------------------------------------
+
+  post_restore:
+
+    # Truncates desligados por padrão.
+    truncate_enabled: "{{ pgm_post_restore_truncate_enabled_default }}"
+
+    # Erro impede promote por padrão.
+    fail_on_error: "{{ pgm_post_restore_truncate_fail_on_error_default }}"
+
+    # Ambientes onde os truncates poderão executar.
+    run_on_envs: []
+
+    # Grupos declarativos de truncate.
+    truncate_groups: []
+
+  # --------------------------------------------------------------------------
+  # DBLINK / FOREIGN SERVERS
+  # --------------------------------------------------------------------------
+
+  dblink:
+
+    # Feature desligada por padrão.
+    enabled: false
+
+    # Foreign Servers declarados para a database.
+    servers: []
+
+    # User Mappings recriados após o restore.
+    user_mappings: []
+
+    # Conexões dblink nomeadas usadas por SQL/MVs.
+    connections: []
+
+  # --------------------------------------------------------------------------
+  # MASKING
+  # --------------------------------------------------------------------------
 
   masking:
-    enabled: "{{ orm_masking_enabled_default }}"
-    fail_on_error: "{{ orm_masking_fail_on_error_default }}"
-    run_on_envs: "{{ orm_masking_run_on_envs_default }}"
-    protected_envs: "{{ orm_masking_protected_envs_default }}"
-    run_on_scopes: "{{ orm_masking_run_on_scopes_default }}"
+
+    # Feature desligada por padrão.
+    enabled: "{{ pgm_masking_enabled_default }}"
+
+    # Erro de masking impede promote por padrão.
+    fail_on_error: "{{ pgm_masking_fail_on_error_default }}"
+
+    # Ambientes onde masking poderá executar.
+    run_on_envs: []
+
+    # Ambientes nos quais masking nunca deve executar.
+    protected_envs: "{{ pgm_masking_protected_envs_default }}"
+
+    # Scripts/funções de masking.
     scripts: []
 
-  users: {}
+  # --------------------------------------------------------------------------
+  # MATERIALIZED VIEWS
+  # --------------------------------------------------------------------------
+
+  materialized_views:
+
+    # Refresh desligado por padrão.
+    refresh_enabled: false
+
+    # true atualiza todas; false utiliza apenas items.
+    refresh_all: false
+
+    # Lista explícita das MVs.
+    items: []
+
+  # --------------------------------------------------------------------------
+  # MANUTENÇÃO
+  # --------------------------------------------------------------------------
+
+  maintenance:
+
+    # Habilita manutenção pós-restore.
+    enabled: "{{ pgm_maintenance_enabled_default }}"
+
+    # none | analyze | vacuum_analyze
+    mode: "{{ pgm_maintenance_mode_default }}"
+
+  # --------------------------------------------------------------------------
+  # CONNECTION CONTROL
+  # --------------------------------------------------------------------------
+
+  connection_control:
+
+    # Desligado por padrão para compatibilidade com profiles antigos.
+    enabled: "{{ pgm_connection_control_enabled_default }}"
+
+    # Bloqueia novas conexões antes do promote.
+    block_new_connections: "{{ pgm_connection_control_block_new_connections_default }}"
+
+    # Encerra sessões existentes.
+    terminate_sessions: "{{ pgm_connection_control_terminate_sessions_default }}"
+
+    # Mantém a database antiga bloqueada depois do promote.
+    keep_old_blocked: "{{ pgm_connection_control_keep_old_blocked_default }}"
+
+  # --------------------------------------------------------------------------
+  # VALIDAÇÕES
+  # --------------------------------------------------------------------------
+
   validations:
+
+    # Queries adicionais desligadas por padrão.
     enabled: false
+
+    # Arquivos SQL executados depois do restore/promote.
     queries: []
+
+  # --------------------------------------------------------------------------
+  # HOSTS / AMBIENTES
+  # --------------------------------------------------------------------------
+
+  # Inventário lógico do banco por ambiente.
   hosts_env_sync: {}
