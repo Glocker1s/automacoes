@@ -47,6 +47,7 @@
           'dump': summary.get('dump', ''),
           'dump_file': summary.get('dump_file', ''),
           'dump_source': summary.get('dump_source', ''),
+          'storage_protocol': summary.get('storage_protocol', hv.orm_dump_storage_protocol_effective | default(orm_dump_storage_protocol_normalized | default(orm_dump_storage_protocol | default('cifs')))),
           'dump_size_bytes': summary.get('dump_size_bytes', 0),
           'root_dir': summary.get('root_dir', ''),
           'database_state': summary.get('database_state', ''),
@@ -94,7 +95,7 @@
         (orm_report_warning_count | int > 0)
         or (orm_report_artifact_warning | default(false) | bool)
         or (orm_cifs_report_upload_failed | default(false) | bool)
-        or (orm_cifs_cleanup_failed | default(false) | bool)
+        or (orm_storage_cleanup_failed | default(false) | bool)
         or (orm_local_cleanup_failed | default(false) | bool)
         or (orm_restore_cleanup_failed | default(false) | bool)
       }}
