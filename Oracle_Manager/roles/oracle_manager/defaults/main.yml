@@ -1,32 +1,26 @@
 ---
-# ============================================================================
 # Oracle Manager
-# ============================================================================
 # Ações aceitas: backup | restore | sync
 
 orm_action: "backup"
 orm_profile_key: ""
 orm_execution_reason: ""
 
-# ============================================================================
 # ESCOPO DA OPERAÇÃO
-# ============================================================================
 
 # schema = backup/restore do schema completo
 # tables = backup/restore somente das tabelas informadas no Survey
 orm_scope: "schema"
 
 # Usado somente quando orm_scope=tables.
-# Aceita OWNER.TABELA separado por vírgula ou quebra de linha.
+# Aceita OWNER.TABELA separado por vírgula.
 orm_tables: ""
 
 # Usado somente no restore/sync com orm_scope=tables.
 # Valores aceitos: truncate | replace | skip
 orm_table_exists_action: "truncate"
 
-# ============================================================================
 # SELEÇÃO DE ORIGEM / DESTINO
-# ============================================================================
 
 orm_source_env: ""
 orm_source_host: ""             # aceita name ou ansible_host
@@ -35,24 +29,18 @@ orm_target_hosts: ""            # lista/comma-separated: nome ou ansible_host
 orm_restore_dump_name: "latest" # latest ou nome do .dmp
 orm_schemas: ""                 # vazio = usa schemas do profile
 
-# ============================================================================
 # CONFIRMAÇÕES E SEGURANÇA
-# ============================================================================
 
 orm_confirm_restore: "nao"
 orm_confirm_multi_target_restore: "nao"
 orm_fail_job_on_error: true
 
-# ============================================================================
 # CONFIGURAÇÃO
-# ============================================================================
 
 orm_config_root: "{{ playbook_dir }}/config/oracle_manager"
 orm_databases_dir: "{{ orm_config_root }}/databases"
 
-# ============================================================================
 # ORACLE - DEFAULTS TÉCNICOS
-# ============================================================================
 
 orm_default_os_user: "oracle"
 orm_default_os_group: "oinstall"
@@ -61,31 +49,22 @@ orm_default_pdb: ""
 orm_default_service_name: ""
 orm_default_oracle_home: ""
 orm_default_directory_name: "DB_MANAGER"
-
 orm_default_log_directory_name: "DB_MANAGER_LOG"
 
-# ============================================================================
 # DIRETÓRIOS
-# ============================================================================
 
 orm_backup_root_dir: "/backup/oracle_manager"
 orm_restore_root_dir: "/backup/oracle_manager_restore"
 orm_controller_tmp_dir: "/tmp/oracle-manager-{{ tower_job_id | default(awx_job_id | default('local')) }}"
 
-# ============================================================================
 # INVENTÁRIO DINÂMICO / CONECTIVIDADE
-# ============================================================================
 
 orm_ssh_port: 22
 orm_wait_timeout: 5
 orm_probe_ssh_enabled: true
 orm_fail_on_unreachable: true
 
-# ============================================================================
 # DATA PUMP - BACKUP
-# ============================================================================
-# V1 trabalha com um único arquivo .dmp; por isso parallel=1.
-# Quando evoluirmos para dump set (%U), poderemos liberar parallel > 1.
 
 orm_backup_compression_default: "none"
 orm_backup_parallel_default: 1
@@ -93,12 +72,9 @@ orm_backup_exclude_default:
   - "STATISTICS"
 orm_backup_extra_args_default: ""
 orm_backup_validate_dump_default: true
-
 orm_backup_storage_mode_default: "local"
 
-# ============================================================================
 # DATA PUMP - RESTORE
-# ============================================================================
 
 orm_restore_parallel_default: 1
 orm_restore_extra_args_default: ""
@@ -115,12 +91,9 @@ orm_restore_session_wait_delay_default: 5
 orm_restore_validate_schemas_default: true
 orm_restore_validate_invalid_objects_default: true
 orm_restore_fail_on_invalid_objects_default: false
-
 orm_restore_storage_mode_default: "local"
 
-# ============================================================================
 # MASKING / MASCARAMENTO
-# ============================================================================
 
 orm_masking_enabled_default: false
 orm_masking_fail_on_error_default: true
@@ -130,55 +103,6 @@ orm_masking_protected_envs_default:
 orm_masking_run_on_scopes_default:
   - "schema"
 
-# ============================================================================
-# CIFS - usado somente para dump/manifesto
-# ============================================================================
-
-orm_cifs_enabled: true
-orm_cifs_label: "producao"
-# Diretório usado pelos dumps do Oracle Manager.
-orm_cifs_path: "/Ansible/oracle_manager"
-
-# Diretório usado exclusivamente pelos anexos do relatório/e-mail.
-orm_cifs_attachment_path: "/Ansible/mail_attachments"
-orm_cifs_mount_dir: "/opt/ansiblefiles/oracle_manager"
-orm_cifs_addresses:
-  tutihofix: "//192.168.0.247/certs"
-  producao: "//192.168.0.149/certs"
-orm_cifs_workgroup: "agorasenior.corp"
-orm_cifs_domain: "{{ orm_cifs_workgroup }}"
-orm_cifs_vers: "3.0"
-orm_cifs_password_file: "/tmp/.oracle-manager-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
-orm_fail_on_cifs_error: false
-# Host que possui smbclient e realiza a publicação dos anexos.
-# No lab, utilizar o mesmo host executor do fluxo de e-mail.
-orm_cifs_delegate_host: "192.168.0.149"
-# ============================================================================
-# CLEANUP
-# ============================================================================
-
-# Remove os artefatos locais dos hosts destino após restore/sync,
-# independentemente do resultado da execução.
-orm_cleanup_restore_artifacts: false
-
-# Remove do CIFS o dump consumido após restore/sync concluído com sucesso.
-# Backup puro mantém dump, log e latest publicados no CIFS.
-orm_cleanup_cifs_dump_after_restore: false
-
-# Remove os artefatos locais do backup após a coleta/publicação dos anexos.
-# Aplica-se ao backup puro e também à origem de um sync.
-orm_cleanup_local_backup_after_sync: false
-
-# ============================================================================
-# REPORT
-# ============================================================================
-
-orm_report_timezone: "America/Sao_Paulo"
-orm_report_title: "Oracle Manager"
-orm_report_subject_prefix: "Ansible-Report"
-orm_report_max_error_chars: 12000
-ansible_url: ""
-
 #ALTER USER
 
 # Senha de restore/sync recebida em runtime
@@ -186,18 +110,73 @@ orm_restore_password_default_var: "orm_password"
 orm_restore_password_env_vars: {}
 
 # Política padrão da senha
-orm_restore_password_min_length: 12
-orm_restore_password_require_upper: true
-orm_restore_password_require_lower: true
-orm_restore_password_require_digit: true
+orm_restore_password_min_length: 6
+orm_restore_password_require_upper: false
+orm_restore_password_require_lower: false
+orm_restore_password_require_digit: false
 
 # Segurança: por padrão não aplica uma única senha a vários schemas
 orm_restore_password_allow_multi_schema: false
 
+# STORAGE COMPARTILHADO DOS DUMPS
+# orm_dump_storage_protocol é informado pelo Survey: cifs | nfs.
+# storage_mode do profile controla somente o modo de uso:
+# local = Data Pump local + cópia para o storage compartilhado
+# shared = Data Pump acessa o storage compartilhado diretamente
+# O valor legado cifs em storage_mode continua aceito como alias de shared.
 
-# ============================================================================
+orm_dump_storage_protocol: "cifs"
+orm_dump_storage_path: "/Ansible/oracle_manager"
+orm_dump_storage_mount_dir: "/opt/ansiblefiles/oracle_manager"
+
+# CIFS dos dumps e também do fluxo de anexos/e-mail.
+orm_cifs_enabled: true
+orm_cifs_label: "producao"
+orm_cifs_addresses:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.149/certs"
+orm_cifs_workgroup: "agorasenior.corp"
+orm_cifs_domain: "{{ orm_cifs_workgroup }}"
+orm_cifs_vers: "3.0"
+orm_cifs_password_file: "/tmp/.oracle-manager-cifs-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# NFS usado somente pelos dumps/manifesto quando selecionado no Survey.
+orm_nfs_enabled: true
+orm_nfs_label: "producao"
+orm_nfs_addresses:
+  tutihofix: "st-dump.mca.corp:/dump"
+  producao: "st-dump.mca.corp:/dump"
+orm_nfs_mount_options: "rw"
+
+orm_fail_on_storage_error: false
+
+# Diretório usado exclusivamente pelos anexos do relatório/e-mail.
+orm_cifs_attachment_path: "/Ansible/mail_attachments"
+# Host que possui smbclient e realiza a publicação dos anexos.
+orm_cifs_delegate_host: "192.168.0.149"
+
+# CLEANUP
+
+# Remove os artefatos locais dos hosts destino após restore/sync,
+# independentemente do resultado da execução.
+orm_cleanup_restore_artifacts: false
+
+# Remove do storage compartilhado o dump consumido após restore/sync concluído com sucesso.
+orm_cleanup_shared_dump_after_restore: false
+
+# Remove da origem os artefatos do backup criado pelo sync após conclusão com sucesso.
+# Backup puro continua mantendo os artefatos localmente.
+orm_cleanup_local_backup_after_sync: false
+
+# REPORT
+
+orm_report_timezone: "America/Sao_Paulo"
+orm_report_title: "Oracle Manager"
+orm_report_subject_prefix: "Ansible-Report"
+orm_report_max_error_chars: 12000
+ansible_url: ""
+
 # DEFAULTS DE PROFILE
-# ============================================================================
 
 orm_profile_defaults:
   description: ""
