@@ -74,6 +74,7 @@
     orm_action_normalized: "{{ orm_action_normalized }}"
     orm_restore_dump_name: "{{ orm_restore_dump_name }}"
     orm_execution_reason: "{{ orm_execution_reason | default('') }}"
+    orm_dump_storage_protocol_effective: "{{ orm_dump_storage_protocol_normalized }}"
   loop: "{{ orm_source_candidates }}"
   loop_control:
     label: "{{ item.name }}"
@@ -115,6 +116,7 @@
     orm_action_normalized: "{{ orm_action_normalized }}"
     orm_restore_dump_name: "{{ orm_restore_dump_name }}"
     orm_execution_reason: "{{ orm_execution_reason | default('') }}"
+    orm_dump_storage_protocol_effective: "{{ orm_dump_storage_protocol_normalized }}"
   loop: "{{ orm_target_candidates }}"
   loop_control:
     label: "{{ item.name }}"
