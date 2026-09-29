@@ -75,15 +75,15 @@
     - _orm_local_cleanup_action in ['backup', 'sync']
     - orm_report_artifact_warning | default(false) | bool
 
-- name: Local cleanup | Informar retenção por falha no cleanup CIFS
+- name: Local cleanup | Informar retenção por falha no cleanup do storage compartilhado
   ansible.builtin.debug:
     msg: >-
       Artefatos locais do backup mantidos porque
-      o cleanup do CIFS apresentou falha.
+      o cleanup do storage compartilhado apresentou falha.
   when:
     - orm_cleanup_local_backup_after_sync | bool
     - _orm_local_cleanup_action == 'sync'
-    - orm_cifs_cleanup_failed | default(false) | bool
+    - orm_storage_cleanup_failed | default(false) | bool
 
 - name: Local cleanup | Remover artefatos locais do backup
   ansible.builtin.shell: |
@@ -143,7 +143,7 @@
     - not (orm_report_artifact_warning | default(false) | bool)
     - not (
         _orm_local_cleanup_action == 'sync'
-        and (orm_cifs_cleanup_failed | default(false) | bool)
+        and (orm_storage_cleanup_failed | default(false) | bool)
       )
 
 - name: Local cleanup | Registrar erros
