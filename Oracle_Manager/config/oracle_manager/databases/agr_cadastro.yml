@@ -1,0 +1,229 @@
+---
+cm:
+  oracle_manager:
+    databases:
+      agr_cadastro:
+        description: "AGR_CADASTRO"
+
+        schemas:
+          - "AGR_CADASTRO"
+
+        # Ambiente padrão de origem.
+        default_source_env: "prd"
+
+        # Destinos usados quando orm_action=sync e nenhum destino
+        # for informado explicitamente no Survey.
+        default_sync_targets:
+          - "tu"
+          - "ti"
+          - "th"
+          - "fix"
+
+        # Para restore puro, nenhum destino é assumido por padrão.
+        default_restore_targets: []
+
+        # Configurações Oracle comuns ao profile.
+        # Os mesmos parâmetros também podem ser sobrescritos individualmente
+        # em cada host dentro de hosts_env_sync.
+        oracle:
+          os_user: "oracle"
+          os_group: "oinstall"
+          directory_name: "DB_MANAGER"
+          log_directory_name: "DB_MANAGER_LOG"
+          sid: ""
+          pdb: ""
+          service_name: ""
+          oracle_home: ""
+
+        # Configurações de backup.
+        backup:
+          # local / shared > local usa staging; shared usa o storage escolhido no Survey (CIFS ou NFS).
+          # O valor legado cifs continua aceito pela role como alias de shared.
+          storage_mode: "shared"
+
+          # Diretório físico local onde o expdp gera dump/log/parfile.
+          root_dir: "/backup/oracle_manager"
+
+          # COMPRESSION=ALL,none
+          compression: "ALL"
+
+          parallel: 1
+
+          # Objetos excluídos do Data Pump Export.
+          exclude:
+            - "STATISTICS"
+
+          # Parâmetros adicionais opcionais para expdp.
+          extra_args: ""
+
+          # Valida existência e tamanho dos artefatos gerados.
+          validate_dump: true
+
+        # Configurações de restore.
+        restore:
+          # local / shared > local usa staging; shared usa o storage escolhido no Survey (CIFS ou NFS).
+          # O valor legado cifs continua aceito pela role como alias de shared.
+          storage_mode: "shared"
+
+          # Diretório físico usado no host destino para receber o dump
+          # e armazenar artefatos temporários do restore.
+          root_dir: "/backup/oracle_manager_restore"
+
+          parallel: 1
+
+          # Parâmetros adicionais opcionais para impdp.
+          extra_args: ""
+
+          # Preservação de grants do schema existente no destino.
+          capture_grants: true
+          apply_grants: true
+
+          # Controle de conexões antes da fase destrutiva.
+          kill_sessions: true
+          lock_users: true
+
+          # Remove o usuário/schema atual antes do impdp.
+          drop_users: true
+
+          # Desbloqueia o usuário após import e ajuste de senha.
+          unlock_users: true
+
+          # Se false, erro ao reaplicar grant gera aviso.
+          # Se true, o restore é marcado como falha.
+          fail_on_grant_error: false
+
+          # Exige que a senha do schema destino esteja disponível
+          # antes de iniciar DROP USER.
+          require_password: true
+
+          # Espera por sessões remanescentes após o kill.
+          session_wait_retries: 12
+          session_wait_delay: 5
+
+          # Validações pós-restore.
+          validate_schemas: true
+          validate_invalid_objects: true
+
+          # Se false, objetos INVALID geram aviso.
+          # Se true, tornam o restore uma falha.
+          fail_on_invalid_objects: false
+
+          password:
+            default_var: "orm_password"
+
+        # Validações específicas adicionais do profile.
+        # Podem receber SQLs customizados futuramente.
+        validations:
+          enabled: true
+          queries: []
+
+        masking:
+          enabled: true
+          fail_on_error: true
+
+          run_on_envs:
+            - "tu"
+
+          protected_envs:
+            - "prd"
+
+          run_on_scopes:
+            - "schema"
+
+          scripts:
+            - name: "agr_cadastro_masking"
+              file: "masking/agr_cadastro_masking.sql"
+
+        # Mapeamento de ambientes e hosts.
+        #
+        # Mesmo quando uma propriedade é igual ao bloco oracle acima,
+        # ela está explicitada aqui para o arquivo servir como exemplo
+        # completo de configuração por host.
+        hosts_env_sync:
+
+          prd:
+            - name: "mcoex03dbadm01"
+              ansible_host: "10.209.163.1"
+              sid: "bdagora1"
+              pdb: ""
+              service_name: ""
+              oracle_home: "/u01/app/oracle/product/19.0.0.0/dbhome_1"
+              os_user: "oracle"
+              os_group: "oinstall"
+              directory_name: "DB_MANAGER"
+              source: true
+              enabled: true
+
+          tu:
+            - name: "mcaex04dbadm01vm02"
+              ansible_host: "10.209.115.151"
+
+              sid: "AGRDEV11"
+              pdb: ""
+              service_name: ""
+              oracle_home: "/u01/app/oracle/product/19.0.0.0/dbhome_1"
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              source: true
+              enabled: true
+
+          ti:
+            - name: "ti-riskmanager-01"
+              ansible_host: "192.168.122.163"
+
+              sid: "FREE"
+              pdb: "FREEPDB1"
+              service_name: ""
+              oracle_home: "/opt/oracle/product/23ai/dbhomeFree"
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              source: true
+              enabled: true
+
+          th:
+            - name: "mcaex04dbadm02vm01"
+              ansible_host: "10.209.115.150"
+
+              # Exemplo de host com configuração própria.
+              sid: "AGRHMLN2"
+              pdb: ""
+              service_name: ""
+              oracle_home: ""
+
+              os_user: "oracle"
+              os_group: "oinstall"
+
+              directory_name: "DB_MANAGER"
+
+              backup_root_dir: "/backup/oracle_manager"
+              restore_root_dir: "/backup/oracle_manager_restore"
+
+              source: true
+              enabled: true
+
+          fix:
+            - name: "mcaex04dbadm01vm01"
+              ansible_host: "10.209.115.149"
+              sid: "AGRFIX1"
+              pdb: ""
+              service_name: ""
+              oracle_home: "/u01/app/oracle/product/19.0.0.0/dbhome_1"
+              os_user: "oracle"
+              os_group: "oinstall"
+              directory_name: "DB_MANAGER"
+              source: true
+              enabled: true
