@@ -17,7 +17,7 @@
     orm_activity_started_at: "{{ lookup('ansible.builtin.pipe', 'TZ=' ~ (orm_report_timezone | default('America/Sao_Paulo')) ~ ' date \"+%d/%m/%Y %H:%M:%S\"') }}"
     orm_activity_started_epoch: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
     orm_restore_dir: "{{ orm_restore_root_dir_effective | default(orm_profile_cfg.restore.root_dir | default(orm_restore_root_dir)) }}"
-    orm_restore_storage_mode: "{{ orm_profile_cfg.restore.storage_mode | default(orm_restore_storage_mode_default) | string | lower | trim }}"
+    orm_restore_storage_mode_raw: "{{ orm_profile_cfg.restore.storage_mode | default(orm_restore_storage_mode_default) | string | lower | trim }}"
     orm_restore_parallel: "{{ orm_profile_cfg.restore.parallel | default(orm_restore_parallel_default) | int }}"
     orm_restore_extra_args: "{{ orm_profile_cfg.restore.extra_args | default(orm_restore_extra_args_default) }}"
     orm_restore_capture_grants: "{{ orm_profile_cfg.restore.capture_grants | default(orm_restore_capture_grants_default) | bool }}"
@@ -34,8 +34,7 @@
     orm_restore_validate_invalid_objects: "{{ orm_profile_cfg.restore.validate_invalid_objects | default(orm_restore_validate_invalid_objects_default) | bool }}"
     orm_restore_fail_on_invalid_objects: "{{ orm_profile_cfg.restore.fail_on_invalid_objects | default(orm_restore_fail_on_invalid_objects_default) | bool }}"
     orm_datapump_log_directory_name_effective: "{{ orm_profile_cfg.oracle.log_directory_name | default(orm_default_log_directory_name) }}"
-    orm_cifs_data_dir_effective: "{{ orm_cifs_mount_dir }}{{ orm_cifs_path | regex_replace('/$', '') }}"
-    orm_cifs_storage_mounted: false
+    orm_shared_storage_mounted: false
 
     orm_masking_enabled: "{{ (orm_profile_cfg.masking | default({})).get('enabled', orm_masking_enabled_default) | bool }}"
     orm_masking_fail_on_error: "{{ (orm_profile_cfg.masking | default({})).get('fail_on_error', orm_masking_fail_on_error_default) | bool }}"
@@ -87,6 +86,32 @@
     orm_sessions_after: 0
     orm_invalid_objects_count: 0
 
+- name: Restore | Normalizar modo e protocolo do storage
+  ansible.builtin.set_fact:
+    orm_restore_storage_mode: >-
+      {{ 'shared' if orm_restore_storage_mode_raw == 'cifs' else orm_restore_storage_mode_raw }}
+    orm_dump_storage_protocol_effective: >-
+      {{
+        hostvars[inventory_hostname].get(
+          'orm_dump_storage_protocol_effective',
+          orm_dump_storage_protocol | default('cifs')
+        )
+        | string | lower | trim
+      }}
+
+- name: Restore | Resolver storage compartilhado efetivo
+  ansible.builtin.set_fact:
+    orm_dump_storage_label_effective: >-
+      {{ orm_nfs_label if orm_dump_storage_protocol_effective == 'nfs' else orm_cifs_label }}
+    orm_dump_storage_enabled_effective: >-
+      {{
+        (orm_nfs_enabled | default(true) | bool)
+        if orm_dump_storage_protocol_effective == 'nfs'
+        else (orm_cifs_enabled | default(true) | bool)
+      }}
+    orm_dump_storage_data_dir_effective: >-
+      {{ orm_dump_storage_mount_dir ~ (orm_dump_storage_path | regex_replace('/$', '')) }}
+
 - name: Restore | Bloco controlado
   block:
 
@@ -106,12 +131,13 @@
       ansible.builtin.assert:
         that:
           - orm_restore_parallel | int == 1
-          - orm_restore_storage_mode in ['local', 'cifs']
-          - (orm_restore_storage_mode != 'cifs') or (orm_cifs_enabled | bool)
+          - orm_restore_storage_mode in ['local', 'shared']
+          - orm_dump_storage_protocol_effective in ['cifs', 'nfs']
+          - (orm_restore_storage_mode != 'shared') or (orm_dump_storage_enabled_effective | bool)
         fail_msg: >-
-          Oracle Manager V1 exige restore.parallel=1 e
-          restore.storage_mode em local ou cifs.
-          Para storage_mode=cifs, orm_cifs_enabled deve estar habilitado.
+          Oracle Manager exige restore.parallel=1, restore.storage_mode em local ou shared
+          e orm_dump_storage_protocol em cifs ou nfs.
+          Para storage_mode=shared, o protocolo selecionado deve estar habilitado.
 
     - name: Masking | Resolver aplicabilidade
       ansible.builtin.set_fact:
@@ -187,6 +213,7 @@
           DIRECTORY dump: {{ orm_directory_name_effective }}
           DIRECTORY log: {{ orm_datapump_log_directory_name_effective }}
           Storage mode: {{ orm_restore_storage_mode }}
+          Storage protocol: {{ orm_dump_storage_protocol_effective | upper }}
           Root local: {{ orm_restore_dir }}
           Dump solicitado: {{ orm_restore_dump_name | default('latest') }}
           Motivo: {{ orm_execution_reason | default('') }}
@@ -200,9 +227,9 @@
           {% endif %}
       become: true
 
-    - name: Restore | Montar CIFS para leitura direta
-      ansible.builtin.import_tasks: 36_mount_cifs_storage.yml
-      when: orm_restore_storage_mode == 'cifs'
+    - name: Restore | Montar storage compartilhado para leitura direta
+      ansible.builtin.import_tasks: 36_mount_storage.yml
+      when: orm_restore_storage_mode == 'shared'
 
     - name: Restore | Resolver e validar dump antes da fase destrutiva
       ansible.builtin.import_tasks: 55_resolve_restore_dump.yml
@@ -211,8 +238,8 @@
       ansible.builtin.set_fact:
         orm_directory_path_effective: >-
           {{
-            orm_cifs_data_dir_effective
-            if orm_restore_storage_mode == 'cifs'
+            orm_dump_storage_data_dir_effective
+            if orm_restore_storage_mode == 'shared'
             else orm_restore_dir
           }}
       when: not (orm_host_failed | bool)
@@ -358,9 +385,9 @@
 
   always:
 
-    - name: Restore | Desmontar CIFS usado pelo Data Pump
-      ansible.builtin.import_tasks: 37_unmount_cifs_storage.yml
-      when: orm_restore_storage_mode == 'cifs'
+    - name: Restore | Desmontar storage compartilhado usado pelo Data Pump
+      ansible.builtin.import_tasks: 37_unmount_storage.yml
+      when: orm_restore_storage_mode == 'shared'
 
     - name: Restore | Desbloquear usuários se falhou antes do DROP
       ansible.builtin.shell: |
@@ -580,6 +607,7 @@
           directory_name: "{{ orm_directory_name_effective | default(orm_directory_name | default('')) }}"
           root_dir: "{{ orm_restore_dir }}"
           storage_mode: "{{ orm_restore_storage_mode }}"
+          storage_protocol: "{{ orm_dump_storage_protocol_effective }}"
           dump: "{{ orm_effective_dump_name | default('') }}"
           dump_file: "{{ orm_effective_dump_file | default('') }}"
           dump_reference: "{{ orm_effective_dump_reference | default('') }}"
