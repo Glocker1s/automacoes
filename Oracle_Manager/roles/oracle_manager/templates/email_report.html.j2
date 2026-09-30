@@ -248,6 +248,7 @@
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Ambiente</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Host</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Ação</th>
+                  <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Parallel</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">Escopo</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">SID</th>
                   <th style="font-family:Arial,sans-serif;font-size:12px;font-weight:bold;color:#222222;background-color:#f1f2f3;text-align:left;border:1px solid #d9d9d9;padding:8px;vertical-align:top;">PDB</th>
@@ -262,6 +263,7 @@
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">{{ row.env | default('—') }}</td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;"><b>{{ row.host | default('—') }}</b></td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;">{{ badge((row.action | default('—')) | upper, 'blue') }}</td>
+                  <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;white-space:nowrap;"><b>{{ row.parallel | default(1) }}</b></td>
                   <td style="font-family:Arial,sans-serif;font-size:13px;color:#111111;border:1px solid #d9d9d9;padding:8px;vertical-align:middle;">
                     <b>{{ row.scope | default('schema') | upper }}</b>
                     {% if row.scope | default('schema') | lower == 'tables' %}
@@ -306,7 +308,7 @@
                 {% if row.action == 'restore' %}
                 <tr>
                   {{ td_open() }}<b>{{ row.host }}</b></td>
-                  {{ td_open() }}{{ code(row.dump if row.dump else '—') }}{% if row.dump_size_bytes | default(0) | int > 0 %}<div style="font-size:11px;color:#777777;margin-top:4px;">{{ '%.2f MB' | format((row.dump_size_bytes | int) / 1048576) }}</div>{% endif %}</td>
+                  {{ td_open() }}{{ code(row.dump if row.dump else '—') }}{% if row.dump_files_count | default(0) | int > 1 %}<div style="font-size:11px;color:#777777;margin-top:4px;">Dump set: {{ row.dump_files_count }} arquivos</div>{% endif %}{% if row.dump_size_bytes | default(0) | int > 0 %}<div style="font-size:11px;color:#777777;margin-top:4px;">{{ '%.2f MB' | format((row.dump_size_bytes | int) / 1048576) }}</div>{% endif %}</td>
                   {{ td_open() }}{{ code(row.dump_source if row.dump_source else '—') }}</td>
                   {{ td_open() }}{{ row.sessions_before if row.sessions_before != '' else '—' }} antes / {{ row.sessions_after if row.sessions_after != '' else '—' }} depois</td>
                   {{ td_open() }}{{ row.invalid_objects if row.invalid_objects != '' else '—' }}</td>
