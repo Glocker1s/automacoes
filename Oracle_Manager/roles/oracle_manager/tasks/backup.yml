@@ -28,6 +28,9 @@
     orm_storage_upload_failed: false
     orm_storage_upload_error: ""
     orm_dump_size_bytes: 0
+    orm_dump_files: []
+    orm_dump_basenames: []
+    orm_dump_files_count: 0
     orm_datapump_binary_required: "expdp"
     orm_require_existing_schemas: true
 
@@ -57,17 +60,30 @@
     orm_dump_storage_data_dir_effective: >-
       {{ orm_dump_storage_mount_dir ~ (orm_dump_storage_path | regex_replace('/$', '')) }}
 
+- name: Backup | Resolver configuração do dump set
+  ansible.builtin.set_fact:
+    orm_dump_output_dir: >-
+      {{
+        orm_dump_storage_data_dir_effective
+        if orm_backup_storage_mode == 'shared'
+        else orm_backup_dir
+      }}
+    orm_dumpfile_parameter_basename: >-
+      {{
+        (orm_dump_basename | regex_replace('\.dmp$', '_%U.dmp'))
+        if orm_backup_parallel | int > 1
+        else orm_dump_basename
+      }}
+    orm_dump_discovery_pattern_basename: >-
+      {{
+        (orm_dump_basename | regex_replace('\.dmp$', '_*.dmp'))
+        if orm_backup_parallel | int > 1
+        else orm_dump_basename
+      }}
+
 - name: Backup | Resolver paths da operação
   ansible.builtin.set_fact:
-    orm_dump_file: >-
-      {{
-        (
-          orm_dump_storage_data_dir_effective
-          if orm_backup_storage_mode == 'shared'
-          else orm_backup_dir
-        )
-        ~ '/' ~ orm_dump_basename
-      }}
+    orm_dump_file: "{{ orm_dump_output_dir }}/{{ orm_dumpfile_parameter_basename }}"
     orm_datapump_log_basename: "{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.expdp.log"
     orm_datapump_log_file: "{{ orm_backup_dir }}/{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.expdp.log"
     orm_control_log_file: "{{ orm_backup_dir }}/{{ orm_dump_basename | regex_replace('\\.dmp$', '') }}.backup.log"
@@ -91,33 +107,23 @@
           ~ ':'
           ~ (orm_dump_storage_path | regex_replace('/$', ''))
           ~ '/'
-          ~ orm_dump_basename
+          ~ orm_dumpfile_parameter_basename
         )
         if orm_dump_storage_enabled_effective | bool
         else
         (
           orm_backup_dir
           ~ '/'
-          ~ orm_dump_basename
+          ~ orm_dumpfile_parameter_basename
         )
       }}
 
-- name: Backup | Resolver artefatos locais da operação
+- name: Backup | Resolver artefatos locais iniciais da operação
   ansible.builtin.set_fact:
-    orm_backup_local_artifacts: >-
-      {{
-        [
-          orm_control_log_file,
-          orm_datapump_log_file,
-          orm_expdp_parfile
-        ]
-        +
-        (
-          [orm_dump_file, orm_latest_manifest_file]
-          if orm_backup_storage_mode == 'local'
-          else []
-        )
-      }}
+    orm_backup_local_artifacts:
+      - "{{ orm_control_log_file }}"
+      - "{{ orm_datapump_log_file }}"
+      - "{{ orm_expdp_parfile }}"
 
 - name: Backup | Bloco controlado
   block:
@@ -128,12 +134,13 @@
     - name: Backup | Validar configuração da operação
       ansible.builtin.assert:
         that:
-          - orm_backup_parallel | int == 1
+          - orm_backup_parallel | int >= 1
+          - orm_backup_parallel | int <= 99
           - orm_backup_storage_mode in ['local', 'shared']
           - orm_dump_storage_protocol_effective in ['cifs', 'nfs']
           - (orm_backup_storage_mode != 'shared') or (orm_dump_storage_enabled_effective | bool)
         fail_msg: >-
-          Oracle Manager exige backup.parallel=1, backup.storage_mode em local ou shared
+          Oracle Manager exige backup.parallel entre 1 e 99, backup.storage_mode em local ou shared
           e orm_dump_storage_protocol em cifs ou nfs.
           Para storage_mode=shared, o protocolo selecionado deve estar habilitado.
 
@@ -172,8 +179,10 @@
           DIRECTORY log: {{ orm_datapump_log_directory_name_effective }}
           Storage mode: {{ orm_backup_storage_mode }}
           Storage protocol: {{ orm_dump_storage_protocol_effective | upper }}
+          Parallel: {{ orm_backup_parallel }}
           Root local: {{ orm_backup_dir }}
           Dump: {{ orm_dump_reference }}
+          Dump pattern: {{ orm_dumpfile_parameter_basename }}
           Motivo: {{ orm_execution_reason | default('') }}
           Job: {{ tower_job_id | default(awx_job_id | default('local')) }}
           Início: {{ orm_activity_started_at }}
@@ -208,13 +217,30 @@
     - name: Backup | Gerar parfile do expdp
       ansible.builtin.import_tasks: 45_build_expdp_parfile.yml
 
-    - name: Backup | Remover dump/log anteriores com mesmo nome
+    - name: Backup | Localizar dumps anteriores com o mesmo pattern
+      ansible.builtin.find:
+        paths: "{{ orm_dump_output_dir }}"
+        patterns: "{{ orm_dump_discovery_pattern_basename }}"
+        file_type: file
+        recurse: false
+      register: _orm_previous_dump_files
+      become: true
+      become_user: "{{ orm_os_user_effective }}"
+
+    - name: Backup | Remover dumps anteriores com o mesmo pattern
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.path }}"
         state: absent
-      loop:
-        - "{{ orm_dump_file }}"
-        - "{{ orm_datapump_log_file }}"
+      loop: "{{ _orm_previous_dump_files.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      become: true
+      become_user: "{{ orm_os_user_effective }}"
+
+    - name: Backup | Remover log anterior com mesmo nome
+      ansible.builtin.file:
+        path: "{{ orm_datapump_log_file }}"
+        state: absent
       become: true
       become_user: "{{ orm_os_user_effective }}"
 
@@ -258,18 +284,17 @@
           e {{ orm_datapump_log_file }}.
       when: _orm_expdp_exec.rc | default(1) | int != 0
 
-    - name: Backup | Validar dump
+    - name: Backup | Resolver e validar dump gerado
       ansible.builtin.import_tasks: 50_validate_dump.yml
       when:
         - not (orm_host_failed | bool)
-        - orm_backup_validate_dump | bool
 
     - name: Backup | Criar manifesto latest local
       ansible.builtin.copy:
         dest: "{{ orm_latest_manifest_file }}"
         owner: "{{ orm_os_user_effective }}"
         group: "{{ orm_os_group_effective }}"
-        content: "{{ orm_dump_basename }}\n"
+        content: "{{ (orm_dump_basenames | join('\n')) ~ '\n' }}"
         mode: "0644"
       become: true
       when:
@@ -279,7 +304,11 @@
     - name: Backup | Criar manifesto latest diretamente no storage compartilhado
       ansible.builtin.shell: |
         set -euo pipefail
-        printf '%s\n' "{{ orm_dump_basename }}" > "{{ orm_latest_manifest_file }}"
+        cat > "{{ orm_latest_manifest_file }}" <<'EOF'
+        {% for dump_name in orm_dump_basenames %}
+        {{ dump_name }}
+        {% endfor %}
+        EOF
         sync
       args:
         executable: /bin/bash
@@ -289,6 +318,24 @@
       when:
         - not (orm_host_failed | bool)
         - orm_backup_storage_mode == 'shared'
+
+    - name: Backup | Atualizar artefatos locais após descoberta do dump set
+      ansible.builtin.set_fact:
+        orm_backup_local_artifacts: >-
+          {{
+            [
+              orm_control_log_file,
+              orm_datapump_log_file,
+              orm_expdp_parfile
+            ]
+            +
+            (
+              (orm_dump_files | default([])) + [orm_latest_manifest_file]
+              if orm_backup_storage_mode == 'local'
+              else []
+            )
+          }}
+      when: not (orm_host_failed | bool)
 
     - name: Backup | Publicar dump local no storage compartilhado
       when:
@@ -300,19 +347,34 @@
         - name: Backup | Montar storage compartilhado para publicação
           ansible.builtin.import_tasks: 36_mount_storage.yml
 
-        - name: Backup | Copiar dump e manifesto para storage compartilhado
-          ansible.builtin.shell: |
-            set -euo pipefail
-
-            DST="{{ orm_dump_storage_data_dir_effective }}"
-            mkdir -p "$DST"
-            cp -f "{{ orm_dump_file }}" "$DST/"
-            cp -f "{{ orm_latest_manifest_file }}" "$DST/"
-            sync
-          args:
-            executable: /bin/bash
+        - name: Backup | Copiar arquivos do dump para storage compartilhado
+          ansible.builtin.command:
+            argv:
+              - cp
+              - -f
+              - "{{ item }}"
+              - "{{ orm_dump_storage_data_dir_effective }}/"
+          loop: "{{ orm_dump_files }}"
+          loop_control:
+            label: "{{ item | basename }}"
           become: true
           become_user: "{{ orm_os_user_effective }}"
+
+        - name: Backup | Copiar manifesto latest para storage compartilhado
+          ansible.builtin.command:
+            argv:
+              - cp
+              - -f
+              - "{{ orm_latest_manifest_file }}"
+              - "{{ orm_dump_storage_data_dir_effective }}/"
+          become: true
+          become_user: "{{ orm_os_user_effective }}"
+
+        - name: Backup | Sincronizar escrita no storage compartilhado
+          ansible.builtin.command: sync
+          become: true
+          become_user: "{{ orm_os_user_effective }}"
+          changed_when: false
 
       rescue:
 
@@ -468,8 +530,11 @@
           root_dir: "{{ orm_backup_dir }}"
           storage_mode: "{{ orm_backup_storage_mode }}"
           storage_protocol: "{{ orm_dump_storage_protocol_effective }}"
+          parallel: "{{ orm_backup_parallel }}"
           dump: "{{ orm_dump_basename }}"
           dump_file: "{{ orm_dump_file }}"
+          dump_files: "{{ orm_dump_basenames | default([]) }}"
+          dump_files_count: "{{ orm_dump_files_count | default(0) }}"
           dump_reference: "{{ orm_dump_reference }}"
           dump_size_bytes: "{{ orm_dump_size_bytes | default(0) }}"
           datapump_log: "{{ orm_datapump_log_file }}"
