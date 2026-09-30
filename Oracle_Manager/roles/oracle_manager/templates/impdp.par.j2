@@ -5,7 +5,8 @@ TABLE_EXISTS_ACTION={{ orm_table_exists_action_effective | upper }}
 SCHEMAS={{ orm_schemas | join(',') }}
 {% endif %}
 DIRECTORY={{ orm_directory_name_effective }}
-DUMPFILE={{ orm_effective_dump_name }}
+DUMPFILE={{ orm_effective_dump_names | join(',') }}
 LOGFILE={{ orm_datapump_log_directory_name_effective }}:{{ orm_impdp_log_basename }}
+PARALLEL={{ orm_restore_parallel }}
 {% if orm_restore_extra_args | trim | length > 0 %}{{ orm_restore_extra_args | trim }}
 {% endif %}
