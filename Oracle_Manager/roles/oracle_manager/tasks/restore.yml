@@ -69,10 +69,13 @@
     orm_masking_applicable: false
 
     orm_effective_dump_name: ""
+    orm_effective_dump_names: []
     orm_effective_dump_file: ""
+    orm_effective_dump_files: []
     orm_effective_dump_reference: ""
     orm_restore_dump_source: ""
     orm_restore_dump_size_bytes: 0
+    orm_restore_dump_files_count: 0
     orm_datapump_binary_required: "impdp"
     orm_require_existing_schemas: "{{ orm_scope_effective == 'tables' }}" 
     orm_users_locked: false
@@ -130,12 +133,12 @@
     - name: Restore | Validar configuração da operação
       ansible.builtin.assert:
         that:
-          - orm_restore_parallel | int == 1
+          - orm_restore_parallel | int >= 1
           - orm_restore_storage_mode in ['local', 'shared']
           - orm_dump_storage_protocol_effective in ['cifs', 'nfs']
           - (orm_restore_storage_mode != 'shared') or (orm_dump_storage_enabled_effective | bool)
         fail_msg: >-
-          Oracle Manager exige restore.parallel=1, restore.storage_mode em local ou shared
+          Oracle Manager exige restore.parallel>=1, restore.storage_mode em local ou shared
           e orm_dump_storage_protocol em cifs ou nfs.
           Para storage_mode=shared, o protocolo selecionado deve estar habilitado.
 
@@ -214,6 +217,7 @@
           DIRECTORY log: {{ orm_datapump_log_directory_name_effective }}
           Storage mode: {{ orm_restore_storage_mode }}
           Storage protocol: {{ orm_dump_storage_protocol_effective | upper }}
+          Parallel: {{ orm_restore_parallel }}
           Root local: {{ orm_restore_dir }}
           Dump solicitado: {{ orm_restore_dump_name | default('latest') }}
           Motivo: {{ orm_execution_reason | default('') }}
@@ -430,7 +434,7 @@
         orm_restore_database_state: >-
           Falha após remoção do schema anterior.
           Recuperação deve ser feita a partir de
-          {{ orm_effective_dump_file | default('dump de restore') }}.
+          {{ orm_effective_dump_reference | default(orm_effective_dump_file | default('dump de restore')) }}.
       when:
         - orm_host_failed | default(false) | bool
         - orm_restore_schema_dropped | default(false) | bool
@@ -569,6 +573,8 @@
         cat <<'EOF' >> "{{ orm_control_log_file }}"
 
         Dump efetivo: {{ orm_effective_dump_reference | default(orm_effective_dump_file | default('')) }}
+        Arquivos do dump: {{ orm_restore_dump_files_count | default(0) }}
+        Parallel: {{ orm_restore_parallel | default(1) }}
         Origem do dump: {{ orm_restore_dump_source | default('') }}
         Estado final: {{ orm_restore_database_state | default('') }}
         Fim: {{ orm_activity_finished_at }}
@@ -608,8 +614,11 @@
           root_dir: "{{ orm_restore_dir }}"
           storage_mode: "{{ orm_restore_storage_mode }}"
           storage_protocol: "{{ orm_dump_storage_protocol_effective }}"
+          parallel: "{{ orm_restore_parallel }}"
           dump: "{{ orm_effective_dump_name | default('') }}"
           dump_file: "{{ orm_effective_dump_file | default('') }}"
+          dump_files: "{{ orm_effective_dump_names | default([]) }}"
+          dump_files_count: "{{ orm_restore_dump_files_count | default(0) }}"
           dump_reference: "{{ orm_effective_dump_reference | default('') }}"
           dump_source: "{{ orm_restore_dump_source | default('') }}"
           dump_size_bytes: "{{ orm_restore_dump_size_bytes | default(0) }}"
