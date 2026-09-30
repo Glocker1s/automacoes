@@ -34,7 +34,6 @@
 
     ROOT="{{ hostvars[item].orm_restore_dir | default(hostvars[item].orm_restore_root_dir_effective | default(orm_restore_root_dir)) }}"
     STORAGE_MODE="{{ hostvars[item].orm_restore_storage_mode | default('local') }}"
-    DUMP_FILE="{{ hostvars[item].orm_effective_dump_file | default('') }}"
     JOB_ID="{{ awx_job_id | default(tower_job_id | default('manual')) }}"
 
     if [ ! -d "$ROOT" ]; then
@@ -44,19 +43,23 @@
 
     echo "[INFO] Limpando artefatos do job ${JOB_ID} em ${ROOT}"
 
-    if [ "$STORAGE_MODE" = "local" ] && [ -n "$DUMP_FILE" ]; then
-      case "$DUMP_FILE" in
-        "$ROOT"/*)
-          if [ -f "$DUMP_FILE" ]; then
-            rm -f -- "$DUMP_FILE"
-            echo "__DUMP_REMOVED__=true"
-          fi
-          ;;
-        *)
-          echo "Dump fora do restore.root_dir; cleanup recusado: $DUMP_FILE" >&2
-          exit 20
-          ;;
-      esac
+    if [ "$STORAGE_MODE" = "local" ]; then
+      while IFS= read -r DUMP_FILE; do
+        [ -n "$DUMP_FILE" ] || continue
+
+        case "$DUMP_FILE" in
+          "$ROOT"/*)
+            if [ -f "$DUMP_FILE" ]; then
+              rm -f -- "$DUMP_FILE"
+              echo "__DUMP_REMOVED__=$DUMP_FILE"
+            fi
+            ;;
+          *)
+            echo "Dump fora do restore.root_dir; cleanup recusado: $DUMP_FILE" >&2
+            exit 20
+            ;;
+        esac
+      done <<< "$ORM_RESTORE_DUMP_FILES"
     fi
 
     find "$ROOT" \
@@ -69,6 +72,8 @@
     echo "__CLEANUP_DONE__=true"
   args:
     executable: /bin/bash
+  environment:
+    ORM_RESTORE_DUMP_FILES: "{{ hostvars[item].orm_effective_dump_files | default([]) | join('\n') }}"
   loop: "{{ _orm_restore_cleanup_hosts }}"
   loop_control:
     label: "{{ item }}"
