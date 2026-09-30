@@ -63,6 +63,7 @@ cm:
 
           # Estratégia padrão do restore.
           # Pode ser sobrescrita por host com restore_mode.
+          # promote | restore_only | drop_in_place
           mode: "promote"
           restore_only_suffix: "_new"
 
