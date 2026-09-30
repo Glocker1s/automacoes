@@ -4,8 +4,9 @@ TABLES={{ orm_tables_effective | join(',') }}
 SCHEMAS={{ orm_schemas | join(',') }}
 {% endif %}
 DIRECTORY={{ orm_directory_name_effective }}
-DUMPFILE={{ orm_dump_basename }}
+DUMPFILE={{ orm_dumpfile_parameter_basename }}
 LOGFILE={{ orm_datapump_log_directory_name_effective }}:{{ orm_datapump_log_basename }}
+PARALLEL={{ orm_backup_parallel }}
 {% if orm_backup_compression | length > 0 %}COMPRESSION={{ orm_backup_compression }}
 {% endif %}{% for item in orm_backup_exclude %}EXCLUDE={{ item }}
 {% endfor %}{% if orm_backup_extra_args | trim | length > 0 %}{{ orm_backup_extra_args | trim }}
