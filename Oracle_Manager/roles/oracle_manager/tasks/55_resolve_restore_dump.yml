@@ -9,53 +9,106 @@
     - name: Restore dump | Montar storage compartilhado para staging
       ansible.builtin.import_tasks: 36_mount_storage.yml
 
-    - name: Restore dump | Resolver nome efetivo no storage compartilhado
+    - name: Restore dump | Resolver arquivos efetivos no storage compartilhado
       ansible.builtin.shell: |
         set -euo pipefail
 
         STORAGE_DIR="{{ orm_dump_storage_data_dir_effective }}"
         REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
+        MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
 
-        if [ "$REQUESTED" = "latest" ]; then
-          MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
+        resolve_requested() {
+          local requested="$1"
 
-          [ -s "$MANIFEST" ] || {
-            echo "Manifest latest não encontrado: $MANIFEST" >&2
-            exit 10
+          if [ "$requested" = "latest" ]; then
+            [ -s "$MANIFEST" ] || {
+              echo "Manifest latest não encontrado: $MANIFEST" >&2
+              exit 10
+            }
+
+            sed -e 's/\r$//' -e '/^[[:space:]]*$/d' "$MANIFEST"
+            return
+          fi
+
+          case "$requested" in
+            *.dmp) ;;
+            *) requested="${requested}.dmp" ;;
+          esac
+
+          if [ -f "$STORAGE_DIR/$requested" ]; then
+            if [[ "$requested" =~ ^(.+)_([0-9][0-9])\.dmp$ ]]; then
+              prefix="${BASH_REMATCH[1]}"
+              mapfile -t siblings < <(
+                find "$STORAGE_DIR" -maxdepth 1 -type f -name "${prefix}_[0-9][0-9].dmp" -printf '%f\n' 2>/dev/null | sort
+              )
+
+              if [ -n "${siblings[1]:-}" ]; then
+                printf '%s\n' "${siblings[@]}"
+                return
+              fi
+            fi
+
+            printf '%s\n' "$requested"
+            return
+          fi
+
+          stem="${requested%.dmp}"
+          mapfile -t parts < <(
+            find "$STORAGE_DIR" -maxdepth 1 -type f -name "${stem}_[0-9][0-9].dmp" -printf '%f\n' 2>/dev/null | sort
+          )
+
+          [ -n "${parts[0]:-}" ] || {
+            echo "Dump/dump set não encontrado para: $requested" >&2
+            exit 11
           }
 
-          head -n1 "$MANIFEST" | tr -d '\r\n'
-        else
-          case "$REQUESTED" in
-            *.dmp)
-              printf '%s\n' "$REQUESTED"
-              ;;
-            *)
-              printf '%s.dmp\n' "$REQUESTED"
-              ;;
-          esac
-        fi
+          printf '%s\n' "${parts[@]}"
+        }
+
+        resolve_requested "$REQUESTED"
       args:
         executable: /bin/bash
-      register: _orm_restore_dump_name_resolved
+      register: _orm_restore_dump_names_resolved
       changed_when: false
       become: true
       become_user: "{{ orm_os_user_effective }}"
 
-    - name: Restore dump | Validar nome retornado pelo manifesto/Survey
+    - name: Restore dump | Publicar nomes resolvidos
+      ansible.builtin.set_fact:
+        orm_effective_dump_names: >-
+          {{
+            _orm_restore_dump_names_resolved.stdout_lines
+            | default([])
+            | map('trim')
+            | reject('equalto', '')
+            | unique
+            | list
+          }}
+
+    - name: Restore dump | Validar nomes retornados pelo manifesto/Survey
       ansible.builtin.assert:
         that:
-          - _orm_restore_dump_name_resolved.stdout | trim | length > 0
-          - (_orm_restore_dump_name_resolved.stdout | trim | basename) == (_orm_restore_dump_name_resolved.stdout | trim)
-          - _orm_restore_dump_name_resolved.stdout | trim is match('^[A-Za-z0-9_.-]+\\.dmp$')
-        fail_msg: >-
-          Nome de dump inválido:
-          {{ _orm_restore_dump_name_resolved.stdout | default('') | trim }}
+          - item | basename == item
+          - item is match('^[A-Za-z0-9_.-]+\.dmp$')
+        fail_msg: "Nome de dump inválido: {{ item }}"
+      loop: "{{ orm_effective_dump_names }}"
+      loop_control:
+        label: "{{ item }}"
 
-    - name: Restore dump | Definir paths do dump compartilhado e staging local
+    - name: Restore dump | Validar que ao menos um arquivo foi resolvido
+      ansible.builtin.assert:
+        that:
+          - orm_effective_dump_names | length > 0
+        fail_msg: "Nenhum arquivo de dump foi resolvido para o restore."
+
+    - name: Restore dump | Definir identidade lógica do dump set
       ansible.builtin.set_fact:
-        orm_effective_dump_name: "{{ _orm_restore_dump_name_resolved.stdout | trim }}"
-        orm_effective_dump_file: "{{ orm_restore_dir }}/{{ _orm_restore_dump_name_resolved.stdout | trim }}"
+        orm_effective_dump_name: >-
+          {{
+            (orm_effective_dump_names | first | regex_replace('_[0-9]{2}\\.dmp$', '.dmp'))
+            if orm_effective_dump_names | length > 1
+            else (orm_effective_dump_names | first)
+          }}
         orm_effective_dump_reference: >-
           {{
             (orm_dump_storage_protocol_effective | upper)
@@ -64,39 +117,62 @@
             ~ ':'
             ~ (orm_dump_storage_path | regex_replace('/$', ''))
             ~ '/'
-            ~ (_orm_restore_dump_name_resolved.stdout | trim)
+            ~ (
+                (orm_effective_dump_names | first | regex_replace('_[0-9]{2}\\.dmp$', '.dmp'))
+                if orm_effective_dump_names | length > 1
+                else (orm_effective_dump_names | first)
+              )
           }}
         orm_restore_dump_source: "{{ orm_dump_storage_protocol_effective | upper }} -> LOCAL"
 
-    - name: Restore dump | Validar dump no storage compartilhado
+    - name: Restore dump | Validar arquivos no storage compartilhado
       ansible.builtin.stat:
-        path: "{{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_name }}"
+        path: "{{ orm_dump_storage_data_dir_effective }}/{{ item }}"
         get_checksum: false
         get_mime: false
         get_attributes: false
-      register: _orm_restore_shared_dump_stat
+      loop: "{{ orm_effective_dump_names }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _orm_restore_shared_dump_stats
       become: true
       become_user: "{{ orm_os_user_effective }}"
 
-    - name: Restore dump | Confirmar dump válido no storage compartilhado
+    - name: Restore dump | Confirmar arquivos válidos no storage compartilhado
       ansible.builtin.assert:
         that:
-          - _orm_restore_shared_dump_stat.stat.exists | default(false)
-          - _orm_restore_shared_dump_stat.stat.isreg | default(false)
-          - _orm_restore_shared_dump_stat.stat.size | default(0) | int > 0
+          - item.stat.exists | default(false)
+          - item.stat.isreg | default(false)
+          - item.stat.size | default(0) | int > 0
         fail_msg: >-
           Dump não encontrado ou vazio no storage {{ orm_dump_storage_protocol_effective | upper }}:
-          {{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_name }}.
+          {{ item.item }}.
+      loop: "{{ _orm_restore_shared_dump_stats.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('dump') }}"
 
-    - name: Restore dump | Copiar dump para restore.root_dir
+    - name: Restore dump | Copiar arquivos para restore.root_dir
       ansible.builtin.command:
         argv:
           - cp
           - -f
-          - "{{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_name }}"
-          - "{{ orm_effective_dump_file }}"
+          - "{{ orm_dump_storage_data_dir_effective }}/{{ item }}"
+          - "{{ orm_restore_dir }}/{{ item }}"
+      loop: "{{ orm_effective_dump_names }}"
+      loop_control:
+        label: "{{ item }}"
       become: true
       become_user: "{{ orm_os_user_effective }}"
+
+    - name: Restore dump | Publicar paths locais do dump set
+      ansible.builtin.set_fact:
+        orm_effective_dump_files: >-
+          {%- set out = [] -%}
+          {%- for dump_name in orm_effective_dump_names -%}
+            {%- set _ = out.append(orm_restore_dir ~ '/' ~ dump_name) -%}
+          {%- endfor -%}
+          {{ out }}
+        orm_effective_dump_file: "{{ orm_restore_dir }}/{{ orm_effective_dump_names | first }}"
 
   rescue:
 
@@ -126,53 +202,113 @@
     - not (orm_host_failed | bool)
   block:
 
-    - name: Restore dump | Resolver nome efetivo no storage montado
+    - name: Restore dump | Resolver arquivos efetivos no storage montado
       ansible.builtin.shell: |
         set -euo pipefail
 
         STORAGE_DIR="{{ orm_dump_storage_data_dir_effective }}"
         REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
+        MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
 
-        if [ "$REQUESTED" = "latest" ]; then
-          MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
+        resolve_requested() {
+          local requested="$1"
 
-          [ -s "$MANIFEST" ] || {
-            echo "Manifest latest não encontrado: $MANIFEST" >&2
-            exit 10
+          if [ "$requested" = "latest" ]; then
+            [ -s "$MANIFEST" ] || {
+              echo "Manifest latest não encontrado: $MANIFEST" >&2
+              exit 10
+            }
+
+            sed -e 's/\r$//' -e '/^[[:space:]]*$/d' "$MANIFEST"
+            return
+          fi
+
+          case "$requested" in
+            *.dmp) ;;
+            *) requested="${requested}.dmp" ;;
+          esac
+
+          if [ -f "$STORAGE_DIR/$requested" ]; then
+            if [[ "$requested" =~ ^(.+)_([0-9][0-9])\.dmp$ ]]; then
+              prefix="${BASH_REMATCH[1]}"
+              mapfile -t siblings < <(
+                find "$STORAGE_DIR" -maxdepth 1 -type f -name "${prefix}_[0-9][0-9].dmp" -printf '%f\n' 2>/dev/null | sort
+              )
+
+              if [ -n "${siblings[1]:-}" ]; then
+                printf '%s\n' "${siblings[@]}"
+                return
+              fi
+            fi
+
+            printf '%s\n' "$requested"
+            return
+          fi
+
+          stem="${requested%.dmp}"
+          mapfile -t parts < <(
+            find "$STORAGE_DIR" -maxdepth 1 -type f -name "${stem}_[0-9][0-9].dmp" -printf '%f\n' 2>/dev/null | sort
+          )
+
+          [ -n "${parts[0]:-}" ] || {
+            echo "Dump/dump set não encontrado para: $requested" >&2
+            exit 11
           }
 
-          head -n1 "$MANIFEST" | tr -d '\r\n'
-        else
-          case "$REQUESTED" in
-            *.dmp)
-              printf '%s\n' "$REQUESTED"
-              ;;
-            *)
-              printf '%s.dmp\n' "$REQUESTED"
-              ;;
-          esac
-        fi
+          printf '%s\n' "${parts[@]}"
+        }
+
+        resolve_requested "$REQUESTED"
       args:
         executable: /bin/bash
-      register: _orm_restore_dump_name_resolved
+      register: _orm_restore_dump_names_resolved
       changed_when: false
       become: true
       become_user: "{{ orm_os_user_effective }}"
 
-    - name: Restore dump | Validar nome retornado pelo manifesto/Survey
+    - name: Restore dump | Publicar nomes resolvidos
+      ansible.builtin.set_fact:
+        orm_effective_dump_names: >-
+          {{
+            _orm_restore_dump_names_resolved.stdout_lines
+            | default([])
+            | map('trim')
+            | reject('equalto', '')
+            | unique
+            | list
+          }}
+
+    - name: Restore dump | Validar nomes retornados pelo manifesto/Survey
       ansible.builtin.assert:
         that:
-          - _orm_restore_dump_name_resolved.stdout | trim | length > 0
-          - (_orm_restore_dump_name_resolved.stdout | trim | basename) == (_orm_restore_dump_name_resolved.stdout | trim)
-          - _orm_restore_dump_name_resolved.stdout | trim is match('^[A-Za-z0-9_.-]+\\.dmp$')
-        fail_msg: >-
-          Nome de dump inválido:
-          {{ _orm_restore_dump_name_resolved.stdout | default('') | trim }}
+          - item | basename == item
+          - item is match('^[A-Za-z0-9_.-]+\.dmp$')
+        fail_msg: "Nome de dump inválido: {{ item }}"
+      loop: "{{ orm_effective_dump_names }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Restore dump | Validar que ao menos um arquivo foi resolvido
+      ansible.builtin.assert:
+        that:
+          - orm_effective_dump_names | length > 0
+        fail_msg: "Nenhum arquivo de dump foi resolvido para o restore."
 
     - name: Restore dump | Definir dump compartilhado efetivo
       ansible.builtin.set_fact:
-        orm_effective_dump_name: "{{ _orm_restore_dump_name_resolved.stdout | trim }}"
-        orm_effective_dump_file: "{{ orm_dump_storage_data_dir_effective }}/{{ _orm_restore_dump_name_resolved.stdout | trim }}"
+        orm_effective_dump_name: >-
+          {{
+            (orm_effective_dump_names | first | regex_replace('_[0-9]{2}\\.dmp$', '.dmp'))
+            if orm_effective_dump_names | length > 1
+            else (orm_effective_dump_names | first)
+          }}
+        orm_effective_dump_files: >-
+          {%- set out = [] -%}
+          {%- for dump_name in orm_effective_dump_names -%}
+            {%- set _ = out.append(orm_dump_storage_data_dir_effective ~ '/' ~ dump_name) -%}
+          {%- endfor -%}
+          {{ out }}
+        orm_effective_dump_file: "{{ orm_dump_storage_data_dir_effective }}/{{ orm_effective_dump_names | first }}"
         orm_effective_dump_reference: >-
           {{
             (orm_dump_storage_protocol_effective | upper)
@@ -181,29 +317,13 @@
             ~ ':'
             ~ (orm_dump_storage_path | regex_replace('/$', ''))
             ~ '/'
-            ~ (_orm_restore_dump_name_resolved.stdout | trim)
+            ~ (
+                (orm_effective_dump_names | first | regex_replace('_[0-9]{2}\\.dmp$', '.dmp'))
+                if orm_effective_dump_names | length > 1
+                else (orm_effective_dump_names | first)
+              )
           }}
         orm_restore_dump_source: "{{ orm_dump_storage_protocol_effective | upper }} DIRETO"
-
-    - name: Restore dump | Validar dump diretamente no storage compartilhado
-      ansible.builtin.stat:
-        path: "{{ orm_effective_dump_file }}"
-        get_checksum: false
-        get_mime: false
-        get_attributes: false
-      register: _orm_restore_shared_dump_stat
-      become: true
-      become_user: "{{ orm_os_user_effective }}"
-
-    - name: Restore dump | Confirmar dump válido no storage compartilhado
-      ansible.builtin.assert:
-        that:
-          - _orm_restore_shared_dump_stat.stat.exists | default(false)
-          - _orm_restore_shared_dump_stat.stat.isreg | default(false)
-          - _orm_restore_shared_dump_stat.stat.size | default(0) | int > 0
-        fail_msg: >-
-          Dump não encontrado ou vazio no storage {{ orm_dump_storage_protocol_effective | upper }}:
-          {{ orm_effective_dump_file }}.
 
   rescue:
 
@@ -228,83 +348,193 @@
     - not (orm_host_failed | bool)
   block:
 
-    - name: Restore dump | Resolver nome local
+    - name: Restore dump | Resolver arquivos locais
       ansible.builtin.shell: |
         set -euo pipefail
 
+        STORAGE_DIR="{{ orm_restore_dir }}"
         REQUESTED="{{ orm_restore_dump_name | default('latest') | trim }}"
 
-        if [ "$REQUESTED" = "latest" ]; then
-          find "{{ orm_restore_dir }}" \
-            -maxdepth 1 \
-            -type f \
-            -name '*.dmp' \
-            -printf '%T@ %f\n' 2>/dev/null \
-          | sort -nr \
-          | head -n1 \
-          | cut -d' ' -f2-
-        else
-          case "$REQUESTED" in
-            *.dmp)
-              printf '%s\n' "$REQUESTED"
-              ;;
-            *)
-              printf '%s.dmp\n' "$REQUESTED"
-              ;;
-          esac
-        fi
+        resolve_requested() {
+          local requested="$1"
+
+          if [ "$requested" = "latest" ]; then
+            newest="$(
+              find "$STORAGE_DIR" -maxdepth 1 -type f -name '*.dmp' -printf '%T@ %f\n' 2>/dev/null \
+              | sort -nr \
+              | head -n1 \
+              | cut -d' ' -f2-
+            )"
+
+            [ -n "$newest" ] || exit 10
+            requested="$newest"
+          else
+            case "$requested" in
+              *.dmp) ;;
+              *) requested="${requested}.dmp" ;;
+            esac
+          fi
+
+          if [ -f "$STORAGE_DIR/$requested" ]; then
+            if [[ "$requested" =~ ^(.+)_([0-9][0-9])\.dmp$ ]]; then
+              prefix="${BASH_REMATCH[1]}"
+              mapfile -t siblings < <(
+                find "$STORAGE_DIR" -maxdepth 1 -type f -name "${prefix}_[0-9][0-9].dmp" -printf '%f\n' 2>/dev/null | sort
+              )
+
+              if [ -n "${siblings[1]:-}" ]; then
+                printf '%s\n' "${siblings[@]}"
+                return
+              fi
+            fi
+
+            printf '%s\n' "$requested"
+            return
+          fi
+
+          stem="${requested%.dmp}"
+          mapfile -t parts < <(
+            find "$STORAGE_DIR" -maxdepth 1 -type f -name "${stem}_[0-9][0-9].dmp" -printf '%f\n' 2>/dev/null | sort
+          )
+
+          [ -n "${parts[0]:-}" ] || exit 11
+          printf '%s\n' "${parts[@]}"
+        }
+
+        resolve_requested "$REQUESTED"
       args:
         executable: /bin/bash
-      register: _orm_restore_local_name
+      register: _orm_restore_local_names
       changed_when: false
       become: true
       become_user: "{{ orm_os_user_effective }}"
 
-    - name: Restore dump | Validar nome local resolvido
+    - name: Restore dump | Publicar nomes locais resolvidos
+      ansible.builtin.set_fact:
+        orm_effective_dump_names: >-
+          {{
+            _orm_restore_local_names.stdout_lines
+            | default([])
+            | map('trim')
+            | reject('equalto', '')
+            | unique
+            | list
+          }}
+
+    - name: Restore dump | Validar nomes locais resolvidos
       ansible.builtin.assert:
         that:
-          - _orm_restore_local_name.stdout | trim | length > 0
-          - (_orm_restore_local_name.stdout | trim | basename) == (_orm_restore_local_name.stdout | trim)
-          - _orm_restore_local_name.stdout | trim is match('^[A-Za-z0-9_.-]+\\.dmp$')
-        fail_msg: >-
-          Nenhum dump .dmp foi encontrado em
-          {{ orm_restore_dir }} para o restore.
+          - item | basename == item
+          - item is match('^[A-Za-z0-9_.-]+\.dmp$')
+        fail_msg: "Nome de dump local inválido: {{ item }}"
+      loop: "{{ orm_effective_dump_names }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Restore dump | Validar que ao menos um arquivo local foi resolvido
+      ansible.builtin.assert:
+        that:
+          - orm_effective_dump_names | length > 0
+        fail_msg: "Nenhum dump .dmp foi encontrado em {{ orm_restore_dir }} para o restore."
 
     - name: Restore dump | Definir dump local efetivo
       ansible.builtin.set_fact:
-        orm_effective_dump_name: "{{ _orm_restore_local_name.stdout | trim }}"
-        orm_effective_dump_file: "{{ orm_restore_dir }}/{{ _orm_restore_local_name.stdout | trim }}"
-        orm_effective_dump_reference: "{{ orm_restore_dir }}/{{ _orm_restore_local_name.stdout | trim }}"
+        orm_effective_dump_name: >-
+          {{
+            (orm_effective_dump_names | first | regex_replace('_[0-9]{2}\\.dmp$', '.dmp'))
+            if orm_effective_dump_names | length > 1
+            else (orm_effective_dump_names | first)
+          }}
+        orm_effective_dump_files: >-
+          {%- set out = [] -%}
+          {%- for dump_name in orm_effective_dump_names -%}
+            {%- set _ = out.append(orm_restore_dir ~ '/' ~ dump_name) -%}
+          {%- endfor -%}
+          {{ out }}
+        orm_effective_dump_file: "{{ orm_restore_dir }}/{{ orm_effective_dump_names | first }}"
+        orm_effective_dump_reference: >-
+          {{
+            orm_restore_dir
+            ~ '/'
+            ~ (
+                (orm_effective_dump_names | first | regex_replace('_[0-9]{2}\\.dmp$', '.dmp'))
+                if orm_effective_dump_names | length > 1
+                else (orm_effective_dump_names | first)
+              )
+          }}
         orm_restore_dump_source: "LOCAL"
 
 
-- name: Restore dump | Validar dump final antes de qualquer ação destrutiva
+- name: Restore dump | Validar arquivos finais antes de qualquer ação destrutiva
   ansible.builtin.stat:
-    path: "{{ orm_effective_dump_file }}"
+    path: "{{ item }}"
     get_checksum: false
     get_mime: false
     get_attributes: false
-  register: _orm_restore_dump_stat
+  loop: "{{ orm_effective_dump_files }}"
+  loop_control:
+    label: "{{ item | basename }}"
+  register: _orm_restore_dump_stats
   become: true
   become_user: "{{ orm_os_user_effective }}"
   when: not (orm_host_failed | bool)
 
-- name: Restore dump | Registrar falha quando dump final não for válido
+- name: Restore dump | Registrar falha quando algum arquivo final não for válido
   ansible.builtin.set_fact:
     orm_host_failed: true
     orm_host_failed_task: "Validar dump para restore"
     orm_host_error_msg: >-
-      Dump de restore não existe, não é arquivo regular ou está vazio:
-      {{ orm_effective_dump_reference | default(orm_effective_dump_file | default('não resolvido')) }}.
+      Um ou mais arquivos do dump de restore não existem, não são regulares ou estão vazios.
+      Dump={{ orm_effective_dump_reference | default('não resolvido') }}.
   when:
     - not (orm_host_failed | bool)
-    - not (
-        _orm_restore_dump_stat.stat.exists | default(false)
-        and _orm_restore_dump_stat.stat.isreg | default(false)
-        and (_orm_restore_dump_stat.stat.size | default(0) | int > 0)
+    - >-
+      (
+        _orm_restore_dump_stats.results
+        | default([])
+        | rejectattr('stat.exists', 'defined')
+        | list
+        | length > 0
+      )
+      or
+      (
+        _orm_restore_dump_stats.results
+        | default([])
+        | selectattr('stat.exists', 'defined')
+        | selectattr('stat.exists', 'equalto', false)
+        | list
+        | length > 0
+      )
+      or
+      (
+        _orm_restore_dump_stats.results
+        | default([])
+        | selectattr('stat.isreg', 'defined')
+        | selectattr('stat.isreg', 'equalto', false)
+        | list
+        | length > 0
+      )
+      or
+      (
+        _orm_restore_dump_stats.results
+        | default([])
+        | selectattr('stat.size', 'defined')
+        | selectattr('stat.size', 'equalto', 0)
+        | list
+        | length > 0
       )
 
-- name: Restore dump | Publicar tamanho do dump
+- name: Restore dump | Publicar tamanho total e quantidade de arquivos
   ansible.builtin.set_fact:
-    orm_restore_dump_size_bytes: "{{ _orm_restore_dump_stat.stat.size | default(0) | int }}"
+    orm_restore_dump_size_bytes: >-
+      {{
+        _orm_restore_dump_stats.results
+        | default([])
+        | map(attribute='stat')
+        | selectattr('size', 'defined')
+        | map(attribute='size')
+        | map('int')
+        | sum
+      }}
+    orm_restore_dump_files_count: "{{ orm_effective_dump_names | length }}"
   when: not (orm_host_failed | bool)
