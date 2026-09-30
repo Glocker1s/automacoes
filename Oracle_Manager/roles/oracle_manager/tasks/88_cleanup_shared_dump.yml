@@ -51,10 +51,10 @@
     - _orm_cleanup_enabled | bool
     - _orm_cleanup_action in ['restore', 'sync']
 
-- name: Shared cleanup | Inicializar validação de hosts
+- name: Shared cleanup | Inicializar validação de hosts e dump sets
   ansible.builtin.set_fact:
     _orm_cleanup_not_success_hosts: []
-    _orm_cleanup_dump_names: []
+    _orm_cleanup_dump_set_signatures: []
   when:
     - _orm_cleanup_enabled | bool
     - _orm_cleanup_action in ['restore', 'sync']
@@ -70,20 +70,44 @@
     - _orm_cleanup_action in ['restore', 'sync']
     - hostvars[item].orm_host_status | default('NÃO EXECUTADO') != 'SUCESSO'
 
-- name: Shared cleanup | Resolver dump utilizado pelos destinos
+- name: Shared cleanup | Resolver dump set utilizado pelos destinos
   ansible.builtin.set_fact:
-    _orm_cleanup_dump_names: "{{ _orm_cleanup_dump_names + [hostvars[item].orm_effective_dump_name] }}"
+    _orm_cleanup_dump_set_signatures: >-
+      {{
+        _orm_cleanup_dump_set_signatures
+        +
+        [
+          (
+            hostvars[item].orm_effective_dump_names
+            | default(
+                [hostvars[item].orm_effective_dump_name]
+                if hostvars[item].orm_effective_dump_name | default('') | length > 0
+                else []
+              )
+            | sort
+            | join('|')
+          )
+        ]
+      }}
   loop: "{{ _orm_cleanup_restore_hosts | default([]) }}"
   loop_control:
     label: "{{ item }}"
   when:
     - _orm_cleanup_enabled | bool
     - _orm_cleanup_action in ['restore', 'sync']
-    - hostvars[item].orm_effective_dump_name | default('') | length > 0
+    - >-
+      (
+        hostvars[item].orm_effective_dump_names | default([]) | length > 0
+      )
+      or
+      (
+        hostvars[item].orm_effective_dump_name | default('') | length > 0
+      )
 
-- name: Shared cleanup | Publicar dumps únicos
+- name: Shared cleanup | Publicar dump sets únicos
   ansible.builtin.set_fact:
-    _orm_cleanup_dump_names_unique: "{{ _orm_cleanup_dump_names | unique | list }}"
+    _orm_cleanup_dump_set_signatures_unique: >-
+      {{ _orm_cleanup_dump_set_signatures | reject('equalto', '') | unique | list }}
   when:
     - _orm_cleanup_enabled | bool
     - _orm_cleanup_action in ['restore', 'sync']
@@ -99,32 +123,32 @@
     - _orm_cleanup_action in ['restore', 'sync']
     - _orm_cleanup_not_success_hosts | default([]) | length > 0
 
-- name: Shared cleanup | Registrar inconsistência no dump resolvido
+- name: Shared cleanup | Registrar inconsistência no dump set resolvido
   ansible.builtin.set_fact:
     orm_storage_cleanup_failed: true
     orm_storage_cleanup_error: >-
       Cleanup do storage compartilhado não executado.
-      Era esperado exatamente um dump utilizado pelos destinos,
+      Era esperado exatamente um dump set comum aos destinos,
       mas foram resolvidos:
-      {{ _orm_cleanup_dump_names_unique | default([]) | join(', ') }}.
+      {{ _orm_cleanup_dump_set_signatures_unique | default([]) | join(' ; ') }}.
   when:
     - _orm_cleanup_enabled | bool
     - _orm_cleanup_action in ['restore', 'sync']
     - _orm_cleanup_not_success_hosts | default([]) | length == 0
-    - _orm_cleanup_dump_names_unique | default([]) | length != 1
+    - _orm_cleanup_dump_set_signatures_unique | default([]) | length != 1
 
-- name: Shared cleanup | Remover dump consumido
+- name: Shared cleanup | Remover dump set consumido
   when:
     - _orm_cleanup_enabled | bool
     - _orm_cleanup_action in ['restore', 'sync']
     - _orm_cleanup_not_success_hosts | default([]) | length == 0
-    - _orm_cleanup_dump_names_unique | default([]) | length == 1
+    - _orm_cleanup_dump_set_signatures_unique | default([]) | length == 1
     - _orm_cleanup_delegate_host | default('') | length > 0
   block:
 
     - name: Shared cleanup | Resolver parâmetros
       ansible.builtin.set_fact:
-        _orm_cleanup_dump_name: "{{ _orm_cleanup_dump_names_unique | first }}"
+        _orm_cleanup_dump_names: "{{ (_orm_cleanup_dump_set_signatures_unique | first).split('|') }}"
         _orm_cleanup_oracle_user: >-
           {{ hostvars[_orm_cleanup_delegate_host].orm_os_user_effective | default(hostvars[_orm_cleanup_delegate_host].orm_os_user | default(orm_default_os_user)) }}
 
@@ -134,8 +158,9 @@
           - _orm_cleanup_storage_protocol in ['cifs', 'nfs']
           - _orm_cleanup_storage_enabled | bool
           - _orm_cleanup_storage_server | length > 0
+          - _orm_cleanup_dump_names | length > 0
         fail_msg: >-
-          Storage {{ _orm_cleanup_storage_protocol | upper }} não configurado para cleanup.
+          Storage {{ _orm_cleanup_storage_protocol | upper }} ou dump set não configurado para cleanup.
           Label={{ _orm_cleanup_storage_label }}.
 
     - name: Shared cleanup | Criar diretório de montagem
@@ -202,12 +227,11 @@
       become_user: root
       when: _orm_cleanup_storage_protocol == 'nfs'
 
-    - name: Shared cleanup | Remover dump e latest relacionado
+    - name: Shared cleanup | Remover dump set e latest relacionado
       ansible.builtin.shell: |
         set -euo pipefail
 
         STORAGE_DIR="{{ orm_dump_storage_mount_dir }}{{ orm_dump_storage_path | regex_replace('/$', '') }}"
-        DUMP_NAME="{{ _orm_cleanup_dump_name }}"
         MANIFEST="$STORAGE_DIR/{{ orm_latest_manifest_name }}"
 
         if [ ! -d "$STORAGE_DIR" ]; then
@@ -215,37 +239,54 @@
           exit 20
         fi
 
-        if [ -f "$STORAGE_DIR/$DUMP_NAME" ]; then
-          rm -f "$STORAGE_DIR/$DUMP_NAME"
-          echo "__DUMP_REMOVED__=true"
-        else
-          echo "__DUMP_ALREADY_ABSENT__=true"
-        fi
+        removed=0
+        while IFS= read -r DUMP_NAME; do
+          [ -n "$DUMP_NAME" ] || continue
+
+          case "$DUMP_NAME" in
+            */*)
+              echo "Nome de dump inválido para cleanup: $DUMP_NAME" >&2
+              exit 21
+              ;;
+          esac
+
+          if [ -f "$STORAGE_DIR/$DUMP_NAME" ]; then
+            rm -f -- "$STORAGE_DIR/$DUMP_NAME"
+            echo "__DUMP_REMOVED__=$DUMP_NAME"
+            removed=1
+          else
+            echo "__DUMP_ALREADY_ABSENT__=$DUMP_NAME"
+          fi
+        done <<< "$ORM_CLEANUP_DUMP_NAMES"
 
         if [ -f "$MANIFEST" ]; then
-          LATEST="$(head -n1 "$MANIFEST" | tr -d '\r' | xargs)"
+          CURRENT_SET="$(sed -e 's/\r$//' -e '/^[[:space:]]*$/d' "$MANIFEST" | sort | paste -sd'|' -)"
+          EXPECTED_SET="$(printf '%s\n' "$ORM_CLEANUP_DUMP_NAMES" | sed -e '/^[[:space:]]*$/d' | sort | paste -sd'|' -)"
 
-          if [ "$LATEST" = "$DUMP_NAME" ]; then
-            rm -f "$MANIFEST"
+          if [ "$CURRENT_SET" = "$EXPECTED_SET" ]; then
+            rm -f -- "$MANIFEST"
             echo "__LATEST_REMOVED__=true"
           else
-            echo "__LATEST_KEPT__=$LATEST"
+            echo "__LATEST_KEPT__=$CURRENT_SET"
           fi
         fi
 
         sync
+        echo "__DUMP_SET_REMOVED__=$removed"
       args:
         executable: /bin/bash
+      environment:
+        ORM_CLEANUP_DUMP_NAMES: "{{ _orm_cleanup_dump_names | join('\n') }}"
       register: _orm_cleanup_exec
       delegate_to: "{{ _orm_cleanup_delegate_host }}"
       become: true
       become_user: "{{ _orm_cleanup_oracle_user }}"
-      changed_when: true
+      changed_when: "'__DUMP_REMOVED__=' in (_orm_cleanup_exec.stdout | default('')) or '__LATEST_REMOVED__=true' in (_orm_cleanup_exec.stdout | default(''))"
 
     - name: Shared cleanup | Publicar resultado
       ansible.builtin.set_fact:
         orm_storage_cleanup_performed: true
-        orm_storage_cleanup_dump_removed: "{{ '__DUMP_REMOVED__=true' in (_orm_cleanup_exec.stdout | default('')) }}"
+        orm_storage_cleanup_dump_removed: "{{ '__DUMP_REMOVED__=' in (_orm_cleanup_exec.stdout | default('')) }}"
         orm_storage_cleanup_latest_removed: "{{ '__LATEST_REMOVED__=true' in (_orm_cleanup_exec.stdout | default('')) }}"
 
   rescue:
@@ -258,7 +299,7 @@
             ansible_failed_result.msg
             | default(
                 ansible_failed_result.stderr
-                | default('Falha ao remover dump consumido do storage compartilhado.')
+                | default('Falha ao remover dump set consumido do storage compartilhado.')
               )
           }}
 
