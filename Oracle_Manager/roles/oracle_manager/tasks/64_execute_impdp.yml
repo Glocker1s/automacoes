@@ -462,8 +462,9 @@
     content: |
       TABLES={{ orm_sequence_repair_tables | join(',') }}
       DIRECTORY={{ orm_directory_name_effective }}
-      DUMPFILE={{ orm_effective_dump_name }}
+      DUMPFILE={{ orm_effective_dump_names | join(',') }}
       LOGFILE={{ orm_datapump_log_directory_name_effective }}:{{ orm_sequence_repair_impdp_log_basename }}
+      PARALLEL={{ orm_restore_parallel }}
   become: true
   when:
     - orm_sequence_repair_attempted | default(false) | bool
