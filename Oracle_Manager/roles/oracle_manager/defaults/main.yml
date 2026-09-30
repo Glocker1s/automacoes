@@ -65,6 +65,8 @@ orm_probe_ssh_enabled: true
 orm_fail_on_unreachable: true
 
 # DATA PUMP - BACKUP
+# parallel=1 mantém dump único.
+# parallel>1 usa dump set com %U e múltiplos arquivos .dmp (1 a 99).
 
 orm_backup_compression_default: "none"
 orm_backup_parallel_default: 1
@@ -75,6 +77,7 @@ orm_backup_validate_dump_default: true
 orm_backup_storage_mode_default: "local"
 
 # DATA PUMP - RESTORE
+# O valor é aplicado diretamente ao PARALLEL do impdp.
 
 orm_restore_parallel_default: 1
 orm_restore_extra_args_default: ""
