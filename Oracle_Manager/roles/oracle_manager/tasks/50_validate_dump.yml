@@ -1,11 +1,11 @@
 ---
-- name: Backup validation | Verificar dump gerado
-  ansible.builtin.stat:
-    path: "{{ orm_dump_file }}"
-    get_checksum: false
-    get_mime: false
-    get_attributes: false
-  register: _orm_dump_stat
+- name: Backup validation | Localizar arquivos do dump gerado
+  ansible.builtin.find:
+    paths: "{{ orm_dump_output_dir }}"
+    patterns: "{{ orm_dump_discovery_pattern_basename }}"
+    file_type: file
+    recurse: false
+  register: _orm_dump_find
   become: true
   become_user: "{{ orm_os_user_effective }}"
 
@@ -19,20 +19,59 @@
   become: true
   become_user: "{{ orm_os_user_effective }}"
 
+- name: Backup validation | Publicar arquivos do dump set
+  ansible.builtin.set_fact:
+    orm_dump_files: >-
+      {{
+        _orm_dump_find.files
+        | default([])
+        | sort(attribute='path')
+        | map(attribute='path')
+        | list
+      }}
+
+- name: Backup validation | Publicar nomes e quantidade do dump set
+  ansible.builtin.set_fact:
+    orm_dump_basenames: "{{ orm_dump_files | map('basename') | list }}"
+    orm_dump_files_count: "{{ orm_dump_files | length }}"
+    orm_dump_size_bytes: >-
+      {{
+        _orm_dump_find.files
+        | default([])
+        | map(attribute='size')
+        | map('int')
+        | sum
+      }}
+
+- name: Backup validation | Confirmar geração do dump set
+  ansible.builtin.assert:
+    that:
+      - orm_dump_files_count | int > 0
+    fail_msg: >-
+      Nenhum arquivo de dump foi localizado após o expdp.
+      Pattern={{ orm_dump_output_dir }}/{{ orm_dump_discovery_pattern_basename }}.
+
 - name: Backup validation | Validar artefatos do expdp
   ansible.builtin.assert:
     that:
-      - _orm_dump_stat.stat.exists | default(false)
-      - _orm_dump_stat.stat.isreg | default(false)
-      - _orm_dump_stat.stat.size | default(0) | int > 0
+      - orm_dump_files_count | int > 0
+      - >-
+        (
+          _orm_dump_find.files
+          | default([])
+          | selectattr('size', 'defined')
+          | selectattr('size', 'equalto', 0)
+          | list
+          | length
+        ) == 0
       - _orm_datapump_log_stat.stat.exists | default(false)
       - _orm_datapump_log_stat.stat.isreg | default(false)
       - _orm_datapump_log_stat.stat.size | default(0) | int > 0
     fail_msg: >-
-      Validação do backup Oracle falhou. Dump={{ orm_dump_file }},
-      exists={{ _orm_dump_stat.stat.exists | default(false) }}, size={{ _orm_dump_stat.stat.size | default(0) }};
-      log={{ orm_datapump_log_file }}, exists={{ _orm_datapump_log_stat.stat.exists | default(false) }}.
-
-- name: Backup validation | Publicar tamanho do dump
-  ansible.builtin.set_fact:
-    orm_dump_size_bytes: "{{ _orm_dump_stat.stat.size | int }}"
+      Validação do backup Oracle falhou.
+      Pattern={{ orm_dump_output_dir }}/{{ orm_dump_discovery_pattern_basename }},
+      arquivos={{ orm_dump_files_count | default(0) }},
+      tamanho_total={{ orm_dump_size_bytes | default(0) }};
+      log={{ orm_datapump_log_file }},
+      exists={{ _orm_datapump_log_stat.stat.exists | default(false) }}.
+  when: orm_backup_validate_dump | bool
