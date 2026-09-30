@@ -58,11 +58,13 @@ cm:
         # RESTORE
         # --------------------------------------------------------------------
         restore:
-          
+
           root_dir: "/backup/postgres_manager_restore"
+
           # Estratégia padrão do restore.
           # Pode ser sobrescrita por host com restore_mode.
           mode: "promote"
+          restore_only_suffix: "_new"
 
           # Sufixo da database temporária.
           # dbcvm -> dbcvm_restoring
@@ -94,9 +96,12 @@ cm:
 
             # Não restaura os dados materializados das MVs.
             # Elas serão atualizadas no destino depois das transformações.
-            - "MATERIALIZED VIEW DATA public mv_search_companys"
-            - "MATERIALIZED VIEW DATA public mv_company_balance_guide"
-            - "MATERIALIZED VIEW DATA public mv_masking_demo"
+
+            - "MATERIALIZED VIEW DATA"
+
+            # - "MATERIALIZED VIEW DATA public mv_search_companys"
+            # - "MATERIALIZED VIEW DATA public mv_company_balance_guide"
+            # - "MATERIALIZED VIEW DATA public mv_masking_demo"
 
         # --------------------------------------------------------------------
         # CRIAÇÃO DA _RESTORING
@@ -206,6 +211,9 @@ cm:
 
           # Liga configuração de Foreign Servers/User Mappings.
           enabled: true
+
+          run_on_envs:
+            - "tu"
 
           # Foreign Servers persistentes do PostgreSQL.
           servers:
@@ -327,22 +335,22 @@ cm:
 
           # false = somente items.
           # true  = procura todas as MVs da database.
-          refresh_all: false
+          refresh_all: true
 
-          items:
-            - schema: "public"
-              name: "mv_search_companys"
+          items: []
+            # - schema: "public"
+            #   name: "mv_search_companys"
 
-              # true usaria REFRESH MATERIALIZED VIEW CONCURRENTLY.
-              concurrently: false
+            #   # true usaria REFRESH MATERIALIZED VIEW CONCURRENTLY.
+            #   concurrently: false
 
-            - schema: "public"
-              name: "mv_company_balance_guide"
-              concurrently: false
+            # - schema: "public"
+            #   name: "mv_company_balance_guide"
+            #   concurrently: false
 
-            - schema: "public"
-              name: "mv_masking_demo"
-              concurrently: false
+            # - schema: "public"
+            #   name: "mv_masking_demo"
+            #   concurrently: false
 
         # --------------------------------------------------------------------
         # MANUTENÇÃO
