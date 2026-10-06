@@ -1,0 +1,513 @@
+- name: Seed cm seguro
+  ansible.builtin.set_fact:
+    _cm: "{{ cm | default({}) }}"
+
+- name: Seed patch_checks seguro
+  ansible.builtin.set_fact:
+    _pc: "{{ _cm.get('patch_checks', {}) }}"
+
+- name: Seed defaults/groups/hosts seguros
+  ansible.builtin.set_fact:
+    _pc_defaults: "{{ _pc.get('defaults', {}) }}"
+    _pc_groups: "{{ _pc.get('groups', {}) }}"
+    _pc_hosts: "{{ _pc.get('hosts', {}) }}"
+
+- name: Indexar overrides de host sem diferenciar maiúsculas/minúsculas
+  ansible.builtin.set_fact:
+    _pc_hosts_index: >-
+      {%- set out = {} -%}
+      {%- for h, cfg in (_pc_hosts | default({})).items() -%}
+        {%- set key = (h | string | trim | lower) -%}
+        {%- if key | length > 0 -%}
+          {%- set _ = out.update({ key: cfg }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Garantir target_hosts como lista
+  ansible.builtin.set_fact:
+    target_hosts: >-
+      {%- set raw = target_hosts | default([]) -%}
+      {%- if raw is sequence and not (raw is string) -%}
+        {{ raw | list | reject('equalto','') | list | unique }}
+      {%- else -%}
+        {%- set txt = (raw | string | trim) -%}
+        {%- set parsed = (txt | from_yaml) if (txt | regex_search('^[\\[\\{]')) else None -%}
+        {%- if parsed is sequence and not (parsed is string) -%}
+          {{ parsed | list | reject('equalto','') | list | unique }}
+        {%- else -%}
+          {{ (txt
+               | regex_replace('[\\[\\]\"]','')
+               | regex_replace("\\'","")
+               | regex_replace('\\s*,\\s*', ',')
+               | split(',')
+               | reject('equalto','')
+               | list
+             ) | unique }}
+        {%- endif -%}
+      {%- endif -%}
+
+- name: Resolver envs selecionados (vazio = todos)
+  ansible.builtin.set_fact:
+    _selected_envs_resolved: >-
+      {%- set envs = (cm_base.cm.patch_checks.envs | default({})) -%}
+      {%- set sel  = _selected_envs | default([]) -%}
+      {%- if sel | length > 0 -%}
+        {{ sel | map('string') | map('trim') | map('lower') | reject('equalto','') | unique | list }}
+      {%- else -%}
+        {{ envs.keys() | map('string') | map('trim') | map('lower') | reject('equalto','') | unique | list }}
+      {%- endif -%}
+
+- name: Base groups (sem overlay de env)
+  ansible.builtin.set_fact:
+    _base_groups_no_env: "{{ hostvars['localhost']._base_groups | default(_pc_groups) }}"
+
+- name: Construir members por grupo e overlays por host/grupo (por env)
+  ansible.builtin.set_fact:
+    _members_by_group: >-
+      {%- set out = {} -%}
+      {%- set envs = (cm_base.cm.patch_checks.envs | default({})) -%}
+      {%- set selE = _selected_envs_resolved | default([]) -%}
+      {%- set selG = _selected_groups | default([]) -%}
+      {%- for envname, E in envs.items() -%}
+        {%- set env_l = (envname | string | lower) -%}
+        {%- if selE | length == 0 or env_l in selE -%}
+          {%- for gname, gconf in (E.groups | default({})).items() -%}
+            {%- set g_l = (gname | string | trim | lower) -%}
+            {%- if selG | length == 0 or g_l in selG -%}
+              {%- set raw = gconf.get('members', gconf.get('maquinas', gconf.get('hosts', []))) -%}
+              {%- set mems = (
+                    raw if (raw is sequence and raw is not string)
+                    else ((raw | default('') | string | trim)
+                          | regex_replace('\\s*,\\s*', ',')
+                          | split(',')
+                          | reject('equalto','') | list)
+                  ) -%}
+              {%- set mems = mems | map('string') | map('trim') | reject('equalto','') | list -%}
+              {%- set cur = out.get(gname, []) -%}
+              {%- set _ = out.update({ gname: ((cur + mems) | unique | list) }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+    _overlay_by_host_group: >-
+      {%- set out = {} -%}
+      {%- set envs = (cm_base.cm.patch_checks.envs | default({})) -%}
+      {%- set selE = _selected_envs_resolved | default([]) -%}
+      {%- set selG = _selected_groups | default([]) -%}
+      {%- for envname, E in envs.items() -%}
+        {%- set env_l = (envname | string | lower) -%}
+        {%- if selE | length == 0 or env_l in selE -%}
+          {%- for gname, gconf in (E.groups | default({})).items() -%}
+            {%- set g_l = (gname | string | trim | lower) -%}
+            {%- if selG | length == 0 or g_l in selG -%}
+              {%- set raw = gconf.get('members', gconf.get('maquinas', gconf.get('hosts', []))) -%}
+              {%- set mems = (
+                    raw if (raw is sequence and raw is not string)
+                    else ((raw | default('') | string | trim)
+                          | regex_replace('\\s*,\\s*', ',')
+                          | split(',')
+                          | reject('equalto','') | list)
+                  ) -%}
+              {%- set mems = mems | map('string') | map('trim') | reject('equalto','') | list -%}
+
+              {%- set cleaned = (gconf | dict2items
+                                | rejectattr('key','in',['members','maquinas','hosts'])
+                                | items2dict) -%}
+
+              {%- for h in mems -%}
+                {%- set hkey = (h | string | trim | lower) -%}
+                {%- if hkey | length > 0 -%}
+                  {%- set _ = out.setdefault(hkey, {}) -%}
+                  {%- set cur = out[hkey].get(gname, {}) -%}
+                  {%- set _ = out[hkey].update({ gname: (cur | combine(cleaned, recursive=True)) }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Construir mapa de grupos aplicados por host (via env members, case-insensitive)
+  ansible.builtin.set_fact:
+    patch_group_membership: >-
+      {%- set out = {} -%}
+      {%- set target_index = {} -%}
+      {%- set TH = (target_hosts | default([])) | map('string') | map('trim') | reject('equalto','') | list -%}
+
+      {%- for h in TH -%}
+        {%- set h_real = (h | string | trim) -%}
+        {%- set h_key = (h_real | lower) -%}
+        {%- set _ = target_index.update({ h_key: h_real }) -%}
+        {%- set _ = out.setdefault(h_real, []) -%}
+      {%- endfor -%}
+
+      {%- for gname, mems in (_members_by_group | default({})).items() -%}
+        {%- for h in (mems | default([])) -%}
+          {%- set member_key = (h | string | trim | lower) -%}
+          {%- if member_key in target_index -%}
+            {%- set target_host = target_index[member_key] -%}
+            {%- if gname not in out[target_host] -%}
+              {%- set _ = out[target_host].append(gname) -%}
+            {%- endif -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Normalizar grupos (para report e leitura)
+  ansible.builtin.set_fact:
+    _groups_norm: >-
+      {%- set base = _base_groups_no_env | default({}) -%}
+      {%- set selG = _selected_groups | default([]) -%}
+      {%- set out = {} -%}
+      {%- for gn, g in base.items() -%}
+        {%- set gn_l = (gn | string | trim | lower) -%}
+        {%- if (selG | length == 0) or (gn_l in selG) -%}
+          {%- set members = (_members_by_group.get(gn, []) | default([])) -%}
+          {%- set linux = g.get('linux', {}) -%}
+          {%- set windows = g.get('windows', {}) -%}
+          {%- set merge = g.get('merge', {}) -%}
+          {%- set norm = {
+                'members': members,
+                'merge': merge,
+                'linux': {
+                  'services': linux.get('services', []),
+                  'ports':    linux.get('ports',    []),
+                  'commands': linux.get('commands', []),
+                  'logs':     linux.get('logs',     []),
+                  'db_profile': linux.get('db_profile', None),
+                  'queries':    linux.get('queries', []),
+                  'telnet':   linux.get('telnet',   [])
+                },
+                'windows': {
+                  'services':  windows.get('services',  []),
+                  'ports':     windows.get('ports',     []),
+                  'commands':  windows.get('commands',  []),
+                  'logs':      windows.get('logs',      []),
+                  'db_profile': windows.get('db_profile', None),
+                  'queries':    windows.get('queries', []),
+                  'iis_pools': windows.get('iis_pools', []),
+                  'telnet':    windows.get('telnet',    []),
+                  'show_absent': windows.get('show_absent', true),
+                  'show_disabled': windows.get('show_disabled', true)
+                }
+              } -%}
+          {%- set _ = out.update({gn: norm}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Pré-agregar grupos por host (services/ports/commands/telnet + replace flags)
+  ansible.builtin.set_fact:
+    _grp_acc: >-
+      {%- set acc = {} -%}
+      {%- set TH = (target_hosts | default([])) | map('string') | map('trim') | list -%}
+      {%- set base = _base_groups_no_env | default({}) -%}
+      {%- set overlays = _overlay_by_host_group | default({}) -%}
+      {%- set memb = patch_group_membership | default({}) -%}
+
+      {%- for h in TH -%}
+        {%- set _ = acc.setdefault(h, {}) -%}
+
+        {%- for oskey in ['linux','windows'] -%}
+          {%- set _ = acc[h].setdefault(oskey, {}) -%}
+          {%- set _ = acc[h][oskey].setdefault('services', []) -%}
+          {%- set _ = acc[h][oskey].setdefault('ports',    []) -%}
+          {%- set _ = acc[h][oskey].setdefault('commands', []) -%}
+          {%- set _ = acc[h][oskey].setdefault('telnet',   []) -%}
+          {%- set _ = acc[h][oskey].setdefault('iis_pools',[]) -%}
+          {%- set _ = acc[h][oskey].setdefault('_repl', {'services':False,'ports':False,'commands':False,'telnet':False}) -%}
+        {%- endfor -%}
+
+        {%- set groups = memb.get(h, []) | default([]) -%}
+        {%- set hov_all = overlays.get(h | string | trim | lower, {}) | default({}) -%}
+
+        {%- for gn in groups -%}
+          {%- set gname = (gn | string) -%}
+          {%- set gbase = base.get(gname, base.get(gname|lower, {})) | default({}) -%}
+          {%- set hov   = hov_all.get(gname, hov_all.get(gname|lower, {})) | default({}) -%}
+          {%- set bm    = gbase.get('merge', {}) | default({}) -%}
+          {%- set om    = hov.get('merge', {}) | default({}) -%}
+          {%- set mp    = bm | combine(om, recursive=True) -%}
+
+          {%- for oskey in ['linux','windows'] -%}
+            {%- set bos = gbase.get(oskey, {}) | default({}) -%}
+            {%- set oos = hov.get(oskey, {}) | default({}) -%}
+
+            {%- for key in ['services','ports','commands','telnet','iis_pools'] -%}
+              {%- set b0 = bos.get(key, []) -%}
+              {%- set bL = (b0 if (b0 is sequence and not (b0 is string))
+                            else ([] if b0 is none else [b0])) -%}
+
+              {%- set o_defined = (oos is mapping and (key in oos)) -%}
+              {%- if o_defined -%}
+                {%- set o0 = oos.get(key, []) -%}
+                {%- set oL = (o0 if (o0 is sequence and not (o0 is string))
+                              else ([] if o0 is none else [o0])) -%}
+              {%- else -%}
+                {%- set oL = [] -%}
+              {%- endif -%}
+
+              {%- set pol = (mp.get(key, 'merge') | string | lower) -%}
+
+              {%- if o_defined and pol == 'replace' -%}
+                {%- set lst = oL -%}
+              {%- else -%}
+                {%- set lst = (bL + oL) -%}
+              {%- endif -%}
+
+              {%- if key == 'services' -%}
+                {%- set fixed = [] -%}
+                {%- for it in (lst | default([])) -%}
+                  {%- if it is mapping -%}
+                    {%- set nm = (it.get('name', it.get('service', '')) | string | trim) -%}
+                    {%- if nm | length > 0 -%}
+                      {%- set _ = fixed.append(it) -%}
+                    {%- endif -%}
+                  {%- else -%}
+                    {%- set st = (it | string | trim) -%}
+                    {%- if st | length > 0 -%}
+                      {%- set _ = fixed.append(st) -%}
+                    {%- endif -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {%- set lst = fixed -%}
+
+              {%- elif key == 'ports' -%}
+                {%- set lst = (lst | map('string') | map('trim')
+                               | reject('equalto','') | list) -%}
+
+              {%- else -%}
+                {%- set lst = (lst | map('string') | map('trim')
+                               | reject('equalto','') | list) -%}
+              {%- endif -%}
+
+              {%- set _ = acc[h][oskey][key].extend(lst) -%}
+
+              {%- if pol == 'replace' -%}
+                {%- set _ = acc[h][oskey]['_repl'].update({ key: True }) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ acc }}
+
+- name: Construir checks finais por host (merge/replace) + telnet
+  ansible.builtin.set_fact:
+    patch_check_by_host: >-
+      {%- set out = {} -%}
+      {%- set TH  = (target_hosts | default([])) | map('string') | map('trim') | list -%}
+
+      {%- for h in TH -%}
+        {%- set is_win = (
+              (windows_list | default(groups.windows_targets | default([])))
+              | map('string') | map('trim')
+              | select('equalto', h) | list | length
+            ) > 0 -%}
+        {%- set oskey = ('windows' if is_win else 'linux') -%}
+        {%- set def   = (_pc_defaults.get(oskey, {}) or {}) -%}
+        {%- set hc    = _pc_hosts_index.get(h | string | trim | lower, {}) -%}
+        {%- set mh    = hc.get('merge', {}) -%}
+        {%- set g     = (_grp_acc.get(h, {}) | default({})).get(oskey, {}) -%}
+        {%- set gr    = g.get('_repl', {'services':False,'ports':False,'commands':False,'telnet':False}) -%}
+
+        {%- for key in ['services','ports','commands','telnet'] -%}
+          {%- set d0 = def.get(key, []) -%}
+          {%- set d  = (d0 if (d0 is sequence and not (d0 is string))
+                        else ([] if (d0 is sameas true or d0 is sameas false or d0 is none)
+                              else [d0])) -%}
+
+          {%- set gv = g.get(key, []) -%}
+
+          {%- set hv0 = hc.get(key, []) -%}
+          {%- set hv = (hv0 if (hv0 is sequence and not (hv0 is string))
+                        else ([] if (hv0 is sameas true or hv0 is sameas false or hv0 is none)
+                              else [hv0])) -%}
+
+          {%- set base = ([] if gr.get(key) else d) -%}
+
+          {%- set raw  = ( hv if (mh.get(key,'merge') == 'replace') else (base + gv + hv) ) -%}
+
+          {%- if key == 'services' -%}
+            {%- set ns = namespace(order=[], map={}) -%}
+            {%- for it in raw -%}
+              {%- if it is mapping -%}
+                {%- set nm = (it.get('name', it.get('service', '')) | string | trim) -%}
+                {%- set exp = (it.get('expected', it.get('status', 'running')) | string | trim | lower) -%}
+              {%- else -%}
+                {%- set nm = (it | string | trim) -%}
+                {%- set exp = 'running' -%}
+              {%- endif -%}
+
+              {%- if nm | length > 0 -%}
+                {%- if exp in ['active','started'] -%}{%- set exp = 'running' -%}{%- endif -%}
+                {%- if exp in ['stop','stopped','inactive','disabled'] -%}{%- set exp = 'stopped' -%}{%- endif -%}
+
+                {%- set _ = ns.map.update({ nm: {'name': nm, 'expected': exp} }) -%}
+                {%- if nm not in ns.order -%}{%- set _ = ns.order.append(nm) -%}{%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {%- set val = ns.order | map('extract', ns.map) | list -%}
+
+          {%- elif key == 'ports' -%}
+            {%- set val = (raw | map('string') | list | unique) -%}
+
+          {%- else -%}
+            {%- set val = (raw | list | unique) -%}
+          {%- endif -%}
+
+          {%- set _ = out.update({ h: (out.get(h, {}) | combine({ key: val }, recursive=True)) }) -%}
+        {%- endfor -%}
+
+        {%- if oskey == 'windows' -%}
+          {%- set iis = (g.get('iis_pools', []) | default([])) -%}
+          {%- set _ = out.update({ h: (out.get(h, {}) | combine({ 'iis_pools': (iis | unique | list) }, recursive=True)) }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Construir telnet targets por host (com group)
+  ansible.builtin.set_fact:
+    patch_telnet_targets_by_host: >-
+      {%- set out = {} -%}
+      {%- set TH  = (target_hosts | default([])) | map('string') | map('trim') | list -%}
+      {%- set base = _base_groups_no_env | default({}) -%}
+      {%- set overlays = _overlay_by_host_group | default({}) -%}
+      {%- set memb = patch_group_membership | default({}) -%}
+
+      {%- for h in TH -%}
+        {%- set is_win = (
+              (windows_list | default(groups.windows_targets | default([])))
+              | map('string') | map('trim')
+              | select('equalto', h) | list | length
+            ) > 0 -%}
+        {%- set oskey = ('windows' if is_win else 'linux') -%}
+        {%- set rows = [] -%}
+        {%- set hov_all = overlays.get(h | string | trim | lower, {}) | default({}) -%}
+        {%- set groups = memb.get(h, []) | default([]) -%}
+
+        {%- for gn in groups -%}
+          {%- set gname = (gn | string) -%}
+          {%- set gbase = base.get(gname, base.get(gname|lower, {})) | default({}) -%}
+          {%- set hov   = hov_all.get(gname, hov_all.get(gname|lower, {})) | default({}) -%}
+          {%- set bm    = gbase.get('merge', {}) | default({}) -%}
+          {%- set om    = hov.get('merge', {}) | default({}) -%}
+          {%- set mp    = bm | combine(om, recursive=True) -%}
+
+          {%- set bos = gbase.get(oskey, {}) | default({}) -%}
+          {%- set oos = hov.get(oskey, {}) | default({}) -%}
+
+          {%- set b0 = bos.get('telnet', []) -%}
+          {%- set bL = (b0 if (b0 is sequence and not (b0 is string))
+                        else ([] if b0 is none else [b0])) -%}
+          {%- set o_defined = (oos is mapping and ('telnet' in oos)) -%}
+          {%- if o_defined -%}
+            {%- set o0 = oos.get('telnet', []) -%}
+            {%- set oL = (o0 if (o0 is sequence and not (o0 is string))
+                          else ([] if o0 is none else [o0])) -%}
+          {%- else -%}
+            {%- set oL = [] -%}
+          {%- endif -%}
+
+          {%- set pol = (mp.get('telnet', 'merge') | string | lower) -%}
+          {%- if o_defined and pol == 'replace' -%}
+            {%- set tel_final = oL -%}
+          {%- else -%}
+            {%- set tel_final = (bL + oL) -%}
+          {%- endif -%}
+
+          {%- for t in (tel_final | map('string') | map('trim') | reject('equalto','') | list) -%}
+            {%- set _ = rows.append({'group': gname, 'target': t}) -%}
+          {%- endfor -%}
+        {%- endfor -%}
+
+        {%- set _ = out.update({ h: rows }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Construir db queries por host (com group/profile/name/sql)
+  ansible.builtin.set_fact:
+    patch_db_queries_by_host: >-
+      {%- set out = {} -%}
+      {%- set TH  = (target_hosts | default([])) | map('string') | map('trim') | list -%}
+      {%- set base = _base_groups_no_env | default({}) -%}
+      {%- set overlays = _overlay_by_host_group | default({}) -%}
+      {%- set memb = patch_group_membership | default({}) -%}
+
+      {%- for h in TH -%}
+        {%- set is_win = (
+              (windows_list | default(groups.windows_targets | default([])))
+              | map('string') | map('trim')
+              | select('equalto', h) | list | length
+            ) > 0 -%}
+        {%- set oskey = ('windows' if is_win else 'linux') -%}
+        {%- set rows = [] -%}
+        {%- set hov_all = overlays.get(h | string | trim | lower, {}) | default({}) -%}
+        {%- set groups = memb.get(h, []) | default([]) -%}
+
+        {%- for gn in groups -%}
+          {%- set gname = (gn | string) -%}
+          {%- set gbase = base.get(gname, base.get(gname|lower, {})) | default({}) -%}
+          {%- set hov   = hov_all.get(gname, hov_all.get(gname|lower, {})) | default({}) -%}
+          {%- set bm    = gbase.get('merge', {}) | default({}) -%}
+          {%- set om    = hov.get('merge', {}) | default({}) -%}
+          {%- set mp    = bm | combine(om, recursive=True) -%}
+
+          {%- set bos = gbase.get(oskey, {}) | default({}) -%}
+          {%- set oos = hov.get(oskey, {}) | default({}) -%}
+
+          {%- set dbp = (
+                oos.get('db_profile')
+                if (oos is mapping and ('db_profile' in oos)
+                    and (oos.get('db_profile') is not none)
+                    and ((oos.get('db_profile') | string | trim) | length > 0))
+                else bos.get('db_profile', None)
+              ) -%}
+
+          {%- set bq0 = bos.get('queries', []) -%}
+          {%- set bqL = (bq0 if (bq0 is sequence and not (bq0 is string))
+                         else ([] if bq0 is none else [bq0])) -%}
+          {%- set q_defined = (oos is mapping and ('queries' in oos)) -%}
+          {%- if q_defined -%}
+            {%- set oq0 = oos.get('queries', []) -%}
+            {%- set oqL = (oq0 if (oq0 is sequence and not (oq0 is string))
+                          else ([] if oq0 is none else [oq0])) -%}
+          {%- else -%}
+            {%- set oqL = [] -%}
+          {%- endif -%}
+
+          {%- set polq = (mp.get('queries', 'merge') | string | lower) -%}
+          {%- if q_defined and polq == 'replace' -%}
+            {%- set q_final = oqL -%}
+          {%- else -%}
+            {%- set q_final = (bqL + oqL) -%}
+          {%- endif -%}
+
+          {%- for q in (q_final | list) -%}
+            {%- if q is mapping -%}
+              {%- set name = (q.get('name','') | string | trim) -%}
+              {%- set sql  = (q.get('sql','')  | string) -%}
+              {%- if sql | trim | length > 0 -%}
+                {%- set _ = rows.append({'group': gname, 'profile': dbp, 'name': name, 'sql': sql}) -%}
+              {%- endif -%}
+            {%- else -%}
+              {%- set sql = (q | string) -%}
+              {%- if sql | trim | length > 0 -%}
+                {%- set _ = rows.append({'group': gname, 'profile': dbp, 'name': '', 'sql': sql}) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endfor -%}
+
+        {%- set _ = out.update({ h: rows }) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Mostrar plano efetivo por host (pré-execução)
+  ansible.builtin.debug:
+    var: patch_check_by_host
