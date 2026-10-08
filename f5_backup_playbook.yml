@@ -1,0 +1,75 @@
+---
+- name: F5 - Backup UCS
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Executar F5 Backup Manager
+      block:
+        - name: Marcar fluxo como iniciado sem falha
+          ansible.builtin.set_fact:
+            _f5_backup_flow_failed: false
+            _f5_backup_report_published: false
+
+        - name: Executar role F5 Backup Manager
+          ansible.builtin.include_role:
+            name: f5_backup_manager
+          run_once: true
+
+      rescue:
+        - name: Marcar fluxo como falhado
+          ansible.builtin.set_fact:
+            _f5_backup_flow_failed: true
+
+        - name: Publicar relatório mínimo para falha inesperada
+          ansible.builtin.set_stats:
+            data:
+              send_mail_subject: >-
+                Ansible-Report (FALHA) - {{ awx_job_template_name | default('F5 Backup Manager') }}
+                - Job #{{ awx_job_id | default('local') }}
+              send_mail_body: |
+                <html>
+                  <body style="font-family:Arial,sans-serif;color:#111111;">
+                    <h2>F5 - Backup UCS</h2>
+                    <p><b>Status:</b> FALHA</p>
+                    <p><b>Task:</b> {{ ansible_failed_task.name | default('—') }}</p>
+                    <p><b>Detalhe:</b> {{ ansible_failed_result.msg | default(ansible_failed_result | string) }}</p>
+                  </body>
+                </html>
+          when: not (_f5_backup_report_published | default(false) | bool)
+
+        - name: Finalizar job como falha
+          ansible.builtin.fail:
+            msg: >-
+              F5 Backup Manager finalizado com falha.
+              {{ ansible_failed_result.msg | default('Consulte o relatório da execução.') }}
+
+      always:
+        - name: Remover credencial temporária do CIFS
+          ansible.builtin.file:
+            path: "{{ f5_backup_cifs_password_file }}"
+            state: absent
+          failed_when: false
+          changed_when: false
+          no_log: true
+          when:
+            - f5_backup_cifs_password_file is defined
+            - (f5_backup_cifs_password_file | string | trim | length) > 0
+          run_once: true
+
+        - name: Remover diretório temporário de staging no host
+          ansible.builtin.file:
+            path: "{{ f5_backup_remote_temp_dir | default('/tmp/f5-backup-stage-' ~ (awx_job_id | default('local') | string)) }}"
+            state: absent
+          changed_when: false
+          failed_when: false
+          run_once: true
+
+        - name: Remover diretório temporário local de UCS
+          ansible.builtin.file:
+            path: "{{ f5_backup_local_temp_dir | default('/tmp/f5-backup-' ~ (awx_job_id | default('local') | string)) }}"
+            state: absent
+          delegate_to: localhost
+          changed_when: false
+          failed_when: false
+          run_once: true

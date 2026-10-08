@@ -1,0 +1,199 @@
+{% macro badge(text, level='gray') -%}
+  {%- set bg = '#455a64' -%}
+  {%- if level == 'ok' -%}{%- set bg = '#2e7d32' -%}
+  {%- elif level == 'warn' -%}{%- set bg = '#ef6c00' -%}
+  {%- elif level == 'crit' -%}{%- set bg = '#b00020' -%}
+  {%- elif level == 'blue' -%}{%- set bg = '#1565c0' -%}
+  {%- elif level == 'gray' -%}{%- set bg = '#607d8b' -%}
+  {%- endif -%}
+  <span style="display:inline-block;background-color:{{ bg }};color:#ffffff;border-radius:3px;padding:2px 7px;font-size:11px;font-weight:bold;">{{ text }}</span>
+{%- endmacro %}
+
+{% macro status_badge(status) -%}
+  {%- if status == 'SUCESSO' -%}{{ badge(status, 'ok') }}
+  {%- elif status == 'SUCESSO COM AVISO' -%}{{ badge(status, 'warn') }}
+  {%- elif status == 'NÃO EXECUTADO' -%}{{ badge(status, 'gray') }}
+  {%- else -%}{{ badge(status, 'crit') }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% set has_global_errors = (_f5_backup_global_failed | default(0) | int) > 0 %}
+{% set overall = 'FALHA' if ((_f5_backup_failed | int) > 0 or has_global_errors) else ('ALERTA' if (_f5_backup_warn | int) > 0 else 'OK') %}
+{% set overall_bg = '#2e7d32' if overall == 'OK' else ('#ef6c00' if overall == 'ALERTA' else '#b00020') %}
+
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;color:#111111;">
+  <tr>
+    <td style="padding:8px;">
+      <table role="presentation" width="980" cellspacing="0" cellpadding="0" border="0" style="width:980px;border-collapse:collapse;">
+
+        <!-- CABEÇALHO -->
+        <tr>
+          <td style="background:#263238;color:#ffffff;padding:16px;">
+            <table width="100%" cellspacing="0" cellpadding="0" border="0">
+              <tr>
+                <td>
+                  <div style="font-size:19px;font-weight:bold;">F5 - Backup UCS</div>
+                  <div style="font-size:13px;color:#dbe3e6;margin-top:5px;">
+                    Escopo: <b>{{ f5_target_scope_norm | join(', ') | upper }}</b><br/>
+                    Data: <b>{{ f5_backup_date }}</b><br/>
+                    Job: <b>#{{ awx_job_id | default('local') }}</b>
+                  </div>
+                </td>
+                <td align="right" valign="top">
+                  <span style="display:inline-block;background:{{ overall_bg }};color:#ffffff;padding:5px 12px;font-weight:bold;border-radius:3px;">{{ overall }}</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr><td style="height:12px;"></td></tr>
+
+        <!-- CARDS -->
+        <tr>
+          <td>
+            <table width="100%" cellspacing="8" cellpadding="0" border="0" style="border-collapse:separate;">
+              <tr>
+                <td style="border:1px solid #d9d9d9;padding:12px;width:20%;"><div style="color:#666666;">Equipamentos</div><div style="font-size:24px;font-weight:bold;">{{ _f5_backup_total }}</div></td>
+                <td style="border:1px solid #d9d9d9;padding:12px;width:20%;"><div style="color:#666666;">Sucesso</div><div style="font-size:24px;font-weight:bold;">{{ _f5_backup_ok }}</div></td>
+                <td style="border:1px solid #d9d9d9;padding:12px;width:20%;"><div style="color:#666666;">Avisos</div><div style="font-size:24px;font-weight:bold;">{{ _f5_backup_warn }}</div></td>
+                <td style="border:1px solid #d9d9d9;padding:12px;width:20%;"><div style="color:#666666;">Falhas</div><div style="font-size:24px;font-weight:bold;">{{ _f5_backup_failed }}</div></td>
+                <td style="border:1px solid #d9d9d9;padding:12px;width:20%;"><div style="color:#666666;">Erros gerais</div><div style="font-size:24px;font-weight:bold;">{{ _f5_backup_global_failed | default(0) }}</div></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ERROS GERAIS -->
+        {% if has_global_errors %}
+        <tr><td style="height:14px;"></td></tr>
+        <tr><td style="font-size:15px;font-weight:bold;padding-bottom:6px;">Erros gerais da execução</td></tr>
+        <tr>
+          <td>
+            <table width="100%" cellspacing="0" cellpadding="6" border="0" style="border-collapse:collapse;">
+              <tr style="background:#f2f2f2;">
+                <th align="left" style="border:1px solid #d9d9d9;width:20%;">Etapa</th>
+                <th align="left" style="border:1px solid #d9d9d9;width:30%;">Task</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Detalhe</th>
+              </tr>
+              {% for err in f5_global_errors | default([]) %}
+              <tr>
+                <td style="border:1px solid #d9d9d9;">{{ err.stage }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ err.task }}</td>
+                <td style="border:1px solid #d9d9d9;color:#b00020;">{{ err.message }}</td>
+              </tr>
+              {% endfor %}
+            </table>
+          </td>
+        </tr>
+        {% endif %}
+
+        <tr><td style="height:14px;"></td></tr>
+
+        <!-- RESUMO HA / CONFIG SYNC -->
+        <tr><td style="font-size:15px;font-weight:bold;padding-bottom:6px;">Resumo HA / Config Sync</td></tr>
+        <tr>
+          <td>
+            <table width="100%" cellspacing="0" cellpadding="6" border="0" style="border-collapse:collapse;">
+              <tr style="background:#f2f2f2;">
+                <th align="left" style="border:1px solid #d9d9d9;">Ambiente</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Site</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Topologia</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Device Group</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Sync antes</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Sync depois</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Status</th>
+              </tr>
+              {% if (f5_site_results | default([]) | length) == 0 %}
+              <tr><td colspan="7" style="border:1px solid #d9d9d9;color:#777777;padding:10px;">Nenhum site foi processado.</td></tr>
+              {% endif %}
+              {% for row in f5_site_results | default([]) %}
+              <tr>
+                <td style="border:1px solid #d9d9d9;">{{ row.environment | upper }}</td>
+                <td style="border:1px solid #d9d9d9;"><b>{{ row.site }}</b></td>
+                <td style="border:1px solid #d9d9d9;">{{ 'HA' if row.ha else 'STANDALONE' }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ row.device_group | default('—') if (row.device_group | default('') | length) > 0 else '—' }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ row.sync_before }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ row.sync_after }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ status_badge(row.status) }}</td>
+              </tr>
+              {% if row.message | default('') | length > 0 %}
+              <tr>
+                <td colspan="7" style="border:1px solid #d9d9d9;background:#fafafa;color:#666666;padding:8px 10px;">{{ row.message }}</td>
+              </tr>
+              {% endif %}
+              {% endfor %}
+            </table>
+          </td>
+        </tr>
+
+        <tr><td style="height:16px;"></td></tr>
+
+        <!-- BACKUPS POR EQUIPAMENTO -->
+        <tr><td style="font-size:15px;font-weight:bold;padding-bottom:6px;">Backups por equipamento</td></tr>
+        <tr>
+          <td>
+            <table width="100%" cellspacing="0" cellpadding="6" border="0" style="border-collapse:collapse;">
+              <tr style="background:#f2f2f2;">
+                <th align="left" style="border:1px solid #d9d9d9;">Amb.</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Hostname</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Estado</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Versão</th>
+                <th align="left" style="border:1px solid #d9d9d9;">UCS</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Tamanho</th>
+                <th align="left" style="border:1px solid #d9d9d9;">Status</th>
+              </tr>
+
+              {% if (f5_backup_results | default([]) | length) == 0 %}
+              <tr><td colspan="7" style="border:1px solid #d9d9d9;color:#777777;padding:10px;">Nenhum backup foi processado.</td></tr>
+              {% endif %}
+
+              {% for row in f5_backup_results | default([]) %}
+              {% set backup_not_executed =
+                row.status == 'FALHA'
+                and (row.ucs_name | default('') | trim in ['', '—'])
+                and (row.destination | default('') | trim in ['', '—'])
+              %}
+              {% set backup_display_status = 'NÃO EXECUTADO' if backup_not_executed else row.status %}
+
+              {% if backup_not_executed %}
+                {% if 'Config Sync' in (row.message | default('')) %}
+                  {% set backup_display_message = 'Backup não executado: Config Sync do par não convergiu para In Sync.' %}
+                {% else %}
+                  {% set backup_display_message = 'Backup não executado devido a falha em um pré-requisito do equipamento ou do site.' %}
+                {% endif %}
+              {% else %}
+                {% set backup_display_message = row.message %}
+              {% endif %}
+
+              <tr>
+                <td style="border:1px solid #d9d9d9;">{{ row.environment | upper }}</td>
+                <td style="border:1px solid #d9d9d9;"><b>{{ row.hostname }}</b><br/><span style="color:#777777;font-size:11px;">{{ row.server }}</span></td>
+                <td style="border:1px solid #d9d9d9;">{{ row.role | upper }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ row.version }}</td>
+                <td style="border:1px solid #d9d9d9;"><span style="font-family:Consolas,'Courier New',monospace;font-size:11px;">{{ row.ucs_name if (row.ucs_name | default('') | trim | length) > 0 else '—' }}</span></td>
+                <td style="border:1px solid #d9d9d9;">{{ ('%.2f MB' | format((row.size | int) / 1048576.0)) if (row.size | int) > 0 else '—' }}</td>
+                <td style="border:1px solid #d9d9d9;">{{ status_badge(backup_display_status) }}</td>
+              </tr>
+
+              <tr>
+                <td colspan="7" style="border:1px solid #d9d9d9;background:#fafafa;color:#666666;padding:8px 10px;">
+                  <b>Destino:</b> {{ row.destination if (row.destination | default('') | trim | length) > 0 else '—' }}<br/>
+                  <b>Detalhe:</b> {{ backup_display_message }}
+                </td>
+              </tr>
+
+              {% if not loop.last %}
+              <tr>
+                <td colspan="7" style="height:12px;line-height:12px;font-size:1px;padding:0;border:0;background:#ffffff;">&nbsp;</td>
+              </tr>
+              {% endif %}
+              {% endfor %}
+            </table>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

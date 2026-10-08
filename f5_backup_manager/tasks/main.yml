@@ -1,0 +1,51 @@
+---
+- name: Inicializar contexto global
+  ansible.builtin.set_fact:
+    f5_backup_results: []
+    f5_site_results: []
+    f5_global_errors: []
+    _f5_backup_global_blocked: false
+    f5_backup_date: "—"
+    f5_backup_timestamp: "unknown"
+    f5_target_scope_norm: >-
+      {{ [f5_target_scope | default('all') | string | lower] }}
+  changed_when: false
+
+- name: Preparar execução e armazenamento
+  block:
+    - name: Validar entradas e preparar execução
+      ansible.builtin.include_tasks: 00_validate_inputs.yml
+
+    - name: Preparar acesso CIFS via smbclient
+      ansible.builtin.include_tasks: 10_prepare_cifs.yml
+
+  rescue:
+    - name: Registrar erro global de inicialização
+      ansible.builtin.set_fact:
+        _f5_backup_global_blocked: true
+        f5_global_errors: >-
+          {{
+            f5_global_errors + [{
+              'stage': 'Inicialização / CIFS',
+              'task': ansible_failed_task.name | default('—'),
+              'message': ansible_failed_result.msg | default(ansible_failed_result | string)
+            }]
+          }}
+      changed_when: false
+
+- name: Processar sites F5 selecionados
+  ansible.builtin.include_tasks: 30_process_site.yml
+  loop: "{{ f5_sites_eff | default([]) }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.environment | upper }} / {{ site.name }}"
+  when: not (_f5_backup_global_blocked | bool)
+
+- name: Montar relatório final
+  ansible.builtin.include_tasks: 60_build_report.yml
+
+- name: Limpar recursos locais da execução
+  ansible.builtin.include_tasks: 80_cleanup.yml
+
+- name: Finalizar status do job
+  ansible.builtin.include_tasks: 90_finalize.yml

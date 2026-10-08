@@ -1,0 +1,23 @@
+---
+- name: CIFS | Remover senha temporária
+  ansible.builtin.file:
+    path: "{{ f5_backup_cifs_password_file }}"
+    state: absent
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Remover diretório temporário de staging no host
+  ansible.builtin.file:
+    path: "{{ f5_backup_remote_temp_dir }}"
+    state: absent
+  changed_when: false
+  failed_when: false
+
+- name: Remover diretório temporário local
+  ansible.builtin.file:
+    path: "{{ f5_backup_local_temp_dir }}"
+    state: absent
+  delegate_to: localhost
+  changed_when: false
+  failed_when: false

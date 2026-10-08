@@ -1,0 +1,26 @@
+---
+- name: Registrar membro não processado
+  ansible.builtin.set_fact:
+    f5_backup_results: >-
+      {{
+        f5_backup_results + [{
+          'site': _site_name,
+          'environment': _site_environment,
+          'server': backup_device.server,
+          'hostname': backup_device.hostname | default(backup_device.server),
+          'role': ('standalone' if not (_site_is_ha | default(false) | bool) else backup_device.failover_state | default('unknown')),
+          'version': backup_device.version | default('—'),
+          'sync_before': _site_sync_before | default('N/A'),
+          'sync_after': _site_sync_after | default('N/A'),
+          'ucs_name': '—',
+          'destination': '—',
+          'size': 0,
+          'status': 'FALHA',
+          'message': (
+            backup_device.discovery_error
+            if (not (backup_device.reachable | default(false) | bool) and (backup_device.discovery_error | default('') | length) > 0)
+            else _site_error
+          )
+        }]
+      }}
+  changed_when: false

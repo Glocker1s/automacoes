@@ -1,0 +1,63 @@
+---
+- name: Definir contexto do Config Sync
+  ansible.builtin.set_fact:
+    _site_sync_before: "{{ _site_active.sync_status | default('UNKNOWN') }}"
+    _site_active_provider: >-
+      {{
+        f5_provider_base
+        | combine({
+            'server': _site_active.server,
+            'server_port': (_site_active.port | int),
+            'timeout': (f5_configsync_timeout | int)
+          })
+      }}
+  changed_when: false
+
+- name: Sincronizar ACTIVE para Device Group
+  block:
+    - name: Salvar running-config no ACTIVE antes do sync
+      f5networks.f5_modules.bigip_config:
+        save: true
+        provider: "{{ _site_active_provider }}"
+      delegate_to: localhost
+
+    - name: Executar Config Sync ACTIVE para grupo
+      f5networks.f5_modules.bigip_configsync_action:
+        device_group: "{{ _site_device_group }}"
+        sync_device_to_group: true
+        provider: "{{ _site_active_provider }}"
+      delegate_to: localhost
+      register: _site_configsync_action
+
+    - name: Aguardar Config Sync ficar In Sync
+      f5networks.f5_modules.bigip_device_info:
+        gather_subset:
+          - sync-status
+        provider: "{{ _site_active_provider }}"
+      delegate_to: localhost
+      register: _site_sync_check
+      retries: "{{ f5_configsync_retries | int }}"
+      delay: "{{ f5_configsync_delay | int }}"
+      until: (_site_sync_check.sync_status.status | default('')) == 'In Sync'
+
+    - name: Registrar Config Sync concluído
+      ansible.builtin.set_fact:
+        _site_sync_after: "{{ _site_sync_check.sync_status.status | default('UNKNOWN') }}"
+      changed_when: false
+
+  rescue:
+    - name: Registrar falha do Config Sync
+      ansible.builtin.set_fact:
+        _site_sync_after: >-
+          {{
+            _site_sync_check.sync_status.status
+            if (_site_sync_check is defined and _site_sync_check.sync_status is defined)
+            else 'FALHA'
+          }}
+        _site_blocked: true
+        _site_error: >-
+          Falha no Config Sync ACTIVE -> STANDBY do site {{ _site_name }}.
+          ACTIVE={{ _site_active.hostname | default(_site_active.server) }},
+          Device Group={{ _site_device_group }}.
+          Detalhe: {{ ansible_failed_result.msg | default(ansible_failed_result | string) }}
+      changed_when: false

@@ -1,0 +1,92 @@
+---
+- name: Definir endpoint do membro
+  ansible.builtin.set_fact:
+    _device_server: "{{ device.server if (device is mapping) else device }}"
+    _device_port: "{{ (device.port | default(443)) if (device is mapping) else 443 }}"
+  changed_when: false
+
+- name: Consultar BIG-IP {{ _device_server }}
+  block:
+    - name: Coletar devices, Device Groups e Config Sync
+      f5networks.f5_modules.bigip_device_info:
+        gather_subset:
+          - devices
+          - device-groups
+          - sync-status
+        provider: >-
+          {{
+            f5_provider_base
+            | combine({
+                'server': _device_server,
+                'server_port': (_device_port | int)
+              })
+          }}
+      delegate_to: localhost
+      register: _device_info
+
+    - name: Identificar self device
+      ansible.builtin.set_fact:
+        _device_self: >-
+          {{
+            (
+              _device_info.devices
+              | default([])
+              | selectattr('self', 'defined')
+              | selectattr('self', 'equalto', true)
+              | list
+              | first
+            ) | default({})
+          }}
+        _device_sync_failover_groups: >-
+          {{
+            _device_info.device_groups
+            | default([])
+            | selectattr('type', 'defined')
+            | selectattr('type', 'equalto', 'sync-failover')
+            | map(attribute='name')
+            | list
+          }}
+      changed_when: false
+
+    - name: Registrar descoberta do membro
+      ansible.builtin.set_fact:
+        _site_devices_discovered: >-
+          {{
+            _site_devices_discovered + [{
+              'server': _device_server,
+              'port': (_device_port | int),
+              'hostname': _device_self.hostname | default(_device_server),
+              'failover_state': _device_self.failover_state | default('standalone') | string | lower,
+              'version': _device_self.software_version | default('—'),
+              'management_address': _device_self.management_address | default(_device_server),
+              'sync_status': _device_info.sync_status.status | default('UNKNOWN'),
+              'sync_summary': _device_info.sync_status.summary | default(''),
+              'sync_recommended_action': _device_info.sync_status.recommended_action | default(''),
+              'sync_failover_groups': _device_sync_failover_groups,
+              'reachable': true,
+              'discovery_error': ''
+            }]
+          }}
+      changed_when: false
+
+  rescue:
+    - name: Registrar membro indisponível
+      ansible.builtin.set_fact:
+        _site_devices_discovered: >-
+          {{
+            _site_devices_discovered + [{
+              'server': _device_server,
+              'port': (_device_port | int),
+              'hostname': _device_server,
+              'failover_state': 'unknown',
+              'version': '—',
+              'management_address': _device_server,
+              'sync_status': 'UNKNOWN',
+              'sync_summary': '',
+              'sync_recommended_action': '',
+              'sync_failover_groups': [],
+              'reachable': false,
+              'discovery_error': (ansible_failed_result.msg | default(ansible_failed_result | string))
+            }]
+          }}
+      changed_when: false

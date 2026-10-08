@@ -1,0 +1,66 @@
+---
+# ====== Escopo ======
+# all | prd | dr | hml | prd,dr | ...
+f5_target_scope: "prd"
+
+# Cada item representa um par/grupo HA ou um BIG-IP standalone.
+# Em HA, todos os membros devem ser informados.
+# O campo device_group é opcional: quando vazio, a automação tenta descobrir o primeiro Device Group do tipo sync-failover informado pelo ACTIVE.
+f5_sites:
+  - name: "prd-pair-01"
+    environment: "prd"
+    device_group: "dg-prd-01"
+    devices:
+      - server: "192.168.141.10"
+        port: 443
+      - server: "192.168.141.11"
+        port: 443
+
+  - name: "dr-pair-01"
+    environment: "dr"
+    device_group: "dg-dr-01"
+    devices:
+      - server: "192.168.150.10"
+        port: 443
+      - server: "192.168.150.11"
+        port: 443
+
+  # Exemplo standalone:
+  # - name: "hml-standalone-01"
+  #   environment: "hml"
+  #   devices:
+  #     - server: "192.168.160.10"
+  #       port: 443
+
+# ====== Conexão F5 ======
+f5_user: ""
+f5_password: ""
+f5_validate_certs: false
+f5_provider_timeout: 120
+
+# ====== Config Sync HA ======
+f5_configsync_enabled: true
+f5_configsync_retries: 20
+f5_configsync_delay: 15
+f5_configsync_timeout: 300
+
+# ====== Backup UCS ======
+f5_backup_async_timeout: 1800
+f5_backup_transfer_timeout: 1800
+f5_backup_remove_ucs_from_device_after_copy: true
+f5_backup_report_timezone: "America/Sao_Paulo"
+f5_backup_local_temp_dir: "/tmp/f5-backup-{{ awx_job_id | default('local') }}"
+f5_backup_remote_temp_dir: "/tmp/f5-backup-stage-{{ awx_job_id | default('local') }}"
+
+# ====== CIFS ======
+
+f5_backup_cifs_enabled: true
+f5_backup_cifs_label: "producao"
+f5_backup_cifs_path: "/Ansible/f5_backups"
+f5_backup_cifs_workgroup: "WORKGROUP"
+
+f5_backup_cifs_address:
+  producao: "//192.168.0.149/certs"
+
+# Arquivo temporário usado somente pelo smbclient.
+f5_backup_cifs_password_file: "/tmp/.f5-backup-cifs-pass-{{ tower_job_id | default(awx_job_id | default('local')) }}"

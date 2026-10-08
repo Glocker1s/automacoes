@@ -1,0 +1,52 @@
+---
+- name: CIFS | Resolver compartilhamento de backup
+  ansible.builtin.set_fact:
+    _f5_cifs_server: >-
+      {{ (f5_backup_cifs_address | default({})).get(f5_backup_cifs_label | default('') | lower, '') }}
+  no_log: true
+  changed_when: false
+
+- name: CIFS | Validar compartilhamento resolvido
+  ansible.builtin.assert:
+    that:
+      - (_f5_cifs_server | default('') | string | trim | length) > 0
+    fail_msg: >-
+      CIFS não mapeado para f5_backup_cifs_label={{ f5_backup_cifs_label }}.
+
+- name: CIFS | Validar disponibilidade do smbclient
+  ansible.builtin.command: which smbclient
+  register: _f5_smbclient_check
+  changed_when: false
+
+- name: CIFS | Criar diretório temporário no host de execução
+  ansible.builtin.file:
+    path: "{{ f5_backup_remote_temp_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: CIFS | Criar arquivo temporário de senha
+  ansible.builtin.copy:
+    dest: "{{ f5_backup_cifs_password_file }}"
+    content: "{{ ansible_password | default('') }}"
+    mode: "0600"
+  no_log: true
+
+- name: CIFS | Testar acesso ao diretório base de backups
+  ansible.builtin.shell: >
+    smbclient "{{ _f5_cifs_server }}"
+    -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+    -W "{{ f5_backup_cifs_workgroup }}"
+    -c "cd {{ f5_backup_cifs_path }} ; ls"
+  args:
+    executable: /bin/bash
+  register: _f5_cifs_probe
+  retries: 5
+  delay: 10
+  until: _f5_cifs_probe.rc == 0
+  changed_when: false
+  no_log: true
+
+- name: CIFS | Marcar acesso como validado
+  ansible.builtin.set_fact:
+    f5_backup_cifs_ready: true
+  changed_when: false

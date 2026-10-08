@@ -1,0 +1,131 @@
+---
+- name: Validar credenciais F5
+  ansible.builtin.assert:
+    that:
+      - (f5_user | default('') | string | trim | length) > 0
+      - (f5_password | default('') | string | trim | length) > 0
+    fail_msg: >-
+      Credenciais F5 não informadas. Configure f5_user e f5_password
+      por Credential/extra vars protegidas no AAP.
+  no_log: true
+
+- name: Validar configuração CIFS
+  ansible.builtin.assert:
+    that:
+      - f5_backup_cifs_enabled | bool
+      - (f5_backup_cifs_label | default('') | string | trim | length) > 0
+      - (f5_backup_cifs_path | default('') | string | trim | length) > 0
+      - (f5_backup_cifs_address | default({}) | length) > 0
+      - (f5_backup_cifs_address.get(f5_backup_cifs_label | lower, '') | string | trim | length) > 0
+    fail_msg: >-
+      CIFS não configurado. Verifique f5_backup_cifs_label,
+      f5_backup_cifs_path e f5_backup_cifs_address.
+
+- name: Validar definição de sites
+  ansible.builtin.assert:
+    that:
+      - (f5_sites | default([]) | length) > 0
+    fail_msg: "f5_sites está vazio."
+
+- name: Montar lista de ambientes válidos
+  ansible.builtin.set_fact:
+    f5_valid_environments: >-
+      {{
+        (f5_sites | default([]))
+        | map(attribute='environment')
+        | map('string')
+        | map('trim')
+        | map('lower')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+  changed_when: false
+
+- name: Normalizar escopo solicitado
+  ansible.builtin.set_fact:
+    f5_target_scope_norm: >-
+      {%- set raw = f5_target_scope | default('all') -%}
+      {%- if raw is string -%}
+        {%- set parsed = raw | replace('\n', ',') | split(',') | map('trim') | map('lower') | reject('equalto', '') | unique | list -%}
+      {%- else -%}
+        {%- set parsed = raw | map('string') | map('trim') | map('lower') | reject('equalto', '') | unique | list -%}
+      {%- endif -%}
+      {{ f5_valid_environments if ('all' in parsed or (parsed | length) == 0) else parsed }}
+  changed_when: false
+
+- name: Validar escopo solicitado
+  ansible.builtin.assert:
+    that:
+      - (f5_target_scope_norm | length) > 0
+      - (f5_target_scope_norm | difference(f5_valid_environments) | length) == 0
+    fail_msg: >-
+      f5_target_scope inválido: {{ f5_target_scope_norm }}.
+      Ambientes válidos: {{ f5_valid_environments }} ou all.
+
+- name: Selecionar sites efetivos
+  ansible.builtin.set_fact:
+    f5_sites_eff: >-
+      {%- set out = [] -%}
+      {%- for s in (f5_sites | default([])) -%}
+        {%- set env = s.environment | default('') | string | trim | lower -%}
+        {%- if env in f5_target_scope_norm -%}
+          {%- set _ = out.append(s) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+  changed_when: false
+
+- name: Validar sites efetivos
+  ansible.builtin.assert:
+    that:
+      - (f5_sites_eff | length) > 0
+    fail_msg: "Nenhum site F5 encontrado para o escopo {{ f5_target_scope_norm }}."
+
+- name: Validar estrutura dos sites selecionados
+  ansible.builtin.assert:
+    that:
+      - (item.name | default('') | string | trim | length) > 0
+      - (item.environment | default('') | string | trim | length) > 0
+      - (item.devices | default([]) | length) > 0
+    fail_msg: "Site inválido: {{ item | to_json }}"
+  loop: "{{ f5_sites_eff }}"
+  loop_control:
+    label: "{{ item.name | default('site-sem-nome') }}"
+
+- name: Criar timestamp único da execução
+  ansible.builtin.command: date '+%Y%m%d_%H%M%S'
+  environment:
+    TZ: "{{ f5_backup_report_timezone }}"
+  register: _f5_backup_timestamp_cmd
+  delegate_to: localhost
+  changed_when: false
+
+- name: Criar data amigável da execução
+  ansible.builtin.command: date '+%d/%m/%Y %H:%M:%S'
+  environment:
+    TZ: "{{ f5_backup_report_timezone }}"
+  register: _f5_backup_date_cmd
+  delegate_to: localhost
+  changed_when: false
+
+- name: Definir contexto global da execução
+  ansible.builtin.set_fact:
+    f5_backup_timestamp: "{{ _f5_backup_timestamp_cmd.stdout }}"
+    f5_backup_date: "{{ _f5_backup_date_cmd.stdout }}"
+    f5_provider_base:
+      user: "{{ f5_user }}"
+      password: "{{ f5_password }}"
+      validate_certs: "{{ f5_validate_certs | bool }}"
+      transport: "rest"
+      no_f5_teem: true
+      timeout: "{{ f5_provider_timeout | int }}"
+  no_log: true
+  changed_when: false
+
+- name: Criar diretório temporário local
+  ansible.builtin.file:
+    path: "{{ f5_backup_local_temp_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost

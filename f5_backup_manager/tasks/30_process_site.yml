@@ -1,0 +1,201 @@
+---
+- name: Processar site {{ site.name }}
+  block:
+    - name: Inicializar contexto do site
+      ansible.builtin.set_fact:
+        _site_name: "{{ site.name }}"
+        _site_environment: "{{ site.environment | string | lower }}"
+        _site_devices_discovered: []
+        _site_blocked: false
+        _site_error: ""
+        _site_sync_before: "N/A"
+        _site_sync_after: "N/A"
+        _site_device_group: ""
+      changed_when: false
+
+    - name: Descobrir membros do site
+      ansible.builtin.include_tasks: 31_discover_device.yml
+      loop: "{{ site.devices }}"
+      loop_control:
+        loop_var: device
+        label: >-
+          {{ device.server if (device is mapping) else device }}
+
+    - name: Identificar dispositivos indisponíveis
+      ansible.builtin.set_fact:
+        _site_unreachable_devices: "{{ _site_devices_discovered | rejectattr('reachable', 'equalto', true) | list }}"
+        _site_reachable_devices: "{{ _site_devices_discovered | selectattr('reachable', 'equalto', true) | list }}"
+      changed_when: false
+
+    - name: Bloquear site quando algum membro estiver indisponível
+      ansible.builtin.set_fact:
+        _site_blocked: true
+        _site_error: >-
+          Um ou mais membros não puderam ser consultados:
+          {{ _site_unreachable_devices | map(attribute='server') | join(', ') }}.
+          Como o backup HA exige Config Sync ACTIVE -> STANDBY antes do UCS,
+          o site não será processado parcialmente.
+      when: (_site_unreachable_devices | length) > 0
+      changed_when: false
+
+    - name: Definir se o site é HA
+      ansible.builtin.set_fact:
+        _site_is_ha: "{{ (site.devices | length) > 1 }}"
+        _site_active_devices: "{{ _site_reachable_devices | selectattr('failover_state', 'equalto', 'active') | list }}"
+      changed_when: false
+
+    - name: Validar ACTIVE único para HA
+      ansible.builtin.set_fact:
+        _site_blocked: true
+        _site_error: >-
+          Não foi possível identificar exatamente um membro ACTIVE no site {{ _site_name }}.
+          Estados encontrados: {{ _site_reachable_devices | map(attribute='failover_state') | list }}.
+      when:
+        - _site_is_ha | bool
+        - not (_site_blocked | bool)
+        - (_site_active_devices | length) != 1
+      changed_when: false
+
+    - name: Definir membro ACTIVE
+      ansible.builtin.set_fact:
+        _site_active: "{{ _site_active_devices | first }}"
+      when:
+        - _site_is_ha | bool
+        - not (_site_blocked | bool)
+      changed_when: false
+
+    - name: Definir Device Group efetivo
+      ansible.builtin.set_fact:
+        _site_device_group: >-
+          {%- set configured = site.device_group | default('') | string | trim -%}
+          {%- if configured | length > 0 -%}
+            {{ configured }}
+          {%- elif _site_is_ha | bool and (_site_active.sync_failover_groups | default([]) | length) > 0 -%}
+            {{ _site_active.sync_failover_groups | first }}
+          {%- else -%}
+            {{ '' }}
+          {%- endif -%}
+      when: not (_site_blocked | bool)
+      changed_when: false
+
+    - name: Bloquear HA sem Device Group de sync-failover
+      ansible.builtin.set_fact:
+        _site_blocked: true
+        _site_error: >-
+          Site HA {{ _site_name }} sem Device Group de sync-failover definido ou descoberto.
+          Informe site.device_group ou valide a configuração de HA no BIG-IP.
+      when:
+        - _site_is_ha | bool
+        - not (_site_blocked | bool)
+        - (_site_device_group | string | trim | length) == 0
+      changed_when: false
+
+    - name: Executar Config Sync ACTIVE para STANDBY
+      ansible.builtin.include_tasks: 32_sync_site.yml
+      when:
+        - _site_is_ha | bool
+        - not (_site_blocked | bool)
+        - f5_configsync_enabled | bool
+
+    - name: Executar backup dos membros do site
+      ansible.builtin.include_tasks: 40_backup_device.yml
+      loop: "{{ _site_reachable_devices }}"
+      loop_control:
+        loop_var: backup_device
+        label: "{{ backup_device.hostname | default(backup_device.server) }}"
+      when: not (_site_blocked | bool)
+
+    - name: Registrar membros não processados quando site estiver bloqueado
+      ansible.builtin.include_tasks: 41_record_blocked_device.yml
+      loop: "{{ _site_devices_discovered }}"
+      loop_control:
+        loop_var: backup_device
+        label: "{{ backup_device.hostname | default(backup_device.server) }}"
+      when: _site_blocked | bool
+
+    - name: Consolidar resultados do site
+      ansible.builtin.set_fact:
+        _site_backup_rows: >-
+          {{ f5_backup_results | selectattr('site', 'equalto', _site_name) | list }}
+      changed_when: false
+
+    - name: Registrar resumo do site
+      ansible.builtin.set_fact:
+        f5_site_results: >-
+          {{
+            f5_site_results + [{
+              'site': _site_name,
+              'environment': _site_environment,
+              'ha': (_site_is_ha | bool),
+              'device_group': _site_device_group | default(''),
+              'sync_before': _site_sync_before | default('N/A'),
+              'sync_after': _site_sync_after | default('N/A'),
+              'status': (
+                'FALHA'
+                if (_site_blocked | bool or ((_site_backup_rows | selectattr('status', 'equalto', 'FALHA') | list | length) > 0))
+                else (
+                  'SUCESSO COM AVISO'
+                  if ((_site_backup_rows | selectattr('status', 'equalto', 'SUCESSO COM AVISO') | list | length) > 0)
+                  else 'SUCESSO'
+                )
+              ),
+              'message': _site_error | default('')
+            }]
+          }}
+      changed_when: false
+
+  rescue:
+    - name: Registrar falha inesperada do site
+      ansible.builtin.set_fact:
+        _site_error: "{{ ansible_failed_result.msg | default(ansible_failed_result | string) }}"
+        _site_blocked: true
+      changed_when: false
+
+    - name: Registrar falha do site no resultado global
+      ansible.builtin.set_fact:
+        f5_site_results: >-
+          {{
+            f5_site_results + [{
+              'site': site.name | default('site-desconhecido'),
+              'environment': site.environment | default('—'),
+              'ha': ((site.devices | default([]) | length) > 1),
+              'device_group': site.device_group | default(''),
+              'sync_before': _site_sync_before | default('N/A'),
+              'sync_after': _site_sync_after | default('N/A'),
+              'status': 'FALHA',
+              'message': _site_error
+            }]
+          }}
+      changed_when: false
+
+    - name: Verificar se a falha inesperada já gerou linhas por dispositivo
+      ansible.builtin.set_fact:
+        _site_needs_device_failure_rows: >-
+          {{
+            (f5_backup_results | selectattr('site', 'equalto', (site.name | default('site-desconhecido'))) | list | length) == 0
+          }}
+      changed_when: false
+
+    - name: Registrar falha por dispositivo quando possível
+      ansible.builtin.set_fact:
+        f5_backup_results: >-
+          {{
+            f5_backup_results + [{
+              'site': site.name | default('site-desconhecido'),
+              'environment': site.environment | default('—'),
+              'server': (item.server if (item is mapping) else item),
+              'hostname': (item.server if (item is mapping) else item),
+              'role': 'unknown',
+              'version': '—',
+              'sync_before': _site_sync_before | default('N/A'),
+              'sync_after': _site_sync_after | default('N/A'),
+              'ucs_name': '—',
+              'destination': '—',
+              'size': 0,
+              'status': 'FALHA',
+              'message': _site_error
+            }]
+          }}
+      loop: "{{ site.devices | default([]) }}"
+      when: _site_needs_device_failure_rows | bool
+      changed_when: false

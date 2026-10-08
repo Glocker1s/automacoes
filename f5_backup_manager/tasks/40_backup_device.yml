@@ -1,0 +1,237 @@
+---
+- name: Definir contexto de backup de {{ backup_device.hostname | default(backup_device.server) }}
+  ansible.builtin.set_fact:
+    _backup_hostname: "{{ backup_device.hostname | default(backup_device.server) }}"
+    _backup_provider: >-
+      {{
+        f5_provider_base
+        | combine({
+            'server': backup_device.server,
+            'server_port': (backup_device.port | int),
+            'timeout': (f5_backup_transfer_timeout | int)
+          })
+      }}
+    _backup_ucs_name: >-
+      {{ backup_device.hostname | default(backup_device.server) }}_{{ _site_environment | upper }}_{{ f5_backup_timestamp }}.ucs
+  changed_when: false
+
+- name: Definir caminhos do backup
+  ansible.builtin.set_fact:
+    _backup_local_file: "{{ f5_backup_local_temp_dir }}/{{ _backup_ucs_name }}"
+    _backup_remote_stage_file: "{{ f5_backup_remote_temp_dir }}/{{ _backup_ucs_name }}"
+    _backup_cifs_dir: >-
+      {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }}/{{ _backup_hostname }}
+    _backup_cifs_file: >-
+      {{ _f5_cifs_server }}{{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }}/{{ _backup_hostname }}/{{ _backup_ucs_name }}
+  changed_when: false
+
+- name: Criar e publicar UCS de {{ _backup_hostname }}
+  block:
+    - name: Salvar running-config antes do UCS
+      f5networks.f5_modules.bigip_config:
+        save: true
+        provider: "{{ _backup_provider }}"
+      delegate_to: localhost
+
+    - name: Criar e baixar UCS para área temporária
+      f5networks.f5_modules.bigip_ucs_fetch:
+        src: "{{ _backup_ucs_name }}"
+        dest: "{{ _backup_local_file }}"
+        create_on_missing: true
+        fail_on_missing: false
+        force: true
+        async_timeout: "{{ f5_backup_async_timeout | int }}"
+        mode: "0600"
+        provider: "{{ _backup_provider }}"
+      delegate_to: localhost
+      register: _backup_ucs_fetch
+
+    - name: Validar UCS baixado localmente
+      ansible.builtin.stat:
+        path: "{{ _backup_local_file }}"
+      delegate_to: localhost
+      register: _backup_local_stat
+      failed_when: >-
+        not (_backup_local_stat.stat.exists | default(false) | bool) or
+        ((_backup_local_stat.stat.size | default(0) | int) <= 0)
+
+    - name: Transferir UCS para staging do host
+      ansible.builtin.copy:
+        src: "{{ _backup_local_file }}"
+        dest: "{{ _backup_remote_stage_file }}"
+        mode: "0600"
+        force: true
+
+    - name: CIFS | Garantir diretório do ambiente
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c "cd {{ f5_backup_cifs_path }} ; mkdir {{ _site_environment | upper }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: CIFS | Validar diretório do ambiente
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c "cd {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }} ; ls"
+      args:
+        executable: /bin/bash
+      register: _backup_cifs_env_probe
+      changed_when: false
+      no_log: true
+
+    - name: CIFS | Garantir diretório do equipamento
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c "cd {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }} ; mkdir {{ _backup_hostname }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: CIFS | Validar diretório do equipamento
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c "cd {{ _backup_cifs_dir }} ; ls"
+      args:
+        executable: /bin/bash
+      register: _backup_cifs_host_probe
+      changed_when: false
+      no_log: true
+
+    - name: CIFS | Enviar UCS via smbclient
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c 'cd {{ _backup_cifs_dir }} ; put {{ _backup_remote_stage_file }} {{ _backup_ucs_name }}'
+      args:
+        executable: /bin/bash
+      register: _backup_cifs_put
+      changed_when: true
+      no_log: true
+
+    - name: CIFS | Validar arquivo publicado
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c 'cd {{ _backup_cifs_dir }} ; ls {{ _backup_ucs_name }}'
+      args:
+        executable: /bin/bash
+      register: _backup_cifs_file_probe
+      changed_when: false
+      failed_when: >-
+        (_backup_cifs_file_probe.rc != 0) or
+        (_backup_ucs_name not in (_backup_cifs_file_probe.stdout | default('')))
+      no_log: true
+
+    - name: Remover UCS temporário do BIG-IP após cópia validada
+      f5networks.f5_modules.bigip_ucs:
+        ucs: "{{ _backup_ucs_name }}"
+        state: absent
+        provider: "{{ _backup_provider }}"
+      delegate_to: localhost
+      register: _backup_ucs_cleanup
+      failed_when: false
+      when: f5_backup_remove_ucs_from_device_after_copy | bool
+
+    - name: Registrar backup concluído
+      ansible.builtin.set_fact:
+        f5_backup_results: >-
+          {{
+            f5_backup_results + [{
+              'site': _site_name,
+              'environment': _site_environment,
+              'server': backup_device.server,
+              'hostname': _backup_hostname,
+              'role': ('standalone' if not (_site_is_ha | bool) else backup_device.failover_state),
+              'version': backup_device.version | default('—'),
+              'sync_before': _site_sync_before | default('N/A'),
+              'sync_after': _site_sync_after | default('N/A'),
+              'ucs_name': _backup_ucs_name,
+              'destination': _backup_cifs_file,
+              'size': (_backup_local_stat.stat.size | default(0) | int),
+              'status': (
+                'SUCESSO COM AVISO'
+                if (
+                  f5_backup_remove_ucs_from_device_after_copy | bool
+                  and (_backup_ucs_cleanup is defined)
+                  and (_backup_ucs_cleanup.failed | default(false) | bool)
+                )
+                else 'SUCESSO'
+              ),
+              'message': (
+                'Backup publicado no CIFS, porém não foi possível remover o UCS temporário do BIG-IP.'
+                if (
+                  f5_backup_remove_ucs_from_device_after_copy | bool
+                  and (_backup_ucs_cleanup is defined)
+                  and (_backup_ucs_cleanup.failed | default(false) | bool)
+                )
+                else 'Backup criado e publicado no CIFS.'
+              )
+            }]
+          }}
+      changed_when: false
+
+  rescue:
+    - name: CIFS | Remover arquivo remoto após falha do backup
+      ansible.builtin.shell: >
+        smbclient "{{ _f5_cifs_server }}"
+        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -W "{{ f5_backup_cifs_workgroup }}"
+        -c 'cd {{ _backup_cifs_dir }} ; del {{ _backup_ucs_name }}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Registrar falha do backup do membro
+      ansible.builtin.set_fact:
+        f5_backup_results: >-
+          {{
+            f5_backup_results + [{
+              'site': _site_name,
+              'environment': _site_environment,
+              'server': backup_device.server,
+              'hostname': _backup_hostname,
+              'role': ('standalone' if not (_site_is_ha | bool) else backup_device.failover_state),
+              'version': backup_device.version | default('—'),
+              'sync_before': _site_sync_before | default('N/A'),
+              'sync_after': _site_sync_after | default('N/A'),
+              'ucs_name': _backup_ucs_name,
+              'destination': _backup_cifs_file,
+              'size': 0,
+              'status': 'FALHA',
+              'message': (ansible_failed_result.msg | default(ansible_failed_result | string))
+            }]
+          }}
+      changed_when: false
+
+  always:
+    - name: Remover cópia temporária no staging do host
+      ansible.builtin.file:
+        path: "{{ _backup_remote_stage_file }}"
+        state: absent
+      changed_when: false
+      failed_when: false
+
+    - name: Remover cópia temporária local do UCS
+      ansible.builtin.file:
+        path: "{{ _backup_local_file }}"
+        state: absent
+      delegate_to: localhost
+      changed_when: false
+      failed_when: false

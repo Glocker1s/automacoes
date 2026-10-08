@@ -1,0 +1,11 @@
+---
+- name: Falhar job quando houver backup/site/erro global com falha
+  ansible.builtin.fail:
+    msg: >-
+      F5 Backup Manager concluído com falhas.
+      Backups: total={{ _f5_backup_total }}, sucesso={{ _f5_backup_ok }},
+      avisos={{ _f5_backup_warn }}, falhas={{ _f5_backup_failed }}.
+      Erros gerais={{ _f5_backup_global_failed | default(0) }}.
+      Consulte o relatório HTML para detalhes.
+  when:
+    - (_f5_backup_failed | int) > 0 or (_f5_backup_global_failed | int) > 0

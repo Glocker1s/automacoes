@@ -1,0 +1,39 @@
+---
+- name: Calcular totais do relatório
+  ansible.builtin.set_fact:
+    _f5_backup_total: "{{ f5_backup_results | length }}"
+    _f5_backup_ok: "{{ f5_backup_results | selectattr('status', 'equalto', 'SUCESSO') | list | length }}"
+    _f5_backup_warn: "{{ f5_backup_results | selectattr('status', 'equalto', 'SUCESSO COM AVISO') | list | length }}"
+    _f5_backup_failed: "{{ f5_backup_results | selectattr('status', 'equalto', 'FALHA') | list | length }}"
+    _f5_backup_global_failed: "{{ f5_global_errors | default([]) | length }}"
+  changed_when: false
+
+- name: Renderizar relatório HTML
+  ansible.builtin.set_fact:
+    f5_backup_report_html: "{{ lookup('template', 'report.html.j2') }}"
+  changed_when: false
+
+- name: Definir status geral do relatório
+  ansible.builtin.set_fact:
+    _f5_backup_report_level: >-
+      {{
+        'FALHA'
+        if ((_f5_backup_failed | int) > 0 or (_f5_backup_global_failed | int) > 0)
+        else ('ALERTA' if (_f5_backup_warn | int) > 0 else 'OK')
+      }}
+  changed_when: false
+
+- name: Publicar relatório para e-mail
+  ansible.builtin.set_stats:
+    data:
+      send_mail_subject: >-
+        Ansible-Report ({{ _f5_backup_report_level }}) -
+        {{ awx_job_template_name | default('F5 Backup Manager') }} -
+        Escopo {{ f5_target_scope_norm | join(',') | upper }} -
+        Job #{{ awx_job_id | default('local') }}
+      send_mail_body: "{{ f5_backup_report_html }}"
+
+- name: Marcar relatório como publicado
+  ansible.builtin.set_fact:
+    _f5_backup_report_published: true
+  changed_when: false
