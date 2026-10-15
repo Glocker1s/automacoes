@@ -17,6 +17,10 @@
   become: true
   become_user: "{{ orm_os_user_effective }}"
 
+- name: Data Pump | Registrar código de retorno para relatório
+  ansible.builtin.set_fact:
+    orm_impdp_return_code: "{{ _orm_impdp_exec.rc | default('N/A') }}"
+
 - name: Data Pump | Registrar retorno do impdp no log de controle
   ansible.builtin.shell: |
     cat <<'EOF' >> "{{ orm_control_log_file }}"
@@ -681,6 +685,100 @@
     - orm_scope_effective == 'schema'
     - orm_sequence_repair_completed | default(false) | bool
 
+- name: Data Pump | Verificar encerramento do impdp com erros tolerados
+  ansible.builtin.shell: |
+    set -o pipefail
+    LOG={{ orm_impdp_log_file | quote }}
+    [ -s "$LOG" ] || exit 11
+
+    if grep -Eq 'ORA-(31693|31694|00600|07445|03113|01555|39095):' "$LOG"; then
+      exit 14
+    fi
+    FINAL="$(sed '/^[[:space:]]*$/d' "$LOG" | tail -n 1)"
+    if ! printf '%s\n' "$FINAL" | grep -Eq '^(Job .+ completed with [0-9]+ error\(s\) at |O job .+ conclu[ií]do com [0-9]+ erro\(s\))'; then
+      exit 12
+    fi
+    COUNT="$(printf '%s\n' "$FINAL" | grep -oE '[0-9]+ (error|erro)\(s\)' | awk '{print $1}' | tail -n 1)"
+    [ -n "$COUNT" ] || exit 13
+    printf '%s\n' "$COUNT"
+  args:
+    executable: /bin/bash
+  register: _orm_impdp_completed_errors_probe
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_allow_completed_with_errors | bool
+    - _orm_impdp_exec.rc is defined
+    - _orm_impdp_exec.rc | int != 0
+    - not (_orm_impdp_exec.failed | default(false) | bool)
+    - not (orm_sequence_repair_completed | default(false) | bool)
+
+- name: Data Pump | Verificar ORA-02289 não recuperado antes de tolerar erros
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -q
+      - 'ORA-02289'
+      - "{{ orm_impdp_log_file }}"
+  register: _orm_impdp_unrecovered_sequence
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - _orm_impdp_completed_errors_probe is defined
+    - not (_orm_impdp_completed_errors_probe.skipped | default(false) | bool)
+    - _orm_impdp_completed_errors_probe.rc | default(1) | int == 0
+
+- name: Data Pump | Registrar import concluído com pendências aceitas pelo profile
+  ansible.builtin.set_fact:
+    orm_restore_import_completed: true
+    orm_impdp_completed_with_errors: true
+    orm_impdp_error_count: "{{ _orm_impdp_completed_errors_probe.stdout | trim | int }}"
+    orm_host_warning: true
+    orm_impdp_warning: >-
+      O Data Pump terminou com RC={{ _orm_impdp_exec.rc }} e
+      {{ _orm_impdp_completed_errors_probe.stdout | trim }} erro(s) reportado(s).
+      Conforme a política autorizada para este profile, o fluxo continua com
+      grants, masking, senha e validações. Consultar o log do impdp para
+      objetos e dados que não foram importados corretamente.
+    orm_restore_database_state: >-
+      Import encerrado pelo Data Pump com pendências; iniciando grants e validações.
+  when:
+    - orm_restore_allow_completed_with_errors | bool
+    - _orm_impdp_completed_errors_probe is defined
+    - not (_orm_impdp_completed_errors_probe.skipped | default(false) | bool)
+    - _orm_impdp_completed_errors_probe.rc | default(1) | int == 0
+    - _orm_impdp_unrecovered_sequence is defined
+    - _orm_impdp_unrecovered_sequence.rc | default(1) | int == 1
+    - not (orm_sequence_repair_detected | default(false) | bool)
+    - not (orm_sequence_repair_attempted | default(false) | bool)
+    - not (orm_host_failed | bool)
+
+- name: Data Pump | Registrar continuidade com pendências no log de controle
+  ansible.builtin.shell: |
+    cat <<'EOF' >> "{{ orm_control_log_file }}"
+
+    ============================================================
+    IMPORT CONCLUÍDO COM PENDÊNCIAS ACEITAS
+    ============================================================
+    RC do impdp: {{ _orm_impdp_exec.rc }}
+    Erros do Data Pump: {{ orm_impdp_error_count }}
+    Política allow_completed_with_errors: habilitada
+    Etapas posteriores: reaplicação de grants, masking, senha e validações.
+    ATENÇÃO: objetos/dados com falha não são considerados recuperados automaticamente.
+    Log técnico: {{ orm_impdp_log_file }}
+    EOF
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when: orm_impdp_completed_with_errors | default(false) | bool
+
 - name: Data Pump | Registrar falha do impdp sem recuperação concluída
   ansible.builtin.set_fact:
     orm_host_failed: true
@@ -711,6 +809,7 @@
   when:
     - (_orm_impdp_exec.failed | default(false) | bool) or (_orm_impdp_exec.rc | default(1) | int != 0)
     - not (orm_sequence_repair_completed | default(false) | bool)
+    - not (orm_impdp_completed_with_errors | default(false) | bool)
 
 - name: Data Pump | Registrar import concluído
   ansible.builtin.set_fact:
