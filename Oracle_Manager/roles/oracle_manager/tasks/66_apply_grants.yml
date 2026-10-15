@@ -1,4 +1,17 @@
 ---
+- name: Grants | Verificar arquivo capturado antes da reaplicação
+  ansible.builtin.stat:
+    path: "{{ orm_grants_file }}"
+    get_checksum: false
+    get_mime: false
+    get_attributes: false
+  register: _orm_grants_apply_file_stat
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_restore_apply_grants | bool
+    - orm_restore_capture_grants | bool
+
 - name: Grants | Aplicar grants capturados
   ansible.builtin.shell: |
     PDB="{{ orm_pdb_effective | default('') }}"
@@ -7,7 +20,7 @@
     else
       unset ORACLE_PDB_SID
     fi
-    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL > "{{ orm_grants_apply_log_file }}" 2>&1 > "{{ orm_grants_apply_log_file }}" 2>&1
+    "{{ orm_oracle_home_effective }}/bin/sqlplus" -s "/ as sysdba" <<SQL > "{{ orm_grants_apply_log_file }}" 2>&1
     set echo on feedback on
     whenever sqlerror continue
     @"{{ orm_grants_file }}"
@@ -27,7 +40,7 @@
   when:
     - orm_restore_apply_grants | bool
     - orm_restore_capture_grants | bool
-    - _orm_grants_file_stat.stat.exists | default(false)
+    - _orm_grants_apply_file_stat.stat.exists | default(false)
 
 - name: Grants | Procurar erros na reaplicação
   ansible.builtin.shell: |
@@ -39,7 +52,7 @@
   when:
     - orm_restore_apply_grants | bool
     - orm_restore_capture_grants | bool
-    - _orm_grants_file_stat.stat.exists | default(false)
+    - _orm_grants_apply_file_stat.stat.exists | default(false)
 
 - name: Grants | Registrar erro crítico de reaplicação
   ansible.builtin.set_fact:
