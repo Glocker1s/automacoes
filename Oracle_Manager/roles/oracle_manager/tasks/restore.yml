@@ -33,6 +33,7 @@
     orm_restore_validate_schemas: "{{ orm_profile_cfg.restore.validate_schemas | default(orm_restore_validate_schemas_default) | bool }}"
     orm_restore_validate_invalid_objects: "{{ orm_profile_cfg.restore.validate_invalid_objects | default(orm_restore_validate_invalid_objects_default) | bool }}"
     orm_restore_fail_on_invalid_objects: "{{ orm_profile_cfg.restore.fail_on_invalid_objects | default(orm_restore_fail_on_invalid_objects_default) | bool }}"
+    orm_restore_allow_completed_with_errors: "{{ orm_profile_cfg.restore.allow_completed_with_errors | default(orm_restore_allow_completed_with_errors_default) | bool }}"
     orm_datapump_log_directory_name_effective: "{{ orm_profile_cfg.oracle.log_directory_name | default(orm_default_log_directory_name) }}"
     orm_shared_storage_mounted: false
 
@@ -83,6 +84,10 @@
     orm_table_restore_started: false
     orm_restore_schema_dropped: false
     orm_restore_import_completed: false
+    orm_impdp_completed_with_errors: false
+    orm_impdp_error_count: 0
+    orm_impdp_return_code: ''
+    orm_impdp_warning: ''
     orm_restore_completed: false
     orm_restore_database_state: "Prechecks do restore ainda não concluídos."
     orm_sessions_before: 0
@@ -137,6 +142,7 @@
           - orm_restore_storage_mode in ['local', 'shared']
           - orm_dump_storage_protocol_effective in ['cifs', 'nfs']
           - (orm_restore_storage_mode != 'shared') or (orm_dump_storage_enabled_effective | bool)
+          - not (orm_restore_allow_completed_with_errors | bool) or (orm_restore_validate_schemas | bool and orm_restore_validate_invalid_objects | bool)
         fail_msg: >-
           Oracle Manager exige restore.parallel>=1, restore.storage_mode em local ou shared
           e orm_dump_storage_protocol em cifs ou nfs.
@@ -360,10 +366,18 @@
         orm_restore_completed: true
         orm_restore_database_state: >-
           {{
-            'Restore de tabelas concluído e validações pós-restore executadas.'
-            if orm_scope_effective == 'tables'
-            else
-            'Restore concluído e validações pós-restore executadas.'
+            (
+              'Restore concluído com pendências do Data Pump ('
+              ~ (orm_impdp_error_count | default(0) | string)
+              ~ ' erros reportados); grants e validações pós-restore executados. '
+              ~ 'Avaliar o log técnico e os objetos não criados.'
+            )
+            if orm_impdp_completed_with_errors | default(false) | bool
+            else (
+              'Restore de tabelas concluído e validações pós-restore executadas.'
+              if orm_scope_effective == 'tables'
+              else 'Restore concluído e validações pós-restore executadas.'
+            )
           }}
       when:
         - not (orm_host_failed | bool)
@@ -574,6 +588,9 @@
 
         Dump efetivo: {{ orm_effective_dump_reference | default(orm_effective_dump_file | default('')) }}
         Arquivos do dump: {{ orm_restore_dump_files_count | default(0) }}
+        Impdp RC: {{ orm_impdp_return_code | default('N/A') }}
+        Impdp concluído com erros: {{ 'SIM' if orm_impdp_completed_with_errors | default(false) | bool else 'NÃO' }}
+        Erros reportados pelo Data Pump: {{ orm_impdp_error_count | default(0) }}
         Parallel: {{ orm_restore_parallel | default(1) }}
         Origem do dump: {{ orm_restore_dump_source | default('') }}
         Estado final: {{ orm_restore_database_state | default('') }}
@@ -628,6 +645,10 @@
           sessions_before: "{{ orm_sessions_before | default(0) }}"
           sessions_after: "{{ orm_sessions_after | default(0) }}"
           invalid_objects: "{{ orm_invalid_objects_count | default(0) }}"
+          invalid_objects_before: "{{ orm_invalid_objects_before_count | default(0) }}"
+          impdp_rc: "{{ orm_impdp_return_code | default('') }}"
+          impdp_completed_with_errors: "{{ orm_impdp_completed_with_errors | default(false) }}"
+          impdp_error_count: "{{ orm_impdp_error_count | default(0) }}"
           masking_enabled: "{{ orm_masking_enabled | default(false) }}"
           masking_applicable: "{{ orm_masking_applicable | default(false) }}"
           masking_status: "{{ orm_masking_status | default('DESABILITADO') }}"
