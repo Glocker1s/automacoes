@@ -36,7 +36,7 @@ cm:
 
         # Configurações de backup.
         backup:
-          storage_mode: "cifs"
+          storage_mode: "shared"
           # Diretório físico local onde o expdp gera dump/log/parfile.
           root_dir: "/backup/oracle_manager"
 
@@ -59,7 +59,7 @@ cm:
 
         # Configurações de restore.
         restore:
-          storage_mode: "local"
+          storage_mode: "shared"
           # Diretório físico usado no host destino para receber o dump
           # e armazenar artefatos temporários do restore.
           root_dir: "/backup/oracle_manager_restore"
@@ -69,6 +69,8 @@ cm:
 
           # Parâmetros adicionais opcionais para impdp.
           extra_args: ""
+
+          allow_completed_with_errors: true
 
           # Preservação de grants do schema existente no destino.
           capture_grants: true
