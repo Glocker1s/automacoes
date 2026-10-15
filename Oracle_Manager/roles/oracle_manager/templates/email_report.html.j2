@@ -219,6 +219,11 @@
                     {% if row.failed_task | default('') | length > 0 %}<b>Task:</b> {{ code(row.failed_task) }}<br/>{% endif %}
                     {% if row.database_state | default('') | length > 0 %}<b>Estado do restore:</b> {{ code(row.database_state) }}<br/>{% endif %}
                     {% if row.password_warning | default('') | length > 0 %}<div style="margin-top:6px;"><b>Senha:</b> {{ row.password_warning }}</div>{% endif %}
+                    {% if row.impdp_completed_with_errors | default(false) | bool %}
+                    <div style="margin-top:6px;"><b>Data Pump:</b> import encerrado com pendências; RC {{ row.impdp_rc }}, {{ row.impdp_error_count }} erro(s) reportado(s). Os erros continuam disponíveis no log técnico; não significa que todos os objetos foram importados.</div>
+                    <div style="margin-top:5px;"><b>Objetos INVALID:</b> {{ row.invalid_objects_before | default(0) }} antes / {{ row.invalid_objects | default(0) }} depois da recompilação.</div>
+                    {% if row.impdp_warning | default('') | length > 0 %}<div style="margin-top:5px;">{{ row.impdp_warning }}</div>{% endif %}
+                    {% endif %}
                     {% if row.grants_warning | default('') | length > 0 %}<div style="margin-top:6px;"><b>Grants:</b> {{ row.grants_warning }}</div>{% endif %}
                     {% if row.invalid_objects_warning | default('') | length > 0 %}<div style="margin-top:6px;"><b>Objetos INVALID:</b> {{ row.invalid_objects_warning }}</div>{% endif %}
                     {% if row.error | default('') | length > 0 %}
@@ -311,7 +316,7 @@
                   {{ td_open() }}{{ code(row.dump if row.dump else '—') }}{% if row.dump_files_count | default(0) | int > 1 %}<div style="font-size:11px;color:#777777;margin-top:4px;">Dump set: {{ row.dump_files_count }} arquivos</div>{% endif %}{% if row.dump_size_bytes | default(0) | int > 0 %}<div style="font-size:11px;color:#777777;margin-top:4px;">{{ '%.2f MB' | format((row.dump_size_bytes | int) / 1048576) }}</div>{% endif %}</td>
                   {{ td_open() }}{{ code(row.dump_source if row.dump_source else '—') }}</td>
                   {{ td_open() }}{{ row.sessions_before if row.sessions_before != '' else '—' }} antes / {{ row.sessions_after if row.sessions_after != '' else '—' }} depois</td>
-                  {{ td_open() }}{{ row.invalid_objects if row.invalid_objects != '' else '—' }}</td>
+                  {{ td_open() }}{{ row.invalid_objects_before | default('—') }} antes / {{ row.invalid_objects if row.invalid_objects != '' else '—' }} depois</td>
                   {{ td_open() }}{{ code(row.database_state if row.database_state else '—') }}</td>
                 </tr>
                 {% endif %}
