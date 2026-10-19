@@ -24,19 +24,19 @@
       delegate_to: localhost
       register: _device_info
 
-    - name: Identificar self device
+    - name: Normalizar self, Config Sync e grupos do BIG-IP
       ansible.builtin.set_fact:
-        _device_self: >-
-          {{
-            (
-              _device_info.devices
-              | default([])
-              | selectattr('self', 'defined')
-              | selectattr('self', 'equalto', true)
-              | list
-              | first
-            ) | default({})
-          }}
+        _device_self_candidates: >-
+          {%- set matches = [] -%}
+          {%- for entry in (_device_info.devices | default([])) -%}
+            {%- if (entry.self | default(false) | string | trim | lower) in ['yes', 'true', '1'] -%}
+              {%- set _ = matches.append(entry) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ matches }}
+        _device_sync_entry: >-
+          {%- set raw_sync = _device_info.sync_status | default([]) -%}
+          {{ raw_sync if raw_sync is mapping else (raw_sync | first | default({})) }}
         _device_sync_failover_groups: >-
           {{
             _device_info.device_groups
@@ -48,6 +48,20 @@
           }}
       changed_when: false
 
+    - name: Validar identificação do próprio BIG-IP
+      ansible.builtin.assert:
+        that:
+          - (_device_self_candidates | length) == 1
+        fail_msg: >-
+          A API do BIG-IP {{ _device_server }} retornou
+          {{ _device_self_candidates | length }} dispositivos marcados como self.
+          Não é seguro assumir ACTIVE/STANDBY sem identificar o equipamento local.
+
+    - name: Definir equipamento local identificado
+      ansible.builtin.set_fact:
+        _device_self: "{{ _device_self_candidates | first }}"
+      changed_when: false
+
     - name: Registrar descoberta do membro
       ansible.builtin.set_fact:
         _site_devices_discovered: >-
@@ -56,12 +70,12 @@
               'server': _device_server,
               'port': (_device_port | int),
               'hostname': _device_self.hostname | default(_device_server),
-              'failover_state': _device_self.failover_state | default('standalone') | string | lower,
+              'failover_state': _device_self.failover_state | default('unknown') | string | lower,
               'version': _device_self.software_version | default('—'),
               'management_address': _device_self.management_address | default(_device_server),
-              'sync_status': _device_info.sync_status.status | default('UNKNOWN'),
-              'sync_summary': _device_info.sync_status.summary | default(''),
-              'sync_recommended_action': _device_info.sync_status.recommended_action | default(''),
+              'sync_status': _device_sync_entry.status | default('UNKNOWN'),
+              'sync_summary': _device_sync_entry.summary | default(''),
+              'sync_recommended_action': _device_sync_entry.recommended_action | default(''),
               'sync_failover_groups': _device_sync_failover_groups,
               'reachable': true,
               'discovery_error': ''

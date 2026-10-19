@@ -13,32 +13,57 @@
     fail_msg: >-
       CIFS não mapeado para f5_backup_cifs_label={{ f5_backup_cifs_label }}.
 
-- name: CIFS | Validar disponibilidade do smbclient
+- name: CIFS | Validar disponibilidade do smbclient no executor
   ansible.builtin.command: which smbclient
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: false
   register: _f5_smbclient_check
   changed_when: false
 
-- name: CIFS | Criar diretório temporário no host de execução
+- name: CIFS | Guardar credenciais originadas do Job
+  ansible.builtin.set_fact:
+    _f5_backup_cifs_username: "{{ f5_backup_cifs_user | default(ansible_user | default('')) }}"
+    _f5_backup_cifs_password: "{{ f5_backup_cifs_password | default(ansible_password | default('')) }}"
+  no_log: true
+  changed_when: false
+
+- name: CIFS | Validar presença de usuário e senha do CIFS
+  ansible.builtin.assert:
+    that:
+      - (_f5_backup_cifs_username | length) > 0
+      - (_f5_backup_cifs_password | length) > 0
+    fail_msg: >-
+      Usuário/senha CIFS não disponibilizados pelo Job.
+      Configure a Credential ou f5_backup_cifs_user/f5_backup_cifs_password.
+  no_log: true
+
+- name: CIFS | Criar diretório temporário no executor CIFS
   ansible.builtin.file:
     path: "{{ f5_backup_remote_temp_dir }}"
     state: directory
     mode: "0700"
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: false
 
 - name: CIFS | Criar arquivo temporário de senha
   ansible.builtin.copy:
     dest: "{{ f5_backup_cifs_password_file }}"
-    content: "{{ ansible_password | default('') }}"
+    content: "{{ _f5_backup_cifs_password }}"
     mode: "0600"
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: false
   no_log: true
 
 - name: CIFS | Testar acesso ao diretório base de backups
   ansible.builtin.shell: >
     smbclient "{{ _f5_cifs_server }}"
-    -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+    -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
     -W "{{ f5_backup_cifs_workgroup }}"
     -c "cd {{ f5_backup_cifs_path }} ; ls"
   args:
     executable: /bin/bash
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: false
   register: _f5_cifs_probe
   retries: 5
   delay: 10

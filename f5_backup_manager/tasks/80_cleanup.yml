@@ -3,6 +3,8 @@
   ansible.builtin.file:
     path: "{{ f5_backup_cifs_password_file }}"
     state: absent
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: false
   changed_when: false
   failed_when: false
   no_log: true
@@ -11,6 +13,8 @@
   ansible.builtin.file:
     path: "{{ f5_backup_remote_temp_dir }}"
     state: absent
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: false
   changed_when: false
   failed_when: false
 

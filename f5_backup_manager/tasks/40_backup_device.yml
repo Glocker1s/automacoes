@@ -61,15 +61,19 @@
         dest: "{{ _backup_remote_stage_file }}"
         mode: "0600"
         force: true
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
 
     - name: CIFS | Garantir diretório do ambiente
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c "cd {{ f5_backup_cifs_path }} ; mkdir {{ _site_environment | upper }}"
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       changed_when: false
       failed_when: false
       no_log: true
@@ -77,11 +81,13 @@
     - name: CIFS | Validar diretório do ambiente
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c "cd {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }} ; ls"
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       register: _backup_cifs_env_probe
       changed_when: false
       no_log: true
@@ -89,11 +95,13 @@
     - name: CIFS | Garantir diretório do equipamento
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c "cd {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }} ; mkdir {{ _backup_hostname }}"
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       changed_when: false
       failed_when: false
       no_log: true
@@ -101,11 +109,13 @@
     - name: CIFS | Validar diretório do equipamento
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c "cd {{ _backup_cifs_dir }} ; ls"
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       register: _backup_cifs_host_probe
       changed_when: false
       no_log: true
@@ -113,11 +123,13 @@
     - name: CIFS | Enviar UCS via smbclient
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c 'cd {{ _backup_cifs_dir }} ; put {{ _backup_remote_stage_file }} {{ _backup_ucs_name }}'
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       register: _backup_cifs_put
       changed_when: true
       no_log: true
@@ -125,11 +137,13 @@
     - name: CIFS | Validar arquivo publicado
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c 'cd {{ _backup_cifs_dir }} ; ls {{ _backup_ucs_name }}'
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       register: _backup_cifs_file_probe
       changed_when: false
       failed_when: >-
@@ -189,11 +203,13 @@
     - name: CIFS | Remover arquivo remoto após falha do backup
       ansible.builtin.shell: >
         smbclient "{{ _f5_cifs_server }}"
-        -U "{{ ansible_user }}%$(cat {{ f5_backup_cifs_password_file }})"
+        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
         -W "{{ f5_backup_cifs_workgroup }}"
         -c 'cd {{ _backup_cifs_dir }} ; del {{ _backup_ucs_name }}'
       args:
         executable: /bin/bash
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       changed_when: false
       failed_when: false
       no_log: true
@@ -225,6 +241,8 @@
       ansible.builtin.file:
         path: "{{ _backup_remote_stage_file }}"
         state: absent
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: false
       changed_when: false
       failed_when: false
 

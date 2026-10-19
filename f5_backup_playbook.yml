@@ -49,6 +49,8 @@
           ansible.builtin.file:
             path: "{{ f5_backup_cifs_password_file }}"
             state: absent
+          delegate_to: "{{ f5_backup_cifs_delegate_host | default('localhost') }}"
+          become: false
           failed_when: false
           changed_when: false
           no_log: true
@@ -61,6 +63,8 @@
           ansible.builtin.file:
             path: "{{ f5_backup_remote_temp_dir | default('/tmp/f5-backup-stage-' ~ (awx_job_id | default('local') | string)) }}"
             state: absent
+          delegate_to: "{{ f5_backup_cifs_delegate_host | default('localhost') }}"
+          become: false
           changed_when: false
           failed_when: false
           run_once: true

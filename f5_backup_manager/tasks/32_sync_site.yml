@@ -38,22 +38,36 @@
       register: _site_sync_check
       retries: "{{ f5_configsync_retries | int }}"
       delay: "{{ f5_configsync_delay | int }}"
-      until: (_site_sync_check.sync_status.status | default('')) == 'In Sync'
+      until: >-
+        (
+          (_site_sync_check.sync_status | default([]))
+          if (_site_sync_check.sync_status | default([])) is mapping
+          else ((_site_sync_check.sync_status | default([])) | first | default({}))
+        ).status | default('') == 'In Sync'
+
+    - name: Normalizar resultado da verificação do Config Sync
+      ansible.builtin.set_fact:
+        _site_sync_check_entry: >-
+          {%- set raw_sync = _site_sync_check.sync_status | default([]) -%}
+          {{ raw_sync if raw_sync is mapping else (raw_sync | first | default({})) }}
+      changed_when: false
 
     - name: Registrar Config Sync concluído
       ansible.builtin.set_fact:
-        _site_sync_after: "{{ _site_sync_check.sync_status.status | default('UNKNOWN') }}"
+        _site_sync_after: "{{ _site_sync_check_entry.status | default('UNKNOWN') }}"
       changed_when: false
 
   rescue:
     - name: Registrar falha do Config Sync
       ansible.builtin.set_fact:
         _site_sync_after: >-
-          {{
-            _site_sync_check.sync_status.status
-            if (_site_sync_check is defined and _site_sync_check.sync_status is defined)
-            else 'FALHA'
-          }}
+          {%- if _site_sync_check is defined and _site_sync_check.sync_status is defined -%}
+            {%- set raw_sync = _site_sync_check.sync_status | default([]) -%}
+            {%- set sync_entry = raw_sync if raw_sync is mapping else (raw_sync | first | default({})) -%}
+            {{ sync_entry.status | default('FALHA') }}
+          {%- else -%}
+            FALHA
+          {%- endif -%}
         _site_blocked: true
         _site_error: >-
           Falha no Config Sync ACTIVE -> STANDBY do site {{ _site_name }}.
