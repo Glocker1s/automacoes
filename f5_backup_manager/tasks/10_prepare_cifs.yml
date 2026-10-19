@@ -1,77 +1,137 @@
 ---
-- name: CIFS | Resolver compartilhamento de backup
+- name: CIFS | Resolver compartilhamento e caminho do backup
   ansible.builtin.set_fact:
-    _f5_cifs_server: >-
-      {{ (f5_backup_cifs_address | default({})).get(f5_backup_cifs_label | default('') | lower, '') }}
-  no_log: true
+    _f5_cifs_server: "{{ (f5_backup_cifs_address | default({})).get(f5_backup_cifs_label | lower, '') }}"
+    _f5_cifs_root_dir: >-
+      {{ f5_backup_cifs_mount_path | regex_replace('/$', '') }}/{{ f5_backup_cifs_path | regex_replace('^/+', '') | regex_replace('/+$', '') }}
   changed_when: false
 
-- name: CIFS | Validar compartilhamento resolvido
-  ansible.builtin.assert:
-    that:
-      - (_f5_cifs_server | default('') | string | trim | length) > 0
-    fail_msg: >-
-      CIFS não mapeado para f5_backup_cifs_label={{ f5_backup_cifs_label }}.
-
-- name: CIFS | Validar disponibilidade do smbclient no executor
-  ansible.builtin.command: which smbclient
+- name: CIFS | Verificar disponibilidade de mount.cifs no host Linux
+  ansible.builtin.command:
+    argv: [/bin/bash, -lc, 'command -v mount.cifs']
   delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-  become: false
-  register: _f5_smbclient_check
+  become: true
   changed_when: false
+  register: _f5_mount_cifs_binary
 
-- name: CIFS | Guardar credenciais originadas do Job
+- name: CIFS | Resolver usuário e senha do Job
   ansible.builtin.set_fact:
     _f5_backup_cifs_username: "{{ f5_backup_cifs_user | default(ansible_user | default('')) }}"
     _f5_backup_cifs_password: "{{ f5_backup_cifs_password | default(ansible_password | default('')) }}"
-  no_log: true
   changed_when: false
+  no_log: true
 
-- name: CIFS | Validar presença de usuário e senha do CIFS
+- name: CIFS | Validar disponibilidade das credenciais
   ansible.builtin.assert:
     that:
-      - (_f5_backup_cifs_username | length) > 0
-      - (_f5_backup_cifs_password | length) > 0
+      - (_f5_backup_cifs_username | string | length) > 0
+      - (_f5_backup_cifs_password | string | length) > 0
     fail_msg: >-
-      Usuário/senha CIFS não disponibilizados pelo Job.
-      Configure a Credential ou f5_backup_cifs_user/f5_backup_cifs_password.
+      Credenciais CIFS não disponíveis. Associe a Machine Credential
+      ou use credencial protegida com f5_backup_cifs_user/f5_backup_cifs_password.
   no_log: true
 
-- name: CIFS | Criar diretório temporário no executor CIFS
+- name: CIFS | Criar diretório de staging no host Linux
   ansible.builtin.file:
     path: "{{ f5_backup_remote_temp_dir }}"
     state: directory
-    mode: "0700"
+    mode: '0700'
   delegate_to: "{{ f5_backup_cifs_delegate_host }}"
   become: false
 
-- name: CIFS | Criar arquivo temporário de senha
+- name: CIFS | Criar arquivo de credenciais protegido no Linux
   ansible.builtin.copy:
-    dest: "{{ f5_backup_cifs_password_file }}"
-    content: "{{ _f5_backup_cifs_password }}"
-    mode: "0600"
+    dest: "{{ f5_backup_cifs_credentials_file }}"
+    content: |-
+      username={{ _f5_backup_cifs_username }}
+      password={{ _f5_backup_cifs_password }}
+      {% if (f5_backup_cifs_domain | default('') | string | length) > 0 %}
+      domain={{ f5_backup_cifs_domain }}
+      {% endif %}
+    mode: '0600'
+    owner: root
+    group: root
   delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-  become: false
+  become: true
   no_log: true
 
-- name: CIFS | Testar acesso ao diretório base de backups
-  ansible.builtin.shell: >
-    smbclient "{{ _f5_cifs_server }}"
-    -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-    -W "{{ f5_backup_cifs_workgroup }}"
-    -c "cd {{ f5_backup_cifs_path }} ; ls"
-  args:
-    executable: /bin/bash
+- name: CIFS | Verificar montagem pré-existente
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ f5_backup_cifs_mount_path }}"]
+  register: _f5_cifs_mount_before
   delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-  become: false
-  register: _f5_cifs_probe
-  retries: 5
-  delay: 10
-  until: _f5_cifs_probe.rc == 0
+  become: true
   changed_when: false
-  no_log: true
+  failed_when: false
 
-- name: CIFS | Marcar acesso como validado
+- name: CIFS | Criar ponto de montagem exclusivo da execução
+  ansible.builtin.file:
+    path: "{{ f5_backup_cifs_mount_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: true
+  when: _f5_cifs_mount_before.rc != 0
+
+- name: CIFS | Confirmar origem de montagem pré-existente
+  when: _f5_cifs_mount_before.rc == 0
+  block:
+    - name: CIFS | Consultar share montado
+      ansible.builtin.command:
+        argv: [findmnt, --mountpoint, "{{ f5_backup_cifs_mount_path }}", -n, -o, SOURCE]
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: true
+      register: _f5_cifs_existing_source
+      changed_when: false
+
+    - name: CIFS | Impedir uso de outro compartilhamento
+      ansible.builtin.assert:
+        that:
+          - (_f5_cifs_existing_source.stdout | trim | lower) == (_f5_cifs_server | trim | lower)
+        fail_msg: >-
+          {{ f5_backup_cifs_mount_path }} já está montado em outro share.
+          A automação não vai usar nem desmontar esse compartilhamento.
+
+- name: CIFS | Montar compartilhamento no host Linux
+  ansible.builtin.command:
+    argv:
+      - mount
+      - -t
+      - cifs
+      - "{{ _f5_cifs_server }}"
+      - "{{ f5_backup_cifs_mount_path }}"
+      - -o
+      - "credentials={{ f5_backup_cifs_credentials_file }},vers={{ f5_backup_cifs_vers }},rw,nosuid,nodev"
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: true
+  register: _f5_cifs_mount_command
+  when: _f5_cifs_mount_before.rc != 0
+
+- name: CIFS | Registrar mount realizado nesta execução
+  ansible.builtin.set_fact:
+    f5_backup_cifs_mounted_by_job: true
+  changed_when: false
+  when:
+    - _f5_cifs_mount_before.rc != 0
+    - _f5_cifs_mount_command is succeeded
+
+- name: CIFS | Validar ponto de montagem ativo
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ f5_backup_cifs_mount_path }}"]
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: true
+  changed_when: false
+
+- name: CIFS | Verificar diretório base no compartilhamento
+  ansible.builtin.command:
+    argv: [test, -d, "{{ _f5_cifs_root_dir }}"]
+  delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+  become: true
+  changed_when: false
+
+- name: CIFS | Marcar acesso ao armazenamento como validado
   ansible.builtin.set_fact:
     f5_backup_cifs_ready: true
   changed_when: false

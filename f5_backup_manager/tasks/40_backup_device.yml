@@ -19,10 +19,17 @@
   ansible.builtin.set_fact:
     _backup_local_file: "{{ f5_backup_local_temp_dir }}/{{ _backup_ucs_name }}"
     _backup_remote_stage_file: "{{ f5_backup_remote_temp_dir }}/{{ _backup_ucs_name }}"
-    _backup_cifs_dir: >-
-      {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }}/{{ _backup_hostname }}
+    _backup_cifs_dir: "{{ _f5_cifs_root_dir }}/{{ _site_environment | upper }}/{{ _backup_hostname }}"
     _backup_cifs_file: >-
       {{ _f5_cifs_server }}{{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }}/{{ _backup_hostname }}/{{ _backup_ucs_name }}
+    _backup_cifs_local_file: "{{ _f5_cifs_root_dir }}/{{ _site_environment | upper }}/{{ _backup_hostname }}/{{ _backup_ucs_name }}"
+    _backup_cifs_partial_file: >-
+      {{ _f5_cifs_root_dir }}/{{ _site_environment | upper }}/{{ _backup_hostname }}/.{{ _backup_ucs_name }}.partial-{{ awx_job_id | default('local') }}
+  changed_when: false
+
+- name: Inicializar controle de publicação do UCS
+  ansible.builtin.set_fact:
+    _backup_cifs_published_by_job: false
   changed_when: false
 
 - name: Criar e publicar UCS de {{ _backup_hostname }}
@@ -64,92 +71,109 @@
       delegate_to: "{{ f5_backup_cifs_delegate_host }}"
       become: false
 
-    - name: CIFS | Garantir diretório do ambiente
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c "cd {{ f5_backup_cifs_path }} ; mkdir {{ _site_environment | upper }}"
-      args:
-        executable: /bin/bash
+    - name: CIFS | Criar pastas de ambiente e equipamento
+      ansible.builtin.command:
+        argv: [mkdir, -p, "{{ _backup_cifs_dir }}"]
       delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
+      become: true
       changed_when: false
-      failed_when: false
-      no_log: true
 
-    - name: CIFS | Validar diretório do ambiente
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c "cd {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }} ; ls"
-      args:
-        executable: /bin/bash
+    - name: CIFS | Proteger backup contra sobrescrita
+      ansible.builtin.stat:
+        path: "{{ _backup_cifs_local_file }}"
+        get_checksum: false
+        get_attributes: false
+        get_mime: false
+      register: _backup_existing_destination
       delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
-      register: _backup_cifs_env_probe
-      changed_when: false
-      no_log: true
+      become: true
 
-    - name: CIFS | Garantir diretório do equipamento
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c "cd {{ f5_backup_cifs_path | regex_replace('/$', '') }}/{{ _site_environment | upper }} ; mkdir {{ _backup_hostname }}"
-      args:
-        executable: /bin/bash
-      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
-      changed_when: false
-      failed_when: false
-      no_log: true
+    - name: CIFS | Validar nome livre para novo UCS
+      ansible.builtin.assert:
+        that:
+          - not (_backup_existing_destination.stat.exists | default(false) | bool)
+        fail_msg: >-
+          Backup {{ _backup_cifs_file }} já existe. Não será sobrescrito.
 
-    - name: CIFS | Validar diretório do equipamento
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c "cd {{ _backup_cifs_dir }} ; ls"
-      args:
-        executable: /bin/bash
+    - name: CIFS | Copiar UCS do staging para arquivo parcial
+      ansible.builtin.command:
+        argv: [cp, -f, --, "{{ _backup_remote_stage_file }}", "{{ _backup_cifs_partial_file }}"]
       delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
-      register: _backup_cifs_host_probe
-      changed_when: false
-      no_log: true
-
-    - name: CIFS | Enviar UCS via smbclient
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c 'cd {{ _backup_cifs_dir }} ; put {{ _backup_remote_stage_file }} {{ _backup_ucs_name }}'
-      args:
-        executable: /bin/bash
-      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
-      register: _backup_cifs_put
+      become: true
       changed_when: true
-      no_log: true
 
-    - name: CIFS | Validar arquivo publicado
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c 'cd {{ _backup_cifs_dir }} ; ls {{ _backup_ucs_name }}'
-      args:
-        executable: /bin/bash
+    - name: CIFS | Verificar arquivo no staging
+      ansible.builtin.stat:
+        path: "{{ _backup_remote_stage_file }}"
+        get_checksum: false
+        get_attributes: false
+        get_mime: false
       delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
-      register: _backup_cifs_file_probe
+      become: true
+      register: _backup_stage_stat
+
+    - name: CIFS | Verificar cópia parcial no compartilhamento
+      ansible.builtin.stat:
+        path: "{{ _backup_cifs_partial_file }}"
+        get_checksum: false
+        get_attributes: false
+        get_mime: false
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: true
+      register: _backup_partial_stat
+
+    - name: CIFS | Validar tamanho do UCS copiado
+      ansible.builtin.assert:
+        that:
+          - _backup_partial_stat.stat.exists | default(false) | bool
+          - (_backup_partial_stat.stat.size | default(0) | int) > 0
+          - (_backup_partial_stat.stat.size | int) == (_backup_stage_stat.stat.size | int)
+        fail_msg: >-
+          Falha de integridade: o arquivo UCS no CIFS não possui o mesmo
+          tamanho do arquivo de origem no staging. A cópia será descartada.
+
+    - name: CIFS | Publicar arquivo UCS validado
+      ansible.builtin.command:
+        argv: [mv, -n, --, "{{ _backup_cifs_partial_file }}", "{{ _backup_cifs_local_file }}"]
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: true
+      changed_when: true
+
+    - name: CIFS | Verificar se publicação deixou arquivo parcial
+      ansible.builtin.stat:
+        path: "{{ _backup_cifs_partial_file }}"
+        get_checksum: false
+        get_attributes: false
+        get_mime: false
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: true
+      register: _backup_post_mv_partial
+
+    - name: CIFS | Validar publicação sem colisão de nome
+      ansible.builtin.assert:
+        that:
+          - not (_backup_post_mv_partial.stat.exists | default(false) | bool)
+        fail_msg: >-
+          Publicação não finalizada: o arquivo parcial ainda existe.
+          Pode haver um backup de mesmo nome no compartilhamento.
+
+    - name: CIFS | Registrar UCS publicado nesta execução
+      ansible.builtin.set_fact:
+        _backup_cifs_published_by_job: true
       changed_when: false
+
+    - name: CIFS | Validar UCS final no compartilhamento
+      ansible.builtin.stat:
+        path: "{{ _backup_cifs_local_file }}"
+        get_checksum: false
+        get_attributes: false
+        get_mime: false
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: true
+      register: _backup_final_stat
       failed_when: >-
-        (_backup_cifs_file_probe.rc != 0) or
-        (_backup_ucs_name not in (_backup_cifs_file_probe.stdout | default('')))
-      no_log: true
+        not (_backup_final_stat.stat.exists | default(false) | bool) or
+        ((_backup_final_stat.stat.size | default(0) | int) != (_backup_stage_stat.stat.size | int))
 
     - name: Remover UCS temporário do BIG-IP após cópia validada
       f5networks.f5_modules.bigip_ucs:
@@ -200,19 +224,23 @@
       changed_when: false
 
   rescue:
-    - name: CIFS | Remover arquivo remoto após falha do backup
-      ansible.builtin.shell: >
-        smbclient "{{ _f5_cifs_server }}"
-        -U "{{ _f5_backup_cifs_username }}%$(cat {{ f5_backup_cifs_password_file }})"
-        -W "{{ f5_backup_cifs_workgroup }}"
-        -c 'cd {{ _backup_cifs_dir }} ; del {{ _backup_ucs_name }}'
-      args:
-        executable: /bin/bash
+    - name: CIFS | Remover cópia parcial se o backup falhou
+      ansible.builtin.command:
+        argv: [rm, -f, --, "{{ _backup_cifs_partial_file }}"]
       delegate_to: "{{ f5_backup_cifs_delegate_host }}"
-      become: false
+      become: true
       changed_when: false
       failed_when: false
-      no_log: true
+      when: _backup_cifs_partial_file is defined
+
+    - name: CIFS | Descartar UCS final inválido criado nesta execução
+      ansible.builtin.command:
+        argv: [rm, -f, --, "{{ _backup_cifs_local_file }}"]
+      delegate_to: "{{ f5_backup_cifs_delegate_host }}"
+      become: true
+      changed_when: false
+      failed_when: false
+      when: _backup_cifs_published_by_job | default(false) | bool
 
     - name: Registrar falha do backup do membro
       ansible.builtin.set_fact:

@@ -5,6 +5,7 @@
     f5_site_results: []
     f5_global_errors: []
     _f5_backup_global_blocked: false
+    f5_backup_cifs_mounted_by_job: false
     f5_backup_date: "—"
     f5_backup_timestamp: "unknown"
     f5_target_scope_norm: >-
@@ -16,7 +17,7 @@
     - name: Validar entradas e preparar execução
       ansible.builtin.include_tasks: 00_validate_inputs.yml
 
-    - name: Preparar acesso CIFS via smbclient
+    - name: Preparar montagem CIFS no host Linux
       ansible.builtin.include_tasks: 10_prepare_cifs.yml
 
   rescue:
@@ -41,11 +42,11 @@
     label: "{{ site.environment | upper }} / {{ site.name }}"
   when: not (_f5_backup_global_blocked | bool)
 
-- name: Montar relatório final
-  ansible.builtin.include_tasks: 60_build_report.yml
-
 - name: Limpar recursos locais da execução
   ansible.builtin.include_tasks: 80_cleanup.yml
+
+- name: Montar relatório final
+  ansible.builtin.include_tasks: 60_build_report.yml
 
 - name: Finalizar status do job
   ansible.builtin.include_tasks: 90_finalize.yml

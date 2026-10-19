@@ -17,6 +17,9 @@
       - (f5_backup_cifs_path | default('') | string | trim | length) > 0
       - (f5_backup_cifs_address | default({}) | length) > 0
       - (f5_backup_cifs_address.get(f5_backup_cifs_label | lower, '') | string | trim | length) > 0
+      - (f5_backup_cifs_mount_path | default('') | string | trim | length) > 5
+      - (f5_backup_cifs_delegate_host | default('') | string | trim | length) > 0
+      - (f5_backup_cifs_vers | default('') | string | trim | length) > 0
     fail_msg: >-
       CIFS não configurado. Verifique f5_backup_cifs_label,
       f5_backup_cifs_path e f5_backup_cifs_address.
