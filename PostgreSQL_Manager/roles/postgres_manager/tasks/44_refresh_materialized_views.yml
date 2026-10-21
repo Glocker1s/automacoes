@@ -1,0 +1,139 @@
+---
+- name: MV | Resolver configuracao de tentativas
+  ansible.builtin.set_fact:
+    pgm_mviews_retry_enabled: "{{ pgm_db_cfg.materialized_views.retry_enabled | default(pgm_mviews_retry_enabled_default) | bool }}"
+    pgm_mviews_retry_attempts: "{{ pgm_db_cfg.materialized_views.retry_attempts | default(pgm_mviews_retry_attempts_default) | int }}"
+    pgm_mviews_retry_delay: "{{ pgm_db_cfg.materialized_views.retry_delay_seconds | default(pgm_mviews_retry_delay_seconds_default) | int }}"
+    pgm_mviews_sql_file: "{{ pgm_restore_dir_root }}/refresh_mviews_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ pgm_job_id }}.sql"
+    pgm_mviews_summary_file: "{{ pgm_restore_dir_root }}/refresh_mviews_{{ pgm_database_name }}_{{ pgm_env }}_job_{{ pgm_job_id }}.json"
+
+- name: MV | Validar limites de retry
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Validar retry de materialized views"
+    pgm_host_error_msg: >-
+      Configuracao invalida de retry para materialized_views:
+      retry_attempts deve ser 1..10 e retry_delay_seconds deve ser 0..3600.
+  when:
+    - not (pgm_host_failed | bool)
+    - pgm_mviews_retry_attempts | int < 1 or pgm_mviews_retry_attempts | int > 10 or pgm_mviews_retry_delay | int < 0 or pgm_mviews_retry_delay | int > 3600
+
+- name: MV | Definir quantidade efetiva de tentativas
+  ansible.builtin.set_fact:
+    pgm_mviews_max_attempts: "{{ pgm_mviews_retry_attempts | int if pgm_mviews_retry_enabled | bool else 1 }}"
+  when: not (pgm_host_failed | bool)
+
+- name: MV | Gerar SQL de refresh individual com recuperacao
+  ansible.builtin.template:
+    src: refresh_materialized_views.sql.j2
+    dest: "{{ pgm_mviews_sql_file }}"
+    mode: "0600"
+  become: true
+  become_user: root
+  when: not (pgm_host_failed | bool)
+
+- name: MV | Executar refresh e retentar apenas as pendentes
+  ansible.builtin.shell: |
+    umask 077
+    echo "" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Refresh materialized views" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Banco alvo: {{ pgm_restore_target_db }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Maximo de tentativas por MV: {{ pgm_mviews_max_attempts }}" >> "{{ pgm_restore_log_file }}"
+    echo "[INFO] Intervalo entre passagens: {{ pgm_mviews_retry_delay }} segundos" >> "{{ pgm_restore_log_file }}"
+    rm -f "{{ pgm_mviews_summary_file }}"
+
+    psql -X -w -v ON_ERROR_STOP=1 \
+      -h "{{ pgm_db_host | default(pgm_default_db_host) }}" \
+      -p "{{ pgm_db_port | default(pgm_default_port) }}" \
+      -U "{{ pgm_db_user | default(pgm_default_db_user) }}" \
+      -d "{{ pgm_restore_target_db }}" \
+      -f "{{ pgm_mviews_sql_file }}" >> "{{ pgm_restore_log_file }}" 2>&1
+
+    rc=$?
+    echo "[INFO] Refresh materialized views rc=${rc}" >> "{{ pgm_restore_log_file }}"
+    exit "$rc"
+  args:
+    executable: /bin/bash
+  environment:
+    PATH: "{{ pgm_pg_bin_path }}:/usr/local/bin:/usr/bin:/bin"
+    PGPASSWORD: "{{ pgm_db_password | default('') }}"
+  register: _pgm_mviews
+  failed_when: false
+  changed_when: true
+  become: true
+  become_user: root
+  no_log: true
+  when: not (pgm_host_failed | bool)
+
+- name: MV | Verificar resumo gerado
+  ansible.builtin.stat:
+    path: "{{ pgm_mviews_summary_file }}"
+  register: _pgm_mviews_summary_stat
+  become: true
+  become_user: root
+  failed_when: false
+  when:
+    - _pgm_mviews is defined
+    - not (_pgm_mviews.skipped | default(false))
+
+- name: MV | Ler resultado individual por MV
+  ansible.builtin.slurp:
+    src: "{{ pgm_mviews_summary_file }}"
+  register: _pgm_mviews_slurp
+  become: true
+  become_user: root
+  no_log: true
+  when:
+    - _pgm_mviews_summary_stat.stat.exists | default(false)
+    - _pgm_mviews_summary_stat.stat.size | default(0) | int > 0
+
+- name: MV | Publicar resultados de refresh
+  ansible.builtin.set_fact:
+    pgm_mviews_summary: "{{ _pgm_mviews_slurp.content | b64decode | trim | from_json }}"
+  when:
+    - _pgm_mviews_slurp is defined
+    - not (_pgm_mviews_slurp.skipped | default(false))
+
+- name: MV | Registrar falha se resumo JSON nao foi gerado
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Refresh materialized views"
+    pgm_host_error_msg: >-
+      A etapa de refresh das materialized views em {{ pgm_restore_target_db }}
+      nao produziu um resumo JSON valido (arquivo ausente ou vazio).
+      psql rc={{ _pgm_mviews.rc | default('indisponivel') }}.
+      Verifique o erro SQL original em {{ pgm_restore_log_file }}
+      e o arquivo {{ pgm_mviews_sql_file }}.
+  when:
+    - not (pgm_host_failed | bool)
+    - _pgm_mviews is defined
+    - not (_pgm_mviews.skipped | default(false))
+    - >-
+      not (_pgm_mviews_summary_stat.stat.exists | default(false) | bool)
+      or (_pgm_mviews_summary_stat.stat.size | default(0) | int == 0)
+
+- name: MV | Exibir resumo das tentativas
+  ansible.builtin.debug:
+    msg:
+      total: "{{ pgm_mviews_summary.total | default(0) }}"
+      sucesso: "{{ pgm_mviews_summary.successful | default(0) }}"
+      recuperadas_apos_retry: "{{ pgm_mviews_summary.recovered | default(0) }}"
+      falhas_persistentes: "{{ pgm_mviews_summary.failed | default(0) }}"
+      pendentes: >-
+        {{ pgm_mviews_summary.get('items', []) | selectattr('status', 'equalto', 'FALHA') | map(attribute='name') | list }}
+  when:
+    - pgm_mviews_summary.total is defined
+
+- name: MV | Registrar falha apos esgotar tentativas
+  ansible.builtin.set_fact:
+    pgm_host_failed: true
+    pgm_host_failed_task: "Refresh materialized views"
+    pgm_host_error_msg: >-
+      Falha ao atualizar materialized views em {{ pgm_restore_target_db }}.
+      Pendencias: {{ pgm_mviews_summary.get('items', []) | selectattr('status', 'equalto', 'FALHA') | map(attribute='name') | join(', ') }}.
+      Consulte {{ pgm_restore_log_file }} para os erros e tentativas.
+  when:
+    - not (pgm_host_failed | bool)
+    - _pgm_mviews is defined
+    - not (_pgm_mviews.skipped | default(false))
+    - (_pgm_mviews.rc | default(1) | int != 0) or (pgm_mviews_summary.failed | default(0) | int > 0)
