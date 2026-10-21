@@ -3,16 +3,26 @@ cm:
   postgres_manager:
     databases:
       valemobi:
+      
+        # Descrição apenas informativa do profile.
         description: "Valemobi PostgreSQL Manager"
+
+        # Nome real da database PostgreSQL.
         database_name: "valemobi"
 
+        # Ambiente usado como origem quando pgm_source_env vier vazio.
         default_source_env: "prd"
+
+        # Destinos padrão da ação sync quando nenhum destino for informado.
         default_sync_targets:
+          - "tu"
+          - "ti"
           - "th"
+          - "fix"
         default_restore_targets: []
 
         backup:
-          root_dir: "/backup/postgres_manager"
+          root_dir: "/var/backup/postgres_manager"
 
           jobs: 16
 
@@ -23,7 +33,10 @@ cm:
           validate_dump: true
 
         restore:
-          mode: "promote"
+
+          root_dir: "/var/backup/postgres_manager_restore"
+          
+          mode: "restore_only"
 
           target_temp_suffix: "_restoring"
 
@@ -37,9 +50,10 @@ cm:
 
           extra_args: ""
 
-          # O procedimento manual não informa recriação de User Mapping
-          # nem refresh específico de Materialized Views.
-          exclude_toc_patterns: []
+          exclude_toc_patterns:
+            # O mapping é específico do destino e será recriado pelo bloco dblink.
+            - "USER MAPPING"
+            - "MATERIALIZED VIEW DATA"
 
         database_create:
           # A automação herda owner, encoding, locale, tablespace e connection limit
@@ -59,22 +73,24 @@ cm:
           enabled: true
           fail_on_error: true
           run_on_envs:
+            - "tu"
+            - "ti"
             - "th"
+            - "fix"
           groups:
             - name: "environment_configuration"
               backup_tables:
-                - "public.tb_direct_treasury_config"
                 - "public.tb_fix_server_configuration_flavour"
+                - "public.tb_direct_treasury_config"
                 - "public.tb_fix_server_configuration_session"
                 - "public.tb_fix_server_configuration_default"
               truncate_tables:
-                - "public.tb_direct_treasury_config"
                 - "public.tb_fix_server_configuration_flavour"
+                - "public.tb_direct_treasury_config"
                 - "public.tb_fix_server_configuration_session"
                 - "public.tb_fix_server_configuration_default"
               restore_data_only: true
-              # No procedimento manual da Valemobi não há --disable-triggers.
-              disable_triggers: false
+              disable_triggers: true
               cascade: false
               jobs: 16
 
@@ -82,7 +98,10 @@ cm:
           truncate_enabled: true
           fail_on_error: true
           run_on_envs:
+            - "tu"
+            - "ti"
             - "th"
+            - "fix"
           truncate_groups:
             - name: "clear_push_investor_device_application"
               tables:
@@ -91,37 +110,42 @@ cm:
 
         dblink:
           enabled: true
+          run_on_envs:
+            - "tu"
+            - "ti"
+            # - "th"
+            # - "fix"
           servers:
             - name: "remote_core"
               environments:
-                th:
-                  host: "10.222.80.31"
+                tu:
+                  host: "10.222.84.6"
                   port: "5432"
-                  # O dbname não estava explícito no procedimento manual.
-                  # Assumido pelo relacionamento entre as bases; confirmar no cliente.
+                  dbname: "corePaqueta"
+            
+                ti:
+                  host: "10.222.84.23"
+                  port: "5432"
                   dbname: "corePaqueta"
 
             - name: "remote_fundos"
               environments:
-                th:
-                  host: "10.222.80.27"
-                  # Porta/dbname não estavam explícitos no ALTER SERVER manual.
-                  # Mantidos com o padrão esperado; confirmar no cliente.
+                tu:
+                  host: "10.222.84.6"
                   port: "5432"
                   dbname: "Fundos"
 
-            - name: "remote_fundos_ro"
-              environments:
-                th:
-                  host: "10.222.80.27"
-                  # Porta/dbname não estavam explícitos no ALTER SERVER manual.
-                  # Mantidos com o padrão esperado; confirmar no cliente.
+                ti:
+                  host: "10.222.84.23"
                   port: "5432"
                   dbname: "Fundos"
 
-          # O procedimento manual apenas altera os Foreign Servers.
-          # Os User Mappings não são recriados aqui.
-          user_mappings: []
+          user_mappings:
+            - server_name: "remote_core"
+              local_user: "postgres"
+              user_var: "dblink_user"
+              password_var: "dblink_password"
+
           connections: []
 
         masking:
@@ -129,7 +153,7 @@ cm:
           enabled: true
           fail_on_error: true
 
-          # Ajustar conforme os ambientes existentes para a Valemobi.
+          # Ajustar conforme os ambientes existentes para o CorePaqueta.
           run_on_envs:
             - "tu"
             - "th"
@@ -148,12 +172,17 @@ cm:
 
         materialized_views:
           # Nenhum refresh de MV foi informado no procedimento manual.
-          refresh_enabled: false
-          refresh_all: false
+          refresh_enabled: true
+          refresh_all: true
+          retry_enabled: true
+          retry_attempts: 4
+          retry_delay_seconds: 30
           items: []
 
         maintenance:
           enabled: true
+          # Modos previstos:
+          # none | analyze | vacuum_analyze
           mode: "analyze"
 
         connection_control:
@@ -169,23 +198,29 @@ cm:
             - "queries/total-by-table.sql"
 
         hosts_env_sync:
-          prd:
-            - name: "prd-valemobi-01"
-              ansible_host: "PREENCHER_IP_PRD"
+          tu:
+            - name: "AG-AD-CL-BD-007"
+              ansible_host: "10.222.84.6"
               database_name: "valemobi"
               port: 5432
               db_host: "127.0.0.1"
               source: true
-              # Habilitar após preencher o host correto.
-              enabled: false
+              enabled: true
 
-          th:
-            - name: "th-valemobi-01"
-              ansible_host: "PREENCHER_IP_TH"
+          ti:
+            - name: "AG-AD-CL-BD-011"
+              ansible_host: "10.222.84.23"
               database_name: "valemobi"
-              # Porta explícita no procedimento manual da Valemobi TH.
-              port: 5433
+              port: 5432
               db_host: "127.0.0.1"
               source: true
-              # Habilitar após preencher o host correto.
-              enabled: false
+              enabled: true
+
+          fix:
+            - name: "AG-AH-CL-BD-002"
+              ansible_host: "10.222.80.101"
+              database_name: "valemobi"
+              port: 5432
+              db_host: "127.0.0.1"
+              source: true
+              enabled: true
