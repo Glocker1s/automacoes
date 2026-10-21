@@ -23,6 +23,7 @@
           'restored_database': (hv.pgm_host_summary | default({})).get('restored_database', ''),
           'activation': (hv.pgm_host_summary | default({})).get('activation', ''),
           'manual_activation_required': (hv.pgm_host_summary | default({})).get('manual_activation_required', false),
+          'mviews': (hv.pgm_host_summary | default({})).get('mviews', {}),
           'status': hv.pgm_host_status | default('NÃO EXECUTADO'),
           'failed_task': hv.pgm_host_failed_task | default(''),
           'error': hv.pgm_host_error_msg | default(''),
