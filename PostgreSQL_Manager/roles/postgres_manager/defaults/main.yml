@@ -180,6 +180,15 @@ pgm_post_restore_truncate_enabled_default: false
 pgm_post_restore_truncate_fail_on_error_default: true
 
 # ============================================================================
+# MATERIALIZED VIEWS - RECUPERAÇÃO DE FALHAS
+# ============================================================================
+# Numero total de tentativas por MV (inclui a primeira). O retry so roda
+# para MVs pendentes; as MVs com sucesso nunca sao executadas novamente.
+pgm_mviews_retry_enabled_default: true
+pgm_mviews_retry_attempts_default: 4
+pgm_mviews_retry_delay_seconds_default: 30
+
+# ============================================================================
 # MANUTENÇÃO PÓS-RESTORE
 # ============================================================================
 # Substitui o antigo restore.vacuum_analyze.
@@ -458,6 +467,11 @@ pgm_database_defaults:
 
     # Lista explícita das MVs.
     items: []
+
+    # Tentativas individuais; falhas em uma MV nao param as demais.
+    retry_enabled: "{{ pgm_mviews_retry_enabled_default }}"
+    retry_attempts: "{{ pgm_mviews_retry_attempts_default }}"
+    retry_delay_seconds: "{{ pgm_mviews_retry_delay_seconds_default }}"
 
   # --------------------------------------------------------------------------
   # MANUTENÇÃO
