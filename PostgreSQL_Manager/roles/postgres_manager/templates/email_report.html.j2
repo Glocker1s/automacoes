@@ -337,6 +337,43 @@
         </tr>
         {% endif %}
 
+        {% set mv_rows = rows | selectattr('mviews.total', 'defined') | list %}
+        {% if mv_rows | length > 0 %}
+        <tr>
+          <td style="padding-top:16px;">
+            <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
+              Materialized views - refresh e recuperação
+            </div>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+              <tr>{{ th('Ambiente / Host') }}{{ th('Total') }}{{ th('Concluídas') }}{{ th('Recuperadas') }}{{ th('Pendentes') }}</tr>
+              {% for row in mv_rows %}
+              <tr>
+                {{ td_open() }}{{ code(row.env | default('—')) }} / {{ code(row.host | default('—')) }}</td>
+                {{ td_open() }}{{ row.mviews.total | default(0) }}</td>
+                {{ td_open() }}{{ row.mviews.successful | default(0) }}</td>
+                {{ td_open() }}{{ row.mviews.recovered | default(0) }}</td>
+                {{ td_open() }}{{ row.mviews.failed | default(0) }}</td>
+              </tr>
+              {% endfor %}
+            </table>
+            {% for row in mv_rows %}
+              {% for mv in row.mviews.get('items', []) %}
+                {% if mv.status == 'FALHA' or mv.attempts | default(0) | int > 1 %}
+                <div style="font-family:Arial,sans-serif;font-size:12px;color:#333333;margin-top:8px;line-height:18px;">
+                  <b>{{ row.env }} / {{ mv.schema }}.{{ mv.name }}</b> -
+                  {{ 'RECUPERADA' if mv.status == 'OK' else 'PENDENTE' }}
+                  após {{ mv.attempts }} tentativa(s).
+                  {% if mv.status == 'FALHA' and mv.last_error | default('') | length > 0 %}
+                  <pre style="white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:11px;background-color:#f5f5f5;border:1px solid #dddddd;padding:8px;">{{ mv.last_error }}</pre>
+                  {% endif %}
+                </div>
+                {% endif %}
+              {% endfor %}
+            {% endfor %}
+          </td>
+        </tr>
+        {% endif %}
+
         <tr>
           <td style="padding-top:16px;">
             <div style="font-family:Arial,sans-serif;font-size:15px;font-weight:bold;color:#111111;margin-bottom:7px;">
