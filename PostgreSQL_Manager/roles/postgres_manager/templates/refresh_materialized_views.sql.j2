@@ -1,0 +1,133 @@
+\set ON_ERROR_STOP on
+
+-- A conexao e unica, pois dblink('myconn', ...) precisa da mesma sessao.
+{% for conn in pgm_dblink_connections | default([]) %}
+{% if conn.connect_before_refresh | default(false) | bool %}
+DO $pgm_connection$
+BEGIN
+  IF '{{ conn.name | replace("'", "''") }}' = ANY(dblink_get_connections()) THEN
+    PERFORM dblink_disconnect('{{ conn.name | replace("'", "''") }}');
+  END IF;
+END $pgm_connection$;
+SELECT dblink_connect('{{ conn.name | replace("'", "''") }}', '{{ conn.server_name | replace("'", "''") }}');
+{% endif %}
+{% endfor %}
+
+CREATE TEMP TABLE pgm_mv_refresh_state (
+  schema_name text NOT NULL,
+  mv_name text NOT NULL,
+  use_concurrent_refresh boolean NOT NULL DEFAULT false,
+  succeeded boolean NOT NULL DEFAULT false,
+  attempts integer NOT NULL DEFAULT 0,
+  last_error text NOT NULL DEFAULT '',
+  PRIMARY KEY (schema_name, mv_name)
+) ON COMMIT PRESERVE ROWS;
+
+{% if pgm_db_cfg.materialized_views.refresh_all | default(false) | bool %}
+INSERT INTO pg_temp.pgm_mv_refresh_state (schema_name, mv_name)
+SELECT schemaname, matviewname
+FROM pg_matviews
+WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY schemaname, matviewname;
+{% else %}
+{% for mv in pgm_db_cfg.materialized_views.get('items', []) %}
+INSERT INTO pg_temp.pgm_mv_refresh_state (schema_name, mv_name, use_concurrent_refresh)
+VALUES ('{{ (mv.schema | default('public')) | replace("'", "''") }}',
+        '{{ mv.name | replace("'", "''") }}',
+        {{ 'true' if mv.concurrently | default(false) | bool else 'false' }})
+ON CONFLICT (schema_name, mv_name) DO UPDATE SET use_concurrent_refresh = EXCLUDED.use_concurrent_refresh;
+{% endfor %}
+{% endif %}
+
+DO $pgm_mv$
+DECLARE
+  mv record;
+  pass_no integer;
+  max_passes integer := {{ pgm_mviews_max_attempts | int }};
+  pending_count integer;
+  err_msg text;
+  err_detail text;
+  err_state text;
+BEGIN
+  FOR pass_no IN 1..max_passes LOOP
+    SELECT count(*) INTO pending_count FROM pg_temp.pgm_mv_refresh_state WHERE NOT succeeded;
+    EXIT WHEN pending_count = 0;
+    RAISE NOTICE '[PGM_MV] Passagem % de %: % MV(s) pendente(s)', pass_no, max_passes, pending_count;
+
+    FOR mv IN
+      SELECT schema_name, mv_name, use_concurrent_refresh
+      FROM pg_temp.pgm_mv_refresh_state
+      WHERE NOT succeeded
+      ORDER BY schema_name, mv_name
+    LOOP
+      BEGIN
+        RAISE NOTICE '[PGM_MV] REFRESH %.% tentativa %', mv.schema_name, mv.mv_name, pass_no;
+        EXECUTE format(
+          'REFRESH MATERIALIZED VIEW %s %I.%I',
+          CASE WHEN mv.use_concurrent_refresh THEN 'CONCURRENTLY' ELSE '' END,
+          mv.schema_name,
+          mv.mv_name
+        );
+        UPDATE pg_temp.pgm_mv_refresh_state
+          SET succeeded = true, attempts = attempts + 1, last_error = ''
+          WHERE schema_name = mv.schema_name AND mv_name = mv.mv_name;
+        RAISE NOTICE '[PGM_MV] OK %.% tentativa %', mv.schema_name, mv.mv_name, pass_no;
+      EXCEPTION WHEN OTHERS THEN
+        -- Subtransacao por MV: os refreshes bem-sucedidos das outras MVs
+        -- continuam preservados e as demais ainda serao processadas.
+        GET STACKED DIAGNOSTICS
+          err_msg = MESSAGE_TEXT,
+          err_detail = PG_EXCEPTION_DETAIL,
+          err_state = RETURNED_SQLSTATE;
+        UPDATE pg_temp.pgm_mv_refresh_state
+          SET attempts = attempts + 1,
+              last_error = left(format('SQLSTATE=%s %s %s', err_state, err_msg, coalesce(err_detail, '')), 3000)
+          WHERE schema_name = mv.schema_name AND mv_name = mv.mv_name;
+        RAISE NOTICE '[PGM_MV] ERRO %.% tentativa %: %',
+          mv.schema_name, mv.mv_name, pass_no, left(err_msg, 500);
+      END;
+    END LOOP;
+
+    SELECT count(*) INTO pending_count FROM pg_temp.pgm_mv_refresh_state WHERE NOT succeeded;
+    EXIT WHEN pending_count = 0;
+    IF pass_no < max_passes AND {{ pgm_mviews_retry_delay | int }} > 0 THEN
+      RAISE NOTICE '[PGM_MV] % pendencia(s); aguardando % segundo(s) antes da proxima passagem',
+        pending_count, {{ pgm_mviews_retry_delay | int }};
+      PERFORM pg_sleep({{ pgm_mviews_retry_delay | int }});
+    END IF;
+  END LOOP;
+END $pgm_mv$;
+
+-- A saída detalhada é JSON (uma linha), escrita pelo cliente psql no host.
+\pset tuples_only on
+\pset format unaligned
+\o {{ pgm_mviews_summary_file }}
+SELECT json_build_object(
+  'total', count(*),
+  'successful', count(*) FILTER (WHERE succeeded),
+  'recovered', count(*) FILTER (WHERE succeeded AND attempts > 1),
+  'failed', count(*) FILTER (WHERE NOT succeeded),
+  'items', coalesce(
+    json_agg(json_build_object(
+      'schema', schema_name, 'name', mv_name, 'status', CASE WHEN succeeded THEN 'OK' ELSE 'FALHA' END,
+      'attempts', attempts, 'last_error', last_error
+    ) ORDER BY schema_name, mv_name), '[]'::json)
+)::text
+FROM pg_temp.pgm_mv_refresh_state;
+\o
+\pset tuples_only off
+\pset format aligned
+
+{% for conn in pgm_dblink_connections | default([]) %}
+{% if conn.connect_before_refresh | default(false) | bool %}
+SELECT dblink_disconnect('{{ conn.name | replace("'", "''") }}');
+{% endif %}
+{% endfor %}
+
+-- Pendências mantêm o restore como FALHA; nenhuma promoção pode ocorrer.
+DO $pgm_check$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_temp.pgm_mv_refresh_state WHERE NOT succeeded) THEN
+    RAISE EXCEPTION '[PGM_MV] Restaram MVs sem refresh apos % tentativa(s)', {{ pgm_mviews_max_attempts | int }};
+  END IF;
+END $pgm_check$;
