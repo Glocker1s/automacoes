@@ -1,0 +1,32 @@
+---
+- name: PostgreSQL WAL Archive - alerta consolidado
+  hosts: all
+
+  sources:
+    - name: webhook_in
+      ansible.eda.webhook:
+        host: "0.0.0.0"
+        port: 5000
+
+  rules:
+    - name: Disparar alerta de erros de arquivamento WAL
+      condition: >-
+        event.payload is defined and
+        event.payload.type == "postgres_wal_archive" and
+        event.payload.status == "failed"
+      actions:
+        - debug:
+            msg: >-
+              Erros de WAL: host={{ event.payload.hostname }}
+              total={{ event.payload.error_count }}
+              exemplos={{ event.payload.wal_sample }}
+              timestamp={{ event.payload.timestamp }}
+        - run_workflow_template:
+            name: "WF - PostgreSQL WAL Archive Alert"
+            organization: "Default"
+            job_args:
+              extra_vars:
+                hostname: "{{ event.payload.hostname }}"
+                timestamp: "{{ event.payload.timestamp }}"
+                error_count: "{{ event.payload.error_count }}"
+                wal_sample: "{{ event.payload.wal_sample }}"

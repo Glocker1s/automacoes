@@ -1,0 +1,45 @@
+- name: Receive DB events via webhook and trigger workflow on failure
+  hosts: all
+
+  sources:
+    - name: webhook_in
+      ansible.eda.webhook:
+        host: "0.0.0.0"
+        port: 5000
+
+  rules:
+    - name: OK - DB connection ok
+      condition: event.payload is defined and event.payload.db_status == "ok"
+      action:
+        debug:
+          msg: "Conexão OK | host={{ event.payload.db_host }} db={{ event.payload.db_name }} log={{ event.payload.log_file }}"
+
+    - name: FAIL - DB connection failed -> trigger workflow
+      condition: event.payload is defined and event.payload.db_status == "failed"
+      actions:
+        - debug:
+            msg: "Falha detectada | host={{ event.payload.db_host }} db={{ event.payload.db_name }} log={{ event.payload.log_file }} err={{ event.payload.error }}"
+        - run_workflow_template:
+            name: "WF - DB Log Alert"
+            organization: "Default"
+            job_args:
+              extra_vars:
+                hostname: "{{ event.payload.hostname }}"
+                db_host: "{{ event.payload.db_host }}"
+                db_name: "{{ event.payload.db_name }}"
+                log_file: "{{ event.payload.log_file }}"
+                error: "{{ event.payload.error }}"
+                db_service_name: "{{ event.payload.db_service_name }}"
+                timestamp: "{{ event.payload.timestamp }}"
+
+    - name: DEBUG - show meta only
+      condition: event.meta is defined
+      action:
+        debug:
+          var: event.meta
+
+    - name: DEBUG - show payload only
+      condition: event.payload is defined
+      action:
+        debug:
+          var: event.payload

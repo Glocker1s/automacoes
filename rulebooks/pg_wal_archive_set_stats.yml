@@ -1,0 +1,118 @@
+---
+- name: PostgreSQL WAL Archive - Consolidated Email Report
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    ansible_url: "https://aap-new-aap.apps-crc.testing"
+
+  tasks:
+    - name: Normalizar informacoes recebidas do EDA
+      ansible.builtin.set_fact:
+        _host: "{{ hostname | default('N/A', true) }}"
+        _count: "{{ error_count | default(0) | int }}"
+        _wals: "{{ wal_sample | default('', true) }}"
+        _ts: "{{ timestamp | default('N/A', true) }}"
+
+    - name: Montar email HTML consolidado
+      ansible.builtin.set_fact:
+        send_mail_body: |
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;background-color:#f3f5f8;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+            <tr>
+              <td align="center" style="padding:28px 12px;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" style="width:100%;max-width:640px;border-collapse:collapse;background-color:#ffffff;border:1px solid #e5e7eb;">
+                  <tr><td style="height:5px;background-color:#b91c1c;font-size:1px;line-height:1px;">&nbsp;</td></tr>
+                  <tr>
+                    <td style="padding:28px 30px 14px 30px;">
+                      <div style="font-size:11px;font-weight:bold;letter-spacing:1.4px;color:#64748b;">POSTGRESQL / WAL ARCHIVE MONITOR</div>
+                      <h1 style="margin:11px 0 10px 0;font-size:23px;line-height:30px;color:#991b1b;">Falhas no arquivamento WAL</h1>
+                      <p style="margin:0;font-size:14px;line-height:22px;color:#475569;">Foram identificados erros de arquivamento desde a ultima verificacao. Confira o resumo consolidado abaixo.</p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:8px 30px 20px 30px;">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
+                        <tr>
+                          <td width="40%" valign="top" style="padding:16px;border:1px solid #fecaca;background-color:#fef2f2;">
+                            <div style="font-size:11px;font-weight:bold;color:#991b1b;letter-spacing:0.6px;">OCORRENCIAS DETECTADAS</div>
+                            <div style="font-size:32px;font-weight:bold;line-height:42px;color:#991b1b;">{{ _count }}</div>
+                          </td>
+                          <td width="3%">&nbsp;</td>
+                          <td width="57%" valign="top" style="padding:16px;border:1px solid #e2e8f0;background-color:#f8fafc;">
+                            <div style="font-size:11px;font-weight:bold;color:#64748b;letter-spacing:0.6px;">SERVIDOR MONITORADO</div>
+                            <div style="font-size:17px;font-weight:bold;line-height:32px;color:#0f172a;word-break:break-word;">{{ _host | e }}</div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 30px 20px 30px;">
+                      <h2 style="margin:0 0 10px 0;font-size:15px;color:#0f172a;">Detalhes do alerta</h2>
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;font-size:13px;">
+                        <tr>
+                          <td width="38%" style="padding:10px 12px;background-color:#f8fafc;border:1px solid #e2e8f0;color:#64748b;">Horario da verificacao</td>
+                          <td style="padding:10px 12px;border:1px solid #e2e8f0;color:#0f172a;">{{ _ts | replace('T', ' ') | e }}</td>
+                        </tr>
+                        <tr>
+                          <td style="padding:10px 12px;background-color:#f8fafc;border:1px solid #e2e8f0;color:#64748b;">Tipo de ocorrencia</td>
+                          <td style="padding:10px 12px;border:1px solid #e2e8f0;color:#0f172a;">ERRO ao arquivar</td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 30px 20px 30px;">
+                      <h2 style="margin:0 0 5px 0;font-size:15px;color:#0f172a;">Segmentos WAL identificados</h2>
+                      <p style="margin:0 0 10px 0;font-size:12px;line-height:18px;color:#64748b;">Amostra de ate 10 segmentos informados pelo monitor.</p>
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
+                        {% set wal_items = _wals if (_wals is sequence and _wals is not string) else (_wals | string).split(',') %}
+                        {% for wal in wal_items if (wal | string | trim) %}
+                        <tr>
+                          <td style="padding:9px 12px;border:1px solid #e2e8f0;background-color:#f8fafc;font-family:Consolas,Menlo,monospace;font-size:12px;color:#334155;word-break:break-all;">{{ wal | string | trim | e }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td style="padding:10px 12px;border:1px solid #e2e8f0;color:#64748b;">Nenhum identificador WAL valido foi extraido das linhas de erro.</td></tr>
+                        {% endfor %}
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 30px 20px 30px;">
+                      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;background-color:#fff7ed;border-left:3px solid #f59e0b;">
+                        <tr>
+                          <td style="padding:12px 14px;font-size:12px;line-height:19px;color:#92400e;">
+                            <strong>Atencao:</strong> o total representa ocorrencias no log, nao necessariamente WALs diferentes. Verifique a causa da falha e o destino de arquivamento configurado no PostgreSQL.
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:0 30px 26px 30px;">
+                      {% if awx_job_id is defined %}
+                      <a href="{{ ansible_url | e }}/execution/jobs/playbook/{{ awx_job_id | e }}/output" style="display:inline-block;padding:11px 17px;background-color:#334155;color:#ffffff;text-decoration:none;font-size:13px;font-weight:bold;">Ver execucao no AAP</a>
+                      <span style="font-size:12px;color:#64748b;padding-left:10px;">Job #{{ awx_job_id | e }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:16px 30px;background-color:#f8fafc;border-top:1px solid #e2e8f0;font-size:11px;line-height:17px;color:#64748b;">
+                      Alerta automatico gerado pelo PostgreSQL WAL Archive Monitor por meio do Ansible Automation Platform.
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+
+    - name: Publicar variaveis para o Job Template de email
+      ansible.builtin.set_stats:
+        data:
+          send_mail_subject: "[ALERTA] PostgreSQL WAL | {{ _host }} | {{ _count }} ocorrencia(s)"
+          send_mail_body: "{{ send_mail_body }}"
+          send_mail_attachments: []
+          send_mail_cifs: "{{ send_mail_cifs | default(false) }}"
+          send_mail_cifs_path: "{{ send_mail_cifs_path | default('') }}"
+          send_mail_cifs_address: "{{ send_mail_cifs_address | default({}) }}"
+          cifs_workgroup: "{{ cifs_workgroup | default('agorasenior.corp') }}"
