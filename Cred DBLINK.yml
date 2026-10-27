@@ -1,0 +1,37 @@
+PostgreSQL Manager - DBLink Credentials
+
+Credenciais de autenticação dos Foreign Servers utilizadas pelo PostgreSQL Manager.
+
+
+fields:
+  - id: remote_core_user
+    type: string
+    label: Remote Core - Usuario
+
+  - id: remote_core_password
+    type: string
+    label: Remote Core - Senha
+    secret: true
+
+  - id: remote_valemobi_user
+    type: string
+    label: Remote Valemobi - Usuario
+
+  - id: remote_valemobi_password
+    type: string
+    label: Remote Valemobi - Senha
+    secret: true
+
+required:
+  - remote_core_user
+  - remote_core_password
+  - remote_valemobi_user
+  - remote_valemobi_password
+
+
+
+extra_vars:
+  dblink_core_user: "{{ remote_core_user }}"
+  dblink_core_password: "{{ remote_core_password }}"
+  dblink_valemobi_user: "{{ remote_valemobi_user }}"
+  dblink_valemobi_password: "{{ remote_valemobi_password }}"
