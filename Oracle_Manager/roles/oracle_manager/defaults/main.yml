@@ -97,6 +97,10 @@ orm_restore_fail_on_invalid_objects_default: false
 # Permite continuar pós-restore quando o impdp conclui com erros no log.
 # Não habilitar globalmente sem autorização do DBA para os profiles envolvidos.
 orm_restore_allow_completed_with_errors_default: false
+# Apenas para escopo TABLES: permite reportar cargas parciais concluídas pelo
+# Data Pump como SUCESSO COM AVISO, sem liberar erros operacionais graves.
+# Exige também allow_completed_with_errors=true no profile.
+orm_restore_allow_partial_table_loads_with_warning_default: false
 orm_restore_storage_mode_default: "local"
 
 # MASKING / MASCARAMENTO
@@ -228,6 +232,7 @@ orm_profile_defaults:
     validate_invalid_objects: "{{ orm_restore_validate_invalid_objects_default }}"
     fail_on_invalid_objects: "{{ orm_restore_fail_on_invalid_objects_default }}"
     allow_completed_with_errors: "{{ orm_restore_allow_completed_with_errors_default }}"
+    allow_partial_table_loads_with_warning: "{{ orm_restore_allow_partial_table_loads_with_warning_default }}"
     storage_mode: "{{ orm_restore_storage_mode_default }}"
 
   masking:
