@@ -685,13 +685,129 @@
     - orm_scope_effective == 'schema'
     - orm_sequence_repair_completed | default(false) | bool
 
+- name: Data Pump | Ler log para analise de carga parcial das tabelas
+  ansible.builtin.slurp:
+    src: "{{ orm_impdp_log_file }}"
+  register: _orm_table_partial_log_raw
+  failed_when: false
+  become: true
+  become_user: "{{ orm_os_user_effective }}"
+  when:
+    - orm_scope_effective == 'tables'
+    - orm_restore_allow_completed_with_errors | bool
+    - orm_restore_allow_partial_table_loads_with_warning | bool
+    - _orm_impdp_exec.rc | default(0) | int != 0
+    - not (_orm_impdp_exec.failed | default(false) | bool)
+
+- name: Data Pump | Extrair cargas confirmadas e blocos de erro do log
+  ansible.builtin.set_fact:
+    _orm_table_partial_loaded_names: >-
+      {{
+        (_orm_table_partial_log_raw.content | b64decode)
+        | regex_findall('(?im)^\s*\.\s*\.\s*(?:imported|importou)\s+"([^"]+)"\."([^"]+)"')
+        | map('join', '.') | map('upper') | unique | list
+      }}
+    _orm_table_partial_error_blocks: >-
+      {{
+        (_orm_table_partial_log_raw.content | b64decode)
+        | regex_findall('(?im)^ORA-(?:31693|39120):[^\r\n]*(?:\r?\n(?!ORA-(?:31693|39120):)[^\r\n]*){0,3}')
+      }}
+    _orm_table_partial_error_reasons: {}
+  when:
+    - _orm_table_partial_log_raw is defined
+    - not (_orm_table_partial_log_raw.skipped | default(false) | bool)
+    - _orm_table_partial_log_raw.content is defined
+
+- name: Data Pump | Associar erros de carga as tabelas
+  ansible.builtin.set_fact:
+    _orm_table_partial_error_reasons: >-
+      {{
+        _orm_table_partial_error_reasons | combine({
+          ((item | regex_findall('"([^"]+)"\."([^"]+)"') | first | join('.')) | upper):
+          (
+            (item | regex_findall('(?im)^ORA-(?:31693|39120):') | first | replace(':', ''))
+            ~ (
+              ' / ' ~ (item | regex_findall('(?i)ORA-(?:02266|02291):') | first | replace(':', ''))
+              if (item | regex_findall('(?i)ORA-(?:02266|02291):') | length > 0)
+              else (
+                ' / ' ~ (item | regex_findall('(?i)ORA-(?:01652|01653|29913):') | first | replace(':', ''))
+                if (item | regex_findall('(?i)ORA-(?:01652|01653|29913):') | length > 0)
+                else ''
+              )
+            )
+          )
+        })
+      }}
+  loop: "{{ _orm_table_partial_error_blocks | default([]) }}"
+  loop_control:
+    label: >-
+      {{ (item | regex_findall('"([^"]+)"\."([^"]+)"') | first | default(['?', '?'])) | join('.') }}
+  when:
+    - item | regex_findall('"([^"]+)"\."([^"]+)"') | length > 0
+
+- name: Data Pump | Identificar tabelas com carga confirmada
+  ansible.builtin.set_fact:
+    orm_table_impdp_loaded: >-
+      {{
+        orm_tables_effective | map('upper')
+        | select('in', _orm_table_partial_loaded_names)
+        | reject('in', _orm_table_partial_error_reasons.keys() | list)
+        | list
+      }}
+  when:
+    - _orm_table_partial_loaded_names is defined
+    - _orm_table_partial_error_reasons is defined
+
+- name: Data Pump | Identificar tabelas sem confirmacao de carga completa
+  ansible.builtin.set_fact:
+    orm_table_impdp_not_loaded: >-
+      {{
+        orm_tables_effective | map('upper')
+        | reject('in', orm_table_impdp_loaded) | list
+      }}
+  when: orm_table_impdp_loaded is defined
+
+- name: Data Pump | Registrar motivo por tabela pendente
+  ansible.builtin.set_fact:
+    orm_table_impdp_issues: >-
+      {{
+        orm_table_impdp_issues + [{
+          'table': item,
+          'reason': _orm_table_partial_error_reasons.get(
+            item, 'Sem confirmacao de carga completa no log do impdp'
+          )
+        }]
+      }}
+  loop: "{{ orm_table_impdp_not_loaded | default([]) }}"
+  when: _orm_table_partial_error_reasons is defined
+
 - name: Data Pump | Verificar encerramento do impdp com erros tolerados
   ansible.builtin.shell: |
     set -o pipefail
     LOG={{ orm_impdp_log_file | quote }}
     [ -s "$LOG" ] || exit 11
 
-    if grep -Eq 'ORA-(31693|31694|00600|07445|03113|01555|39095):' "$LOG"; then
+    if grep -Eq 'ORA-(31694|00600|07445|03113|01555|39095):' "$LOG"; then
+      exit 14
+    fi
+
+    if [ {{ orm_scope_effective | quote }} = 'tables' ] && \
+       grep -Eq 'ORA-(01652|01653|01658|04030|04031|01114):' "$LOG"; then
+      exit 14
+    fi
+
+    if grep -Eq 'ORA-(31693|39120):' "$LOG"; then
+      if [ {{ orm_scope_effective | quote }} != 'tables' ] || \
+         [ {{ (orm_restore_allow_partial_table_loads_with_warning | bool) | ternary('true', 'false') | quote }} != 'true' ] || \
+         [ {{ (orm_table_impdp_loaded | default([]) | length) }} -lt 1 ] || \
+         [ {{ (orm_table_impdp_not_loaded | default([]) | length) }} -lt 1 ]; then
+        exit 14
+      fi
+    fi
+    if [ {{ orm_scope_effective | quote }} = 'tables' ] && \
+       [ {{ (orm_restore_allow_partial_table_loads_with_warning | bool) | ternary('true', 'false') | quote }} = 'true' ] && \
+       [ {{ (orm_table_impdp_not_loaded | default([]) | length) }} -gt 0 ] && \
+       [ {{ (orm_table_impdp_loaded | default([]) | length) }} -lt 1 ]; then
       exit 14
     fi
     FINAL="$(sed '/^[[:space:]]*$/d' "$LOG" | tail -n 1)"
@@ -757,6 +873,28 @@
     - not (orm_sequence_repair_attempted | default(false) | bool)
     - not (orm_host_failed | bool)
 
+- name: Data Pump | Classificar encerramento com carga parcial de tabelas
+  ansible.builtin.set_fact:
+    orm_impdp_partial_tables: true
+    orm_impdp_warning: >-
+      CARGA PARCIAL: {{ orm_tables_effective | length }} tabelas solicitadas,
+      {{ orm_table_impdp_loaded | length }} com carga confirmada pelo log e
+      {{ orm_table_impdp_not_loaded | length }} sem confirmação; o Data Pump
+      reportou {{ orm_impdp_error_count }} erros. Tabelas pendentes:
+      {{ orm_table_impdp_not_loaded | join(', ') }}.
+      Dados podem ter sido truncados, preservados ou carregados parcialmente;
+      avaliação do DBA necessária antes de liberar a aplicação.
+    orm_restore_database_state: >-
+      Carga parcial reconhecida; {{ orm_table_impdp_loaded | length }} tabelas
+      com carga confirmada e {{ orm_table_impdp_not_loaded | length }} pendentes.
+      Executando pós-restore e validações.
+  when:
+    - orm_scope_effective == 'tables'
+    - orm_restore_allow_partial_table_loads_with_warning | bool
+    - orm_impdp_completed_with_errors | default(false) | bool
+    - orm_table_impdp_loaded | default([]) | length > 0
+    - orm_table_impdp_not_loaded | default([]) | length > 0
+
 - name: Data Pump | Registrar continuidade com pendências no log de controle
   ansible.builtin.shell: |
     cat <<'EOF' >> "{{ orm_control_log_file }}"
@@ -770,6 +908,12 @@
     Etapas posteriores: reaplicação de grants, masking, senha e validações.
     ATENÇÃO: objetos/dados com falha não são considerados recuperados automaticamente.
     Log técnico: {{ orm_impdp_log_file }}
+    Carga parcial: {{ 'SIM' if orm_impdp_partial_tables | default(false) | bool else 'NÃO' }}
+    Tabelas com carga confirmada: {{ orm_table_impdp_loaded | default([]) | join(', ') }}
+    Tabelas sem carga confirmada: {{ orm_table_impdp_not_loaded | default([]) | join(', ') }}
+    {% for issue in orm_table_impdp_issues | default([]) %}
+    Pendência {{ issue.table }}: {{ issue.reason }}
+    {% endfor %}
     EOF
   args:
     executable: /bin/bash
