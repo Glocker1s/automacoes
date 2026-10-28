@@ -34,6 +34,7 @@
     orm_restore_validate_invalid_objects: "{{ orm_profile_cfg.restore.validate_invalid_objects | default(orm_restore_validate_invalid_objects_default) | bool }}"
     orm_restore_fail_on_invalid_objects: "{{ orm_profile_cfg.restore.fail_on_invalid_objects | default(orm_restore_fail_on_invalid_objects_default) | bool }}"
     orm_restore_allow_completed_with_errors: "{{ orm_profile_cfg.restore.allow_completed_with_errors | default(orm_restore_allow_completed_with_errors_default) | bool }}"
+    orm_restore_allow_partial_table_loads_with_warning: "{{ orm_profile_cfg.restore.allow_partial_table_loads_with_warning | default(orm_restore_allow_partial_table_loads_with_warning_default) | bool }}"
     orm_datapump_log_directory_name_effective: "{{ orm_profile_cfg.oracle.log_directory_name | default(orm_default_log_directory_name) }}"
     orm_shared_storage_mounted: false
 
@@ -86,6 +87,10 @@
     orm_restore_import_completed: false
     orm_impdp_completed_with_errors: false
     orm_impdp_error_count: 0
+    orm_impdp_partial_tables: false
+    orm_table_impdp_loaded: []
+    orm_table_impdp_not_loaded: []
+    orm_table_impdp_issues: []
     orm_impdp_return_code: ''
     orm_impdp_warning: ''
     orm_restore_completed: false
@@ -143,6 +148,7 @@
           - orm_dump_storage_protocol_effective in ['cifs', 'nfs']
           - (orm_restore_storage_mode != 'shared') or (orm_dump_storage_enabled_effective | bool)
           - not (orm_restore_allow_completed_with_errors | bool) or (orm_restore_validate_schemas | bool and orm_restore_validate_invalid_objects | bool)
+          - not (orm_restore_allow_partial_table_loads_with_warning | bool) or (orm_restore_allow_completed_with_errors | bool)
         fail_msg: >-
           Oracle Manager exige restore.parallel>=1, restore.storage_mode em local ou shared
           e orm_dump_storage_protocol em cifs ou nfs.
@@ -372,11 +378,23 @@
               ~ ' erros reportados); grants e validações pós-restore executados. '
               ~ 'Avaliar o log técnico e os objetos não criados.'
             )
-            if orm_impdp_completed_with_errors | default(false) | bool
+            if (orm_impdp_completed_with_errors | default(false) | bool and not (orm_impdp_partial_tables | default(false) | bool))
             else (
+              (
+                'Restore de tabelas concluído com CARGA PARCIAL: '
+                ~ (orm_table_impdp_loaded | default([]) | length | string)
+                ~ ' tabela(s) com carga confirmada e '
+                ~ (orm_table_impdp_not_loaded | default([]) | length | string)
+                ~ ' sem carga confirmada; Data Pump reportou '
+                ~ (orm_impdp_error_count | default(0) | string)
+                ~ ' erros. Avaliação do DBA necessária; os dados podem estar ausentes ou incompletos.'
+              )
+              if orm_impdp_partial_tables | default(false) | bool
+              else (
               'Restore de tabelas concluído e validações pós-restore executadas.'
               if orm_scope_effective == 'tables'
               else 'Restore concluído e validações pós-restore executadas.'
+              )
             )
           }}
       when:
@@ -591,6 +609,12 @@
         Impdp RC: {{ orm_impdp_return_code | default('N/A') }}
         Impdp concluído com erros: {{ 'SIM' if orm_impdp_completed_with_errors | default(false) | bool else 'NÃO' }}
         Erros reportados pelo Data Pump: {{ orm_impdp_error_count | default(0) }}
+        Carga parcial de tabelas: {{ 'SIM' if orm_impdp_partial_tables | default(false) | bool else 'NÃO' }}
+        Tabelas com carga confirmada (log impdp): {{ orm_table_impdp_loaded | default([]) | join(', ') }}
+        Tabelas sem carga confirmada: {{ orm_table_impdp_not_loaded | default([]) | join(', ') }}
+        {% for issue in orm_table_impdp_issues | default([]) %}
+        Pendência {{ issue.table }}: {{ issue.reason }}
+        {% endfor %}
         Parallel: {{ orm_restore_parallel | default(1) }}
         Origem do dump: {{ orm_restore_dump_source | default('') }}
         Estado final: {{ orm_restore_database_state | default('') }}
@@ -649,6 +673,10 @@
           impdp_rc: "{{ orm_impdp_return_code | default('') }}"
           impdp_completed_with_errors: "{{ orm_impdp_completed_with_errors | default(false) }}"
           impdp_error_count: "{{ orm_impdp_error_count | default(0) }}"
+          impdp_partial_tables: "{{ orm_impdp_partial_tables | default(false) }}"
+          tables_loaded: "{{ orm_table_impdp_loaded | default([]) }}"
+          tables_not_loaded: "{{ orm_table_impdp_not_loaded | default([]) }}"
+          table_load_issues: "{{ orm_table_impdp_issues | default([]) }}"
           masking_enabled: "{{ orm_masking_enabled | default(false) }}"
           masking_applicable: "{{ orm_masking_applicable | default(false) }}"
           masking_status: "{{ orm_masking_status | default('DESABILITADO') }}"
