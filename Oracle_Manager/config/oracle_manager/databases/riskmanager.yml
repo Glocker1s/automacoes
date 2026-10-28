@@ -71,6 +71,7 @@ cm:
           extra_args: ""
 
           allow_completed_with_errors: true
+          allow_partial_table_loads_with_warning: true
 
           # Preservação de grants do schema existente no destino.
           capture_grants: true
