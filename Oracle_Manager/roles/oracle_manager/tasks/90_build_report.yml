@@ -61,6 +61,10 @@
           'impdp_rc': summary.get('impdp_rc', ''),
           'impdp_completed_with_errors': summary.get('impdp_completed_with_errors', false),
           'impdp_error_count': summary.get('impdp_error_count', 0),
+          'impdp_partial_tables': summary.get('impdp_partial_tables', false),
+          'tables_loaded': summary.get('tables_loaded', []),
+          'tables_not_loaded': summary.get('tables_not_loaded', []),
+          'table_load_issues': summary.get('table_load_issues', []),
           'impdp_warning': hv.orm_impdp_warning | default(''),
           'destructive_started': summary.get('destructive_started', false),
           'schema_dropped': summary.get('schema_dropped', false),
@@ -86,6 +90,7 @@
   ansible.builtin.set_fact:
     orm_report_success_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'SUCESSO') | list | length }}"
     orm_report_warning_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'SUCESSO COM AVISO') | list | length }}"
+    orm_report_partial_load_count: "{{ orm_report_rows | selectattr('impdp_partial_tables', 'equalto', true) | list | length }}"
     orm_report_failed_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'FALHA') | list | length }}"
     orm_report_not_run_count: "{{ orm_report_rows | selectattr('status', 'equalto', 'NÃO EXECUTADO') | list | length }}"
 
@@ -126,7 +131,7 @@
     data:
       send_mail_subject: >-
         {{ orm_report_subject_prefix }} - Job #{{ orm_report_job_id }} -
-        {{ orm_report_job_template }} - {{ orm_overall_status }}
+        {{ orm_report_job_template }} - {{ orm_overall_status }}{{ ' - IMPORTAÇÃO PARCIAL' if orm_report_partial_load_count | default(0) | int > 0 else '' }}
       send_mail_body: "{{ orm_report_html }}"
       send_mail_cifs: "{{ orm_cifs_label | default(send_mail_cifs | default('')) }}"
       send_mail_cifs_path: "{{ orm_cifs_attachment_path | default(send_mail_cifs_path | default('')) }}"
