@@ -217,12 +217,33 @@
                       {{ row.host }} / {{ row.env }} / {{ row.action | upper }} - {{ row.status }}
                     </div>
                     {% if row.failed_task | default('') | length > 0 %}<b>Task:</b> {{ code(row.failed_task) }}<br/>{% endif %}
-                    {% if row.database_state | default('') | length > 0 %}<b>Estado do restore:</b> {{ code(row.database_state) }}<br/>{% endif %}
+                    {% if row.database_state | default('') | length > 0 %}<b>Estado do restore:</b> {{ code(row.database_state | replace('CARGA PARCIAL', 'IMPORTAÇÃO PARCIAL') | replace('carga confirmada', 'importação confirmada')) }}<br/>{% endif %}
                     {% if row.password_warning | default('') | length > 0 %}<div style="margin-top:6px;"><b>Senha:</b> {{ row.password_warning }}</div>{% endif %}
                     {% if row.impdp_completed_with_errors | default(false) | bool %}
                     <div style="margin-top:6px;"><b>Data Pump:</b> import encerrado com pendências; RC {{ row.impdp_rc }}, {{ row.impdp_error_count }} erro(s) reportado(s). Os erros continuam disponíveis no log técnico; não significa que todos os objetos foram importados.</div>
+                    {% if row.impdp_partial_tables | default(false) | bool %}
+                    <div style="margin-top:7px;font-size:14px;font-weight:bold;color:#9a6700;">SUCESSO COM AVISO — IMPORTAÇÃO PARCIAL</div>
+                    <div style="margin-top:5px;">O Data Pump concluiu com {{ row.impdp_error_count }} erro(s).
+                      Das {{ row.tables | default([]) | length }} tabela(s) solicitada(s),
+                      <b>{{ row.tables_loaded | default([]) | length }} tiveram importação confirmada pelo log</b>
+                      e <b>{{ row.tables_not_loaded | default([]) | length }} ficaram sem confirmação de importação completa</b>.
+                      A existência da tabela no destino não comprova a integridade dos dados.</div>
+                    {% if row.tables_loaded | default([]) | length > 0 %}
+                    <div style="margin-top:5px;"><b>Importação confirmada:</b> {{ row.tables_loaded | join(', ') }}</div>
+                    {% endif %}
+                    {% if row.table_load_issues | default([]) | length > 0 %}
+                    <div style="margin-top:5px;"><b>Tabelas que exigem avaliação do DBA:</b></div>
+                    <ul style="margin:5px 0 5px 20px;padding:0;">
+                      {% for issue in row.table_load_issues %}
+                      <li>{{ issue.table }} — {{ issue.reason }}</li>
+                      {% endfor %}
+                    </ul>
+                    {% endif %}
+                    <div style="margin-top:5px;font-weight:bold;">ATENÇÃO: tabelas com erro podem estar vazias, desatualizadas ou com dados incompletos. Consulte o log técnico antes de liberar a aplicação.</div>
+                    {% else %}
                     <div style="margin-top:5px;"><b>Objetos INVALID:</b> {{ row.invalid_objects_before | default(0) }} antes / {{ row.invalid_objects | default(0) }} depois da recompilação.</div>
-                    {% if row.impdp_warning | default('') | length > 0 %}<div style="margin-top:5px;">{{ row.impdp_warning }}</div>{% endif %}
+                    {% endif %}
+                    {% if row.impdp_warning | default('') | length > 0 %}<div style="margin-top:5px;">{{ row.impdp_warning | replace('CARGA PARCIAL', 'IMPORTAÇÃO PARCIAL') | replace('carga confirmada', 'importação confirmada') }}</div>{% endif %}
                     {% endif %}
                     {% if row.grants_warning | default('') | length > 0 %}<div style="margin-top:6px;"><b>Grants:</b> {{ row.grants_warning }}</div>{% endif %}
                     {% if row.invalid_objects_warning | default('') | length > 0 %}<div style="margin-top:6px;"><b>Objetos INVALID:</b> {{ row.invalid_objects_warning }}</div>{% endif %}
@@ -317,7 +338,7 @@
                   {{ td_open() }}{{ code(row.dump_source if row.dump_source else '—') }}</td>
                   {{ td_open() }}{{ row.sessions_before if row.sessions_before != '' else '—' }} antes / {{ row.sessions_after if row.sessions_after != '' else '—' }} depois</td>
                   {{ td_open() }}{{ row.invalid_objects_before | default('—') }} antes / {{ row.invalid_objects if row.invalid_objects != '' else '—' }} depois</td>
-                  {{ td_open() }}{{ code(row.database_state if row.database_state else '—') }}</td>
+                  {{ td_open() }}{{ code((row.database_state | replace('CARGA PARCIAL', 'IMPORTAÇÃO PARCIAL') | replace('carga confirmada', 'importação confirmada')) if row.database_state else '—') }}</td>
                 </tr>
                 {% endif %}
               {% endfor %}
