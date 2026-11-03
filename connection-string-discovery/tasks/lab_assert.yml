@@ -1,0 +1,28 @@
+---
+- name: LAB | Conferir quantidade de achados e arquivos simulados
+  ansible.builtin.assert:
+    that:
+      - csd_host_result is defined
+      - csd_host_result.status == 'OK'
+      - (hostvars['localhost'].csd_connection_filter | default('') | length > 0) or (csd_host_result.matches_count | int == csd_lab_expected_matches | int)
+      - ((hostvars['localhost'].csd_connection_filter | default('') | lower) not in ['agr_cota', 'agr_cota_teste']) or (csd_host_result.matches_count | int == 1)
+      - csd_host_result.files_scanned | int == 8
+    success_msg: 'LAB OK em {{ inventory_hostname }}: {{ csd_host_result.matches_count }} ocorrência(s); 8 arquivos inspecionados.'
+    fail_msg: >-
+      Falha no cenário {{ inventory_hostname }}: comparar resumo operacional anterior
+      (sem filtro: 9 ocorrências; sempre: 8 arquivos válidos).
+    quiet: false
+
+- name: LAB | Verificar que segredos artificiais não retornaram no payload
+  ansible.builtin.assert:
+    that:
+      - "'LAB_FAKE_SECRET_' not in (csd_host_result.results | to_json)"
+      - "'IGNORAR-LOG' not in (csd_host_result.results | to_json)"
+      - "'IGNORAR-BACKUP' not in (csd_host_result.results | to_json)"
+      - "'IGNORAR-SAMPLE' not in (csd_host_result.results | to_json)"
+      - "'IGNORAR-TXT' not in (csd_host_result.results | to_json)"
+      - "'NAO_CONTAR' not in (csd_host_result.results | to_json)"
+    success_msg: 'LAB OK: credenciais fictícias e arquivos excluídos não aparecem nos resultados.'
+    fail_msg: 'LAB: dados sensíveis simulados ou caminhos excluídos apareceram no retorno.'
+    quiet: false
+  no_log: true

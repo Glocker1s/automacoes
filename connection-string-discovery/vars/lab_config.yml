@@ -1,0 +1,18 @@
+---
+# Segurança: execução somente no diretório de simulação, NÃO em C:\ inteiro.
+csd_lab_root: 'C:\CSD-LAB'
+csd_scan_scope: custom
+csd_custom_roots:
+  - 'C:\CSD-LAB'
+csd_max_file_mb: 10
+csd_max_files_per_host: 500
+csd_max_matches_per_host: 100
+csd_max_duration_seconds: 180
+csd_parallel_hosts: 2
+csd_publish_email_payload: true  # Workflow Discovery -> Email já ligado para o teste completo.
+csd_cifs_label: producao  # Share do laboratório do PostgreSQL Manager.
+csd_cifs_enabled: true
+csd_keep_reports_on_controller: false # EE temporário; relatórios vão via CIFS quando habilitado.
+csd_fail_on_partial: false
+# Arquivos simulados criados pelo lab_prepare.yml contêm 9 linhas detectáveis por VM.
+csd_lab_expected_matches: 9

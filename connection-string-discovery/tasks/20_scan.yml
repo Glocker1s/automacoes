@@ -1,0 +1,316 @@
+---
+- name: Verificar conectividade Windows
+  ansible.windows.win_ping:
+  register: csd_ping
+  ignore_errors: true
+  ignore_unreachable: true
+  no_log: true
+
+- name: Registrar host inacessível
+  ansible.builtin.set_fact:
+    csd_host_result:
+      host: '{{ inventory_hostname }}'
+      environment: '{{ csd_environment }}'
+      status: UNREACHABLE
+      files_scanned: 0
+      matches_count: 0
+      errors_count: 1
+      errors_sample: ['Falha no precheck WinRM; varredura não executada']
+      elapsed_seconds: 0
+      drives: []
+      truncated: false
+      results: []
+  when: csd_ping.ping | default('') != 'pong'
+  no_log: true
+
+- name: Executar scanner apenas nos servidores acessíveis
+  when: csd_ping.ping | default('') == 'pong'
+  block:
+    - name: Procurar conexões com PowerShell embutido
+      ansible.windows.win_powershell:
+        depth: 8
+        error_action: stop
+        parameters:
+          Extensions: '{{ csd_extensions }}'
+          ExcludedDirectoryNames: '{{ csd_excluded_directory_names }}'
+          ExcludedFilePatterns: '{{ csd_excluded_filename_patterns }}'
+          ScanScope: '{{ csd_scan_scope }}'
+          CustomRoots: '{{ csd_custom_roots }}'
+          MaxFileMB: '{{ csd_max_file_mb | int }}'
+          MaxFiles: '{{ csd_max_files_per_host | int }}'
+          MaxMatches: '{{ csd_max_matches_per_host | int }}'
+          MaxSeconds: '{{ csd_max_duration_seconds | int }}'
+          MaxContentChars: '{{ csd_max_content_chars | int }}'
+          SearchFilter: "{{ hostvars['localhost'].csd_connection_filter | default('') }}"
+        script: |
+          [CmdletBinding()]
+          param(
+            [string[]]$Extensions,
+            [string[]]$ExcludedDirectoryNames,
+            [string[]]$ExcludedFilePatterns,
+            [ValidateSet('all_local', 'custom')][string]$ScanScope,
+            [string[]]$CustomRoots,
+            [int]$MaxFileMB,
+            [int]$MaxFiles,
+            [int]$MaxMatches,
+            [int]$MaxSeconds,
+            [int]$MaxContentChars,
+            [string]$SearchFilter = ''
+          )
+          $Ansible.Changed = $false
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddSeconds($MaxSeconds)
+          $findings = New-Object 'System.Collections.Generic.List[object]'
+          $errors = New-Object 'System.Collections.Generic.List[string]'
+          $roots = New-Object 'System.Collections.Generic.List[string]'
+          $filesScanned = 0
+          $filesIgnoredSize = 0
+          $truncated = $false
+          $searchTerm = if ($null -eq $SearchFilter) { '' } else { $SearchFilter.Trim() }
+          $filterActive = $searchTerm.Length -gt 0
+
+          $contextLines = 5
+
+          function Add-DiscoveredFinding([object]$finding) {
+            if ($script:findings.Count -ge $MaxMatches) {
+              $script:truncated = $true
+              return
+            }
+            [void]$script:findings.Add($finding)
+            if ($script:findings.Count -ge $MaxMatches) { $script:truncated = $true }
+          }
+
+          function Add-ScanError([string]$kind) {
+            if ($errors.Count -lt 20) { [void]$errors.Add($kind) }
+            $script:errorCounter++
+          }
+          $script:errorCounter = 0
+          $extensionsSet = @{}
+          foreach ($extension in $Extensions) { $extensionsSet[$extension.ToLowerInvariant()] = $true }
+          $skipDirectories = @{}
+          foreach ($name in $ExcludedDirectoryNames) { $skipDirectories[$name.ToLowerInvariant()] = $true }
+
+          $signalRegex = '(?i)(connection\s*strings?|connectionname|data\s*source|initial\s+catalog|server[\"'']?\s*\)?\s*[:=]|database[\"'']?\s*\)?\s*[:=]|host[\"'']?\s*\)?\s*[:=]|hostname[\"'']?\s*\)?\s*[:=]|port[\"'']?\s*\)?\s*[:=]|user\s*id\s*[:=]|uid\s*[:=]|password\s*[:=]|pwd\s*[:=]|service_name|\bsid\s*[:=]|provider\s*[:=]|driver\s*[:=]|\bdsn\s*[:=]|jdbc:|odbc:|oledb:|postgresql:|mysql:|oracle:|sqlserver:|trusted_connection|integrated\s*security|tns_admin|oracle_home)'
+          $sensitiveRegex = '(?i)(password|passwd|pwd\b|pass\s*[:=]|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential|connection\s*strings?|\buid\s*[:=]|user\s*id\s*[:=]|://[^/\s:@]+:[^/@\s]+@|\b[a-z0-9_.-]+/[^/@\s;,]+@)'
+
+          function Find-SafeValue([string]$text, [string]$keyPattern) {
+            $m = [regex]::Match($text, '(?i)(?:^|[;\s,({"''])(?:' + $keyPattern + ')["''\)]?\s*[=:]\s*["'']?(?<v>[^;\s,"''}\]\)]{1,120})')
+            if ($m.Success) {
+              $val = $m.Groups['v'].Value
+              if ($val -match '^[a-zA-Z0-9_.:/\\-]{1,120}$') { return $val }
+            }
+            return ''
+          }
+
+          function Get-ConnectionMeta([string]$text) {
+            $dbtype = 'INDEFINIDO'
+            if ($text -match '(?i)(postgresql:|\bpostgres\b|\bpgsql\b)') { $dbtype = 'POSTGRESQL' }
+            elseif ($text -match '(?i)(jdbc:oracle:|oracle:|service_name|tns_admin|oracle_home|\bsid\s*=)') { $dbtype = 'ORACLE' }
+            elseif ($text -match '(?i)(mysql:|\bmariadb\b)') { $dbtype = 'MYSQL' }
+            elseif ($text -match '(?i)(sqlserver:|initial\s+catalog|trusted_connection|integrated\s*security|\bmssql\b)') { $dbtype = 'SQLSERVER' }
+            elseif ($text -match '(?i)(odbc:|\bdsn\s*=)') { $dbtype = 'ODBC' }
+            elseif ($text -match '(?i)(oledb:|\bprovider\s*=)') { $dbtype = 'OLEDB' }
+            $server = Find-SafeValue $text '(?:server|data\s*source|host|hostname)'
+            if (-not $server) {
+              $url = [regex]::Match($text, '(?i)(?:jdbc:)?(?:postgresql|mysql|mariadb|sqlserver)://(?:[^/\s@]+@)?(?<v>[a-zA-Z0-9_.-]{1,120})(?::\d+)?(?:[/;?]|\s|$)')
+              if ($url.Success) { $server = $url.Groups['v'].Value }
+            }
+            if (-not $server) {
+              $oracle = [regex]::Match($text, '(?i)@(?://)?(?<v>[a-zA-Z0-9_.-]{1,120})(?::\d+)?(?:[/):]|$)')
+              if ($oracle.Success) { $server = $oracle.Groups['v'].Value }
+            }
+            $database = Find-SafeValue $text '(?:database|initial\s+catalog|service_name)'
+            $port = Find-SafeValue $text 'port'
+            return @{ database_type = $dbtype; destination = $server; database = $database; port = $port }
+          }
+
+          function Protect-Content([string]$text, [hashtable]$meta) {
+
+            if ([regex]::IsMatch($text, $sensitiveRegex)) {
+              $parts = New-Object 'System.Collections.Generic.List[string]'
+              if ($meta['destination']) { [void]$parts.Add('Destino=' + $meta['destination']) }
+              if ($meta['database']) { [void]$parts.Add('Database=' + $meta['database']) }
+              if ($meta['port']) { [void]$parts.Add('Port=' + $meta['port']) }
+              [void]$parts.Add('***CONTEUDO_SENSIVEL_OCULTADO***')
+              return ($parts -join '; ')
+            }
+            $safe = $text.Trim()
+
+            if ($safe -match '(?i)(://[^/\s]*@|\buser\s*[:=]|\bauth\b)') { return '***CONTEUDO_SENSIVEL_OCULTADO***' }
+            if ($safe.Length -gt $MaxContentChars) { $safe = $safe.Substring(0, $MaxContentChars) + ' [TRUNCADO]' }
+            return $safe
+          }
+
+          if ($ScanScope -eq 'all_local') {
+            try {
+              Get-CimInstance -ClassName Win32_LogicalDisk -ErrorAction Stop |
+                Where-Object { $_.DriveType -eq 3 -and $_.DeviceID -match '^[A-Z]:$' } |
+                ForEach-Object { [void]$roots.Add($_.DeviceID + '\') }
+            }
+            catch { Add-ScanError 'Não foi possível identificar discos locais' }
+          }
+          else {
+            foreach ($root in $CustomRoots) {
+              if ($root -match '^[a-zA-Z]:\\') { [void]$roots.Add($root) }
+              else { Add-ScanError 'Raiz customizada inválida' }
+            }
+          }
+          if ($roots.Count -eq 0) { Add-ScanError 'Nenhuma raiz elegível para análise' }
+
+          $maxBytes = [int64]$MaxFileMB * 1048576
+          $stack = New-Object 'System.Collections.Generic.Stack[string]'
+          foreach ($root in $roots) { $stack.Push($root) }
+          while ($stack.Count -gt 0) {
+            if ([DateTime]::UtcNow -gt $deadline) { $truncated = $true; break }
+            if ($filesScanned -ge $MaxFiles -or $findings.Count -ge $MaxMatches) { $truncated = $true; break }
+            $current = $stack.Pop()
+            try { $entries = [System.IO.Directory]::EnumerateFileSystemEntries($current) }
+            catch { Add-ScanError ('Diretório inacessível: ' + $current); continue }
+            try {
+              foreach ($entry in $entries) {
+                if ([DateTime]::UtcNow -gt $deadline -or $filesScanned -ge $MaxFiles -or $findings.Count -ge $MaxMatches) { $truncated = $true; break }
+                try {
+                  $attr = [System.IO.File]::GetAttributes($entry)
+                  if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                  $filename = [System.IO.Path]::GetFileName($entry)
+                  if (($attr -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                    if (-not $skipDirectories.ContainsKey($filename.ToLowerInvariant())) { $stack.Push($entry) }
+                    continue
+                  }
+                  $extension = [System.IO.Path]::GetExtension($entry).ToLowerInvariant()
+                  if (-not $extensionsSet.ContainsKey($extension)) { continue }
+                  $excluded = $false
+                  foreach ($pattern in $ExcludedFilePatterns) {
+                    if ($filename -like $pattern) { $excluded = $true; break }
+                  }
+                  if ($excluded) { continue }
+                  $info = [System.IO.FileInfo]::new($entry)
+                  if ($info.Length -ge $maxBytes) { $filesIgnoredSize++; continue }
+                  $filesScanned++
+                  $reader = $null
+                  try {
+                    $reader = [System.IO.StreamReader]::new($entry, $true)
+                    $lineNumber = 0
+                    
+                    $pendingCandidates = New-Object 'System.Collections.Generic.List[object]'
+                    $lastFilterLine = -1000000
+                    while (($line = $reader.ReadLine()) -ne $null) {
+                      $lineNumber++
+                      if ($line -match '^\s*(?:$|#|//|<!--|\*|;)') { continue }
+                      if ($line -match '(?i)(xmlns=|xsi:|encoding=)') { continue }
+                      if ($filterActive) {
+                        
+                        for ($idx = $pendingCandidates.Count - 1; $idx -ge 0; $idx--) {
+                          if (($lineNumber - $pendingCandidates[$idx].line) -gt $contextLines) {
+                            $pendingCandidates.RemoveAt($idx)
+                          }
+                        }
+                        
+                        $termFound = $line.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                        if ($termFound) {
+                          
+                          foreach ($candidate in $pendingCandidates) {
+                            Add-DiscoveredFinding $candidate.value
+                            if ($truncated) { break }
+                          }
+                          $pendingCandidates.Clear()
+                          $lastFilterLine = $lineNumber
+                        }
+                      }
+                      if ($truncated) { break }
+                      if (-not [regex]::IsMatch($line, $signalRegex)) { continue }
+                      $meta = Get-ConnectionMeta $line
+                      if ($extension -in @('.ora', '.tns') -and $meta['database_type'] -eq 'INDEFINIDO') {
+                        $meta['database_type'] = 'ORACLE'
+                      }
+                      $content = Protect-Content $line $meta
+                      $finding = @{
+                        host = $env:COMPUTERNAME
+                        file = $entry
+                        line = $lineNumber
+                        content = $content
+                        database_type = $meta['database_type']
+                        destination = $meta['destination']
+                        database = $meta['database']
+                        port = $meta['port']
+                      }
+                      if (-not $filterActive -or $termFound -or ($lineNumber - $lastFilterLine) -le $contextLines) {
+                        
+                        Add-DiscoveredFinding $finding
+                      }
+                      else {
+                        [void]$pendingCandidates.Add(@{ line = $lineNumber; value = $finding })
+                      }
+                      if ($truncated) { break }
+                    }
+                  }
+                  catch { Add-ScanError ('Arquivo não analisado: ' + $entry) }
+                  finally { if ($reader) { $reader.Dispose() } }
+                  if ($truncated) { break }
+                }
+                catch { Add-ScanError ('Erro de acesso: ' + $entry) }
+              }
+            }
+            catch { Add-ScanError ('Erro de enumeração: ' + $current) }
+            if ($truncated) { break }
+          }
+          $elapsed = ([DateTime]::UtcNow - $started).TotalSeconds
+          $status = if ($errorCounter -gt 0 -or $truncated) { 'PARCIAL' } else { 'OK' }
+          $Ansible.Result = @{
+            status = $status
+            host = $env:COMPUTERNAME
+            files_scanned = $filesScanned
+            files_ignored_size = $filesIgnoredSize
+            matches_count = $findings.Count
+            errors_count = $errorCounter
+            errors_sample = @($errors.ToArray())
+            elapsed_seconds = [math]::Round($elapsed, 2)
+            drives = @($roots.ToArray())
+            truncated = $truncated
+            results = @($findings.ToArray())
+          }
+      register: csd_scan_response
+      no_log: true
+
+    - name: Validar retorno estruturado do scanner
+      ansible.builtin.assert:
+        that:
+          - csd_scan_response.result is mapping
+          - csd_scan_response.result.status is defined
+          - csd_scan_response.result.results is defined
+          - csd_scan_response.result.files_scanned is defined
+        fail_msg: 'Scanner não retornou estrutura esperada.'
+        quiet: true
+      no_log: true
+
+    - name: Armazenar resultados sanitizados no hostvars
+      ansible.builtin.set_fact:
+        csd_host_result: "{{ csd_scan_response.result | combine({'host': csd_scan_response.result.host | default(inventory_hostname), 'environment': csd_environment}) }}"
+      no_log: true
+  rescue:
+    - name: Registrar falha geral do scanner sem divulgar conteúdo de arquivos
+      ansible.builtin.set_fact:
+        csd_host_result:
+          host: '{{ inventory_hostname }}'
+          environment: '{{ csd_environment }}'
+          status: ERROR
+          files_scanned: 0
+          matches_count: 0
+          errors_count: 1
+          errors_sample: ['Falha de execução do scanner; consultar logs protegidos do AAP']
+          elapsed_seconds: 0
+          drives: []
+          truncated: false
+          results: []
+      no_log: true
+
+- name: Resumo operacional seguro do host
+  ansible.builtin.debug:
+    msg:
+      host: '{{ inventory_hostname }}'
+      ambiente: '{{ csd_environment }}'
+      status: "{{ csd_host_result.status | default('ERROR') }}"
+      arquivos: '{{ csd_host_result.files_scanned | default(0) }}'
+      ocorrencias: '{{ csd_host_result.matches_count | default(0) }}'
+      falhas_leitura: '{{ csd_host_result.errors_count | default(0) }}'
+  when: csd_host_result is defined

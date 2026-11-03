@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connection String Discovery</title>
+</head>
+{% set _cifs_failed = csd_cifs_report_upload_failed | default(false) %}
+{% set _has_issues = ((csd_partial_hosts | int) + (csd_error_hosts | int)) > 0 %}
+{# Mesma prioridade do send_mail_subject em tasks/60_build_email_payload.yml. #}
+{% if _cifs_failed %}
+  {% set _status_label = 'FALHA CIFS' %}
+  {% set _status_bg = '#a52e2e' %}
+{% elif _has_issues or csd_total_errors | int > 0 %}
+  {% set _status_label = 'SUCESSO COM AVISO' %}
+  {% set _status_bg = '#a36a1e' %}
+{% else %}
+  {% set _status_label = 'SUCESSO' %}
+  {% set _status_bg = '#365f49' %}
+{% endif %}
+{% set _job_id = awx_job_id | default(tower_job_id | default('manual')) %}
+<body style="margin:0;padding:0;background-color:#ffffff;color:#222222;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+    <tr>
+      <td align="left" style="padding:22px 18px;">
+        <table role="presentation" width="960" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:960px;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+          <tr>
+            <td align="left">
+              <!-- Cabeçalho grafite, seguindo o padrão F5 -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#263238" style="width:100%;background-color:#263238;border-collapse:collapse;">
+                <tr>
+                  <td valign="top" style="padding:18px 20px;font-family:Arial,Helvetica,sans-serif;color:#ffffff;">
+                    <div style="font-size:21px;line-height:26px;font-weight:bold;color:#ffffff;">Connection String Discovery</div>
+                    <div style="font-size:12px;line-height:19px;margin-top:9px;color:#d3dade;">
+                      Ambiente: <strong style="color:#ffffff;">{{ hostvars['localhost'].csd_requested_environment | upper | e }}</strong>
+                      &nbsp;&middot;&nbsp; Job: <strong style="color:#ffffff;">#{{ _job_id | e }}</strong><br>
+                      Relatório gerado em: <strong>{{ csd_report_datetime | e }}</strong>
+                      {% if hostvars['localhost'].csd_connection_filter | default('') | length > 0 %}
+                      <br>Filtro de conexão: <strong style="color:#ffffff;">{{ hostvars['localhost'].csd_connection_filter | e }}</strong>
+                      {% endif %}
+                    </div>
+                  </td>
+                  <td valign="top" align="right" style="padding:18px 19px;white-space:nowrap;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" bgcolor="{{ _status_bg }}" style="border-collapse:collapse;background-color:{{ _status_bg }};">
+                      <tr><td style="padding:5px 13px;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:bold;">{{ _status_label }}</td></tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;font-weight:bold;margin:24px 0 10px;color:#262626;">Resumo da execução</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr>
+                  {% for metric in [
+                    {'label':'Servidores','value':csd_total_hosts},
+                    {'label':'Arquivos','value':csd_total_files},
+                    {'label':'Ocorrências','value':csd_all_matches | length},
+                    {'label':'Concluídos','value':csd_ok_hosts}
+                  ] %}
+                  <td width="25%" valign="top" style="padding:7px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f7f7f7" style="width:100%;background-color:#f7f7f7;border:1px solid #dddddd;border-collapse:collapse;">
+                      <tr><td style="padding:13px 12px;font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:12px;color:#555555;">{{ metric.label | e }}</div>
+                        <div style="font-size:22px;font-weight:bold;color:#222222;margin-top:5px;">{{ metric.value }}</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                  {% endfor %}
+                </tr>
+              </table>
+              <div style="font-size:12px;line-height:19px;color:#555555;margin-top:6px;">
+                Parciais: <strong>{{ csd_partial_hosts }}</strong>
+                &nbsp;&middot;&nbsp; Falhas: <strong>{{ csd_error_hosts }}</strong>
+                &nbsp;&middot;&nbsp; Erros de leitura: <strong>{{ csd_total_errors }}</strong>
+              </div>
+
+              <div style="font-size:14px;line-height:20px;font-weight:bold;margin:24px 0 10px;color:#262626;">Indicadores por ambiente</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#222222;">
+                <tr>
+                  {% for title in ['Ambiente','Servidores','Arquivos','Ocorrências','Ressalvas'] %}
+                  <th align="left" bgcolor="#eeeeef" style="text-align:left;font-size:12px;font-weight:bold;padding:10px 11px;background-color:#eeeeef;border:1px solid #d9d9dc;">{{ title }}</th>
+                  {% endfor %}
+                </tr>
+                {% set ns = namespace(row=0) %}
+                {% for env in ['prd', 'dr', 'hml', 'dev'] %}
+                  {% set envhosts = csd_reports | selectattr('environment', 'equalto', env) | list %}
+                  {% if envhosts | length > 0 %}
+                    {% set ns.row = ns.row + 1 %}
+                    <tr bgcolor="{{ '#fafafa' if ns.row is even else '#ffffff' }}">
+                      <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ env | upper | e }}</td>
+                      <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ envhosts | length }}</td>
+                      <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ envhosts | sum(attribute='files_scanned') }}</td>
+                      <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ envhosts | sum(attribute='matches_count') }}</td>
+                      <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ envhosts | rejectattr('status', 'equalto', 'OK') | list | length }}</td>
+                    </tr>
+                  {% endif %}
+                {% endfor %}
+              </table>
+
+              <div style="font-size:14px;line-height:20px;font-weight:bold;margin:24px 0 10px;color:#262626;">Resultado por servidor</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#222222;">
+                <tr>
+                  {% for title in ['Amb.','Servidor','Arquivos','Ocorrências','Tempo','Status'] %}
+                  <th align="left" bgcolor="#eeeeef" style="text-align:left;font-size:12px;font-weight:bold;padding:10px 11px;background-color:#eeeeef;border:1px solid #d9d9dc;">{{ title }}</th>
+                  {% endfor %}
+                </tr>
+                {% for host in csd_reports | sort(attribute='host') %}
+                  {% if host.status == 'OK' %}
+                    {% set _host_bg, _host_fg = '#e5efe9', '#285e3f' %}
+                  {% elif host.status == 'PARCIAL' %}
+                    {% set _host_bg, _host_fg = '#fff0dc', '#805317' %}
+                  {% else %}
+                    {% set _host_bg, _host_fg = '#f8e5e5', '#a52e2e' %}
+                  {% endif %}
+                  <tr bgcolor="{{ '#fafafa' if loop.index is even else '#ffffff' }}">
+                    <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ host.environment | upper | e }}</td>
+                    <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;"><strong>{{ host.host | e }}</strong></td>
+                    <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ host.files_scanned }}</td>
+                    <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ host.matches_count }}</td>
+                    <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">{{ host.elapsed_seconds | default(0) }}s</td>
+                    <td style="padding:10px 11px;border-bottom:1px solid #e2e4e6;">
+                      <span style="background-color:{{ _host_bg }};color:{{ _host_fg }};padding:3px 8px;font-size:12px;font-weight:bold;">{{ host.status | e }}</span>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </table>
+
+              {# Resumo de exceções: mensagens curtas, sem detalhes sensíveis. #}
+              {% set _affected_hosts = csd_reports | rejectattr('status', 'equalto', 'OK') | list %}
+              {% if _cifs_failed or _affected_hosts | length > 0 or csd_total_errors | int > 0 %}
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:22px;font-weight:bold;margin:24px 0 10px;color:#262626;">Avisos da execução</div>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#252525;">
+                {% if _cifs_failed %}
+                <tr>
+                  <td style="padding:10px 12px;border:1px solid #e2e4e6;background-color:#fafafa;">
+                    <strong>FALHA CIFS:</strong> Não foi possível publicar o CSV. Verifique o compartilhamento e as credenciais.
+                  </td>
+                </tr>
+                {% endif %}
+                {% for host in _affected_hosts %}
+                <tr>
+                  <td style="padding:10px 12px;border:1px solid #e2e4e6;background-color:{{ '#ffffff' if loop.index is odd else '#fafafa' }};">
+                    <strong>{{ host.host | default('Servidor não identificado') | e }}</strong> ({{ host.environment | default('?') | upper | e }}) —
+                    {% if host.status == 'UNREACHABLE' %}
+                      <strong>Inacessível:</strong> Sem resposta pelo WinRM. Verifique conexão e credenciais.
+                    {% elif host.status == 'ERROR' %}
+                      <strong>Erro:</strong> A varredura não foi concluída. Consulte o Job no AAP.
+                    {% elif host.status == 'PARCIAL' %}
+                      <strong>Parcial:</strong> Alguns arquivos não foram verificados. Confira limites e permissões.
+                    {% else %}
+                      <strong>{{ host.status | default('Aviso') | e }}:</strong> Consulte o Job no AAP.
+                    {% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+                {% if csd_total_errors | int > 0 and _affected_hosts | length == 0 %}
+                <tr><td style="padding:10px 12px;border:1px solid #e2e4e6;background-color:#fafafa;">
+                  <strong>Avisos de leitura:</strong> {{ csd_total_errors | int }} registro(s). Consulte o Job no AAP.
+                </td></tr>
+                {% endif %}
+              </table>
+              {% endif %}
+              <div style="font-size:14px;line-height:22px;color:#555555;margin-top:20px;">
+                {{ 'Detalhamento completo das ocorrências disponível no CSV anexo.' if send_mail_cifs_remote_files | default([]) | length > 0 else 'CSV não anexado nesta execução.' }}
+                {% if csd_aap_base_url | default('') | length > 0 and (_job_id | string | length > 0) and _job_id != 'manual' %}
+                  &nbsp;<a href="{{ csd_aap_base_url | e }}/execution/jobs/playbook/{{ _job_id | e }}/output" style="color:#263238;text-decoration:underline;">Ver execução no AAP</a>
+                {% endif %}
+              </div>
+              <div style="font-size:11px;color:#888888;border-top:1px solid #dedede;margin-top:22px;padding-top:11px;">
+                Ansible Automation Platform &nbsp;&middot;&nbsp; Connection String Discovery
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

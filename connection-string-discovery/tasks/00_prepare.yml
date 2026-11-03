@@ -1,0 +1,95 @@
+---
+- name: Validar configurações da execução
+  ansible.builtin.assert:
+    that:
+      - survey_environment is defined
+      - csd_scan_scope in ['all_local', 'custom']
+      - csd_max_file_mb | int > 0
+      - csd_max_files_per_host | int > 0
+      - csd_max_matches_per_host | int > 0
+      - csd_max_duration_seconds | int > 0
+      - csd_parallel_hosts | int > 0
+      - csd_winrm_port | int in [5985, 5986]
+      - (csd_scan_scope == 'all_local') or (csd_custom_roots | length > 0)
+    fail_msg: 'Survey/configuração inválida. Verifique ambiente, escopo e vars/config.yml.'
+    quiet: true
+
+- name: Normalizar ambientes e seleção opcional de hostnames
+  ansible.builtin.set_fact:
+    csd_requested_environments: >-
+      {{
+        (survey_environment if (survey_environment is sequence and survey_environment is not string)
+         else [survey_environment])
+        | map('string') | map('trim') | map('lower')
+        | reject('equalto', '') | unique | list
+      }}
+    csd_requested_hosts: '{{ (survey_hosts | default("", true) | string | upper) | regex_findall("[A-Z0-9][A-Z0-9.-]*") | unique | list }}'
+    csd_connection_filter: '{{ survey_connection_filter | default("", true) | string | trim }}'
+
+- name: Validar ambientes selecionados
+  ansible.builtin.assert:
+    that:
+      - csd_requested_environments | length > 0
+      - (csd_requested_environments | difference(['prd', 'dr', 'hml', 'dev', 'all']) | length) == 0
+    fail_msg: 'Selecione um ou mais ambientes válidos: prd, dr, hml, dev ou all.'
+    quiet: true
+
+- name: Validar filtro opcional de conexão
+  ansible.builtin.assert:
+    that:
+      - csd_connection_filter | length <= 128
+      - "csd_connection_filter | regex_search('[\\r\\n]') is none"
+    fail_msg: 'Filtro de conexão inválido: utilize uma única linha de até 128 caracteres.'
+    quiet: true
+
+- name: Selecionar ambientes e definir identificação do relatório
+  ansible.builtin.set_fact:
+    csd_selected_environments: "{{ ['prd', 'dr', 'hml', 'dev'] if 'all' in csd_requested_environments else csd_requested_environments }}"
+    csd_requested_environment: "{{ 'all' if 'all' in csd_requested_environments else csd_requested_environments | join(', ') }}"
+
+- name: Reunir servidores dos ambientes
+  ansible.builtin.set_fact:
+    csd_allowed_hosts: "{{ csd_selected_environments | map('extract', csd_environments) | flatten | unique | list }}"
+
+- name: Validar explicitamente a seleção de hostnames
+  ansible.builtin.assert:
+    that:
+      - csd_allowed_hosts | length > 0
+      - (survey_hosts | default('', true) | string) is match('^[a-zA-Z0-9.,;\\s-]*$')
+      - (csd_requested_hosts | difference(csd_allowed_hosts) | length) == 0
+    fail_msg: 'Um ou mais hostnames não pertencem aos ambientes selecionados. Use nomes exatos, sem curingas.'
+    quiet: true
+
+- name: Definir lista final de servidores
+  ansible.builtin.set_fact:
+    csd_target_hosts: "{{ csd_requested_hosts if csd_requested_hosts | length > 0 else csd_allowed_hosts }}"
+
+- name: Incluir hosts dinamicamente na execução
+  ansible.builtin.add_host:
+    name: '{{ item }}'
+    groups:
+      - csd_targets
+    csd_environment: >-
+      {{ 'prd' if item in csd_environments.prd else
+         'dr' if item in csd_environments.dr else
+         'hml' if item in csd_environments.hml else 'dev' }}
+    ansible_connection: winrm
+    ansible_host: '{{ item }}'
+    ansible_port: '{{ csd_winrm_port | int }}'
+    ansible_winrm_transport: '{{ csd_winrm_transport }}'
+    ansible_winrm_scheme: "{{ 'https' if csd_winrm_port | int == 5986 else 'http' }}"
+    ansible_winrm_server_cert_validation: '{{ csd_winrm_server_cert_validation }}'
+    ansible_winrm_operation_timeout_sec: '{{ csd_winrm_operation_timeout_sec | int }}'
+    ansible_winrm_read_timeout_sec: '{{ csd_winrm_read_timeout_sec | int }}'
+  loop: '{{ csd_target_hosts }}'
+  loop_control:
+    label: '{{ item }}'
+
+- name: Apresentar parâmetros da execução
+  ansible.builtin.debug:
+    msg:
+      ambientes: '{{ csd_selected_environments }}'
+      total_servidores: '{{ csd_target_hosts | length }}'
+      escopo: '{{ csd_scan_scope }}'
+      filtro_conexao_ativo: '{{ csd_connection_filter | length > 0 }}'
+      publicacao_cifs_set_stats: '{{ csd_publish_email_payload | bool }}'

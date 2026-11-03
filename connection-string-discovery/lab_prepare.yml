@@ -1,0 +1,125 @@
+---
+- name: LAB | Preparar inventário dinâmico das 4 VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+    - vars/lab_environments.yml
+  tasks:
+    - name: Validar e adicionar hosts do laboratório
+      ansible.builtin.import_tasks: tasks/00_prepare.yml
+      vars:
+        csd_validate_cifs_on_prepare: false
+    - name: LAB | Validar configurações de destino e escopo
+      ansible.builtin.import_tasks: tasks/lab_validate.yml
+
+- name: LAB | Criar massa fictícia nos Windows
+  hosts: csd_targets
+  gather_facts: false
+  serial: '{{ csd_parallel_hosts | int }}'
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+  tasks:
+    - name: Testar WinRM antes da geração da massa
+      ansible.windows.win_ping:
+
+    - name: Criar arquivos de teste no caminho dedicado
+      ansible.windows.win_powershell:
+        error_action: stop
+        parameters:
+          LabRoot: '{{ csd_lab_root }}'
+          Environment: '{{ csd_environment }}'
+        script: |
+          [CmdletBinding()]
+          param([string]$LabRoot, [string]$Environment)
+          $ErrorActionPreference = 'Stop'
+          if ($LabRoot -ne 'C:\CSD-LAB') { throw 'Diretório de lab não autorizado' }
+          $marker = Join-Path $LabRoot '.csd_lab_owned.txt'
+          if ([System.IO.Directory]::Exists($LabRoot)) {
+            if (-not [System.IO.File]::Exists($marker)) {
+              throw 'C:\CSD-LAB já existe e não foi criado por esta automação. Não será alterado.'
+            }
+            # Limpar somente a área marcada como pertencente à automação.
+            Remove-Item -LiteralPath $LabRoot -Recurse -Force -ErrorAction Stop
+          }
+          [void][System.IO.Directory]::CreateDirectory($LabRoot)
+          $utf8 = New-Object System.Text.UTF8Encoding($true)
+          [System.IO.File]::WriteAllText($marker, 'DIRETORIO CRIADO PELO CONNECTION STRING DISCOVERY LAB', $utf8)
+
+          $files = @{}
+          $files['Apps\Financeiro\web.config'] = @(
+            '<configuration>'
+            '  <add name="Financeiro" connectionString="Server=SQL-LAB-01;Database=Financeiro;User ID=labuser;Password=LAB_FAKE_SECRET_SQL;" />'
+            '  <!-- Server=NAO_CONTAR;Database=Exemplo -->'
+            '</configuration>'
+          )
+          $files['Apps\Estoque\appsettings.json'] = @(
+            '{'
+            '  "ConnectionStrings": {"Main": "Host=PG-LAB-01;Port=5432;Database=Estoque;Username=lab;Password=LAB_FAKE_SECRET_PG"}'
+            '}'
+          )
+          $files['Apps\ERP\database.properties'] = @(
+            '# jdbc:oracle:thin:@NAO_CONTAR:1521/TESTE'
+            'spring.datasource.url=jdbc:oracle:thin:@ORA-LAB-01:1521/FINLAB'
+            'spring.db.username=AGR_COTA_TESTE'
+          )
+          $files['Apps\Portal\settings.yml'] = @(
+            'database_host: PG-LAB-01'
+            'database_port: 5432'
+            'database_password: LAB_FAKE_SECRET_YAML'
+          )
+          $files['Apps\Oracle\tnsnames.ora'] = @(
+            'FINLAB = (DESCRIPTION ='
+            '  (ADDRESS = (PROTOCOL = TCP)(HOST = ORA-LAB-01)(PORT = 1521))'
+            '  (CONNECT_DATA = (SERVICE_NAME = FINLAB))'
+            ')' 
+          )
+          # Uma linha TNS contém HOST e PORT simultaneamente (um único match por linha).
+          # A linha SERVICE_NAME é outro match. Total da massa fica em 9 por host.
+          $files['Apps\Portal\database.env'] = @(
+            'DATABASE_URL=postgresql://labuser:LAB_FAKE_SECRET_URL@PG-LAB-01:5432/portal'
+          )
+          $files['Apps\Financeiro\options.ini'] = @(
+            '[options]'
+            'feature_enabled=true'
+          )
+          $files['Apps\Financeiro\comments.conf'] = @(
+            '# password=NAO_CONTAR'
+            '// Server=NAO_CONTAR'
+            'modo=ativo'
+          )
+          # Casos que DEVEM ser ignorados (diretórios, filename ou extensão).
+          $files['logs\trace.config'] = @('Server=IGNORAR-LOG;Database=IGNORE')
+          $files['backup\antigo.config'] = @('Server=IGNORAR-BACKUP;Database=IGNORE')
+          $files['Apps\Exemplos\example.sample.config'] = @('Server=IGNORAR-SAMPLE;Database=IGNORE')
+          $files['Apps\Exemplos\informacoes.txt'] = @('Server=IGNORAR-TXT;Database=IGNORE')
+
+          $created = 0
+          foreach ($item in $files.GetEnumerator()) {
+            $path = Join-Path $LabRoot $item.Key
+            [void][System.IO.Directory]::CreateDirectory((Split-Path -Path $path -Parent))
+            $data = ($item.Value -join [Environment]::NewLine) + [Environment]::NewLine
+            [System.IO.File]::WriteAllText($path, $data, $utf8)
+            $created++
+          }
+          $Ansible.Changed = $true
+          $Ansible.Result = @{
+            root = $LabRoot
+            files_created = $created
+            scenario = $Environment.ToUpperInvariant()
+            real_passwords_used = $false
+          }
+      register: csd_lab_seed
+      no_log: true
+
+    - name: Exibir resumo seguro da preparação
+      ansible.builtin.debug:
+        msg:
+          host: '{{ inventory_hostname }}'
+          ambiente: '{{ csd_environment }}'
+          caminho: '{{ csd_lab_root }}'
+          arquivos_criados: '{{ csd_lab_seed.result.files_created | default(0) }}'
+          observacao: 'Dados 100% fictícios; execute connection_discovery_lab.yml para descobrir.'

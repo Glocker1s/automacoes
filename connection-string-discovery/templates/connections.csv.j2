@@ -1,0 +1,9 @@
+﻿{% macro csv_cell(value) -%}
+{%- set raw = (value | default('', true) | string | replace('\r', ' ') | replace('\n', ' ')) -%}
+{%- set safe = ("'" ~ raw) if raw[:1] in ['=', '+', '-', '@'] else raw -%}
+"{{ safe | replace('"', '""') }}"
+{%- endmacro -%}
+Servidor;Arquivo;Linha;Conteudo
+{% for match in csd_all_matches -%}
+{{ csv_cell(match.host) }};{{ csv_cell(match.file) }};{{ csv_cell(match.line) }};{{ csv_cell(match.content) }}
+{% endfor -%}

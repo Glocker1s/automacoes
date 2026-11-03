@@ -1,0 +1,44 @@
+---
+- name: LAB | Selecionar VMs para limpeza
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+    - vars/lab_environments.yml
+  tasks:
+    - name: Exigir confirmação para excluir SOMENTE C:\CSD-LAB
+      ansible.builtin.assert:
+        that:
+          - csd_lab_cleanup_confirm | default(false) | bool
+        fail_msg: 'Para limpar a massa, passe csd_lab_cleanup_confirm=true no Job.'
+    - name: Selecionar servidores do lab
+      ansible.builtin.import_tasks: tasks/00_prepare.yml
+      vars:
+        csd_validate_cifs_on_prepare: false
+    - name: Validar destinos
+      ansible.builtin.import_tasks: tasks/lab_validate.yml
+
+- name: LAB | Remover apenas arquivos de teste marcados
+  hosts: csd_targets
+  gather_facts: false
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+  tasks:
+    - name: Remover C:\CSD-LAB somente se marcado como próprio
+      ansible.windows.win_powershell:
+        error_action: stop
+        parameters:
+          LabRoot: '{{ csd_lab_root }}'
+        script: |
+          [CmdletBinding()]
+          param([string]$LabRoot)
+          if ($LabRoot -ne 'C:\CSD-LAB') { throw 'Raiz de limpeza inválida' }
+          if (-not [IO.File]::Exists((Join-Path $LabRoot '.csd_lab_owned.txt'))) {
+            throw 'Massa de laboratório não identificada. Nenhum arquivo removido.'
+          }
+          Remove-Item -LiteralPath $LabRoot -Recurse -Force -ErrorAction Stop
+          $Ansible.Changed = $true
+          $Ansible.Result = @{ removed = $LabRoot }

@@ -1,0 +1,19 @@
+---
+- name: Report | Publicar contrato genérico do Workflow de e-mail
+  ansible.builtin.set_stats:
+    per_host: false
+    data:
+      send_mail_subject: >-
+        Connection String Discovery - Job #{{ tower_job_id | default(awx_job_id | default('local')) }} -
+        {{ tower_job_template_name | default(awx_job_template_name | default('Connection String Discovery')) }} -
+        {{ 'FALHA CIFS' if csd_cifs_report_upload_failed | default(false) | bool else
+           ('SUCESSO COM AVISO' if ((csd_partial_hosts | int) + (csd_error_hosts | int)) > 0 else 'SUCESSO') }}
+      send_mail_body: '{{ lookup("ansible.builtin.file", csd_html_path) }}'
+      send_mail_cifs: '{{ csd_cifs_label }}'
+      send_mail_cifs_path: '{{ csd_cifs_attachment_path }}'
+      send_mail_cifs_address: '{{ csd_cifs_address }}'
+      cifs_workgroup: '{{ csd_cifs_workgroup }}'
+      send_mail_cifs_remote_files: '{{ send_mail_cifs_remote_files | default([]) }}'
+      send_mail_attachments: '{{ send_mail_attachments | default([]) }}'
+      tmp_path_local: '{{ csd_tempdir.path }}'
+  no_log: true

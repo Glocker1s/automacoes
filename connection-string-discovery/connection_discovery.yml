@@ -1,0 +1,33 @@
+---
+- name: CSD | Preparar inventário dinâmico e validar parâmetros
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/environments.yml
+    - vars/config.yml
+  tasks:
+    - name: Validar Survey e criar hosts temporários
+      ansible.builtin.import_tasks: tasks/00_prepare.yml
+
+- name: CSD | Descobrir configurações em Windows
+  hosts: csd_targets
+  gather_facts: false
+  strategy: linear
+  serial: "{{ csd_parallel_hosts | int }}"
+  ignore_unreachable: true
+  vars_files:
+    - vars/config.yml
+  tasks:
+    - name: Executar precheck e scanner
+      ansible.builtin.import_tasks: tasks/20_scan.yml
+
+- name: CSD | Consolidar CSV, HTML e enviar e-mail
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/config.yml
+  tasks:
+    - name: Consolidar os dados
+      ansible.builtin.import_tasks: tasks/40_consolidate.yml
+    - name: Gerar e enviar relatório
+      ansible.builtin.import_tasks: tasks/50_report.yml

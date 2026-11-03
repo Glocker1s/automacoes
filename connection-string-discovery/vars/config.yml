@@ -1,0 +1,89 @@
+---
+# Configuração de descoberta: valores conservadores para primeira implantação.
+csd_extensions:
+  - .ora
+  - .config
+  - .tns
+  - .asp
+  - .aspx
+  - .properties
+  - .ini
+  - .conf
+  - .json
+  - .yaml
+  - .yml
+  - .env
+
+csd_excluded_directory_names:
+  - Windows
+  - '$Recycle.Bin'
+  - System Volume Information
+  - Program Files
+  - Program Files (x86)
+  - ProgramData
+  - Recovery
+  - Temp
+  - tmp
+  - Cache
+  - logs
+  - log
+  - .git
+  - .svn
+  - node_modules
+  - .nuget
+  - packages
+  - backup
+  - .vs
+  - obj
+  - bin
+# Exclusões são aplicadas antes de descer nos diretórios (melhora de desempenho).
+csd_excluded_filename_patterns:
+  - '*.log'
+  - '*.bak'
+  - '*test*'
+  - '*sample*'
+  - '*exemplo*'
+
+csd_scan_scope: all_local  # all_local | custom
+csd_custom_roots: []      # Ex.: ['D:\\Apps', 'E:\\Sites']
+csd_max_file_mb: 10
+csd_max_files_per_host: 100000
+csd_max_matches_per_host: 5000
+csd_max_duration_seconds: 3600
+csd_max_content_chars: 900
+
+# Conexão padrão para hosts criados com add_host; adaptar ao ambiente.
+csd_winrm_transport: ntlm
+csd_winrm_port: 5985
+csd_winrm_server_cert_validation: validate
+csd_winrm_operation_timeout_sec: 120
+csd_winrm_read_timeout_sec: 150
+csd_parallel_hosts: 8
+
+# ==========================================================================
+# CIFS + E-MAIL | PADRÃO POSTGRESQL MANAGER
+# ==========================================================================
+# O job de descoberta publica o CSV no compartilhamento; o Job Template
+# genérico de e-mail (Workflow) recebe os campos via set_stats.
+csd_publish_email_payload: true
+csd_cifs_enabled: true
+csd_cifs_label: "producao"
+csd_cifs_attachment_path: "/Ansible/mail_attachments"
+csd_cifs_workgroup: "WORKGROUP"
+csd_cifs_address:
+  tutihofix: "//192.168.0.247/certs"
+  producao: "//192.168.0.149/certs"
+
+# Mesmo delegado e padrão de diretório temporário usados pelo PostgreSQL Manager.
+csd_controller_tmp_dir: "/tmp/connection-string-discovery-{{ tower_job_id | default(awx_job_id | default('local')) }}"
+
+# Interface da automação de e-mail existente.
+send_mail_cifs: "{{ csd_cifs_label }}"
+send_mail_cifs_path: "{{ csd_cifs_attachment_path }}"
+send_mail_cifs_address: "{{ csd_cifs_address }}"
+cifs_workgroup: "{{ csd_cifs_workgroup }}"
+
+# Saída: relatórios temporários dentro do Execution Environment.
+csd_keep_reports_on_controller: false
+csd_aap_base_url: '' # Opcional, ex.: https://aap.exemplo.com (sem barra final)
+csd_fail_on_partial: false

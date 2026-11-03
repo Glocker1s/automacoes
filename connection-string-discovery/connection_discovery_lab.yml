@@ -1,0 +1,40 @@
+---
+- name: LAB | Preparar inventário dinâmico (não usa hosts corporativos)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+    - vars/lab_environments.yml
+  tasks:
+    - name: Selecionar hosts pelo Survey
+      ansible.builtin.import_tasks: tasks/00_prepare.yml
+    - name: LAB | Validar destino e escopo exclusivo
+      ansible.builtin.import_tasks: tasks/lab_validate.yml
+
+- name: LAB | Descobrir conexões nos arquivos simulados
+  hosts: csd_targets
+  gather_facts: false
+  strategy: linear
+  serial: '{{ csd_parallel_hosts | int }}'
+  ignore_unreachable: true
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+  tasks:
+    - name: Varredura real com scanner original
+      ansible.builtin.import_tasks: tasks/20_scan.yml
+    - name: Verificar expectativas do laboratório
+      ansible.builtin.import_tasks: tasks/lab_assert.yml
+
+- name: LAB | Consolidar e gerar relatórios
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - vars/config.yml
+    - vars/lab_config.yml
+  tasks:
+    - name: Consolidar resultados
+      ansible.builtin.import_tasks: tasks/40_consolidate.yml
+    - name: Gerar HTML/CSV e publicar CIFS + set_stats quando habilitado
+      ansible.builtin.import_tasks: tasks/50_report.yml

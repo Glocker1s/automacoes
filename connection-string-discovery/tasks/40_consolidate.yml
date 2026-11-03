@@ -1,0 +1,63 @@
+---
+- name: Inicializar consolidação
+  ansible.builtin.set_fact:
+    csd_reports: []
+  no_log: true
+
+- name: Consolidar resultado de cada host do inventário temporário
+  ansible.builtin.set_fact:
+    csd_reports: >-
+      {{ csd_reports + [hostvars[item].csd_host_result | default({
+        'host': item,
+        'environment': hostvars[item].csd_environment | default('?'),
+        'status': 'ERROR',
+        'files_scanned': 0,
+        'matches_count': 0,
+        'errors_count': 1,
+        'errors_sample': ['Execução não produziu resultado'],
+        'elapsed_seconds': 0,
+        'drives': [],
+        'truncated': false,
+        'results': []
+      })] }}
+  loop: "{{ groups['csd_targets'] | default([]) }}"
+  loop_control:
+    label: '{{ item }}'
+  no_log: true
+
+- name: Consolidar achados e métricas
+  ansible.builtin.set_fact:
+    csd_all_matches: "{{ csd_reports | map(attribute='results') | flatten | list }}"
+    csd_total_hosts: '{{ csd_reports | length }}'
+    csd_ok_hosts: "{{ csd_reports | selectattr('status', 'equalto', 'OK') | list | length }}"
+    csd_partial_hosts: "{{ csd_reports | selectattr('status', 'equalto', 'PARCIAL') | list | length }}"
+    csd_error_hosts: "{{ csd_reports | selectattr('status', 'in', ['ERROR', 'UNREACHABLE']) | list | length }}"
+    csd_total_files: "{{ csd_reports | map(attribute='files_scanned') | map('int') | sum }}"
+    csd_total_errors: "{{ csd_reports | map(attribute='errors_count') | map('int') | sum }}"
+    csd_timestamp: "{{ now(utc=true, fmt='%Y%m%d_%H%M%S') }}"
+  no_log: true
+
+- name: Report | Obter data e hora no fuso de Sao Paulo
+  ansible.builtin.command:
+    argv:
+      - date
+      - '+%d/%m/%Y às %H:%M (São Paulo, UTC%:z)'
+  environment:
+    TZ: America/Sao_Paulo
+  register: csd_report_local_date
+  changed_when: false
+
+- name: Report | Definir data e hora formatada para o e-mail
+  ansible.builtin.set_fact:
+    csd_report_datetime: '{{ csd_report_local_date.stdout | trim }}'
+
+- name: Exibir resumo da execução sem dados confidenciais
+  ansible.builtin.debug:
+    msg:
+      servidores: '{{ csd_total_hosts }}'
+      concluidos: '{{ csd_ok_hosts }}'
+      parciais: '{{ csd_partial_hosts }}'
+      erro_ou_inacessiveis: '{{ csd_error_hosts }}'
+      arquivos_analisados: '{{ csd_total_files }}'
+      ocorrencias: '{{ csd_all_matches | length }}'
+      falhas_de_leitura: '{{ csd_total_errors }}'

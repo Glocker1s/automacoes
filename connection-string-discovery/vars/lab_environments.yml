@@ -1,0 +1,12 @@
+---
+# Laboratório: informe o IP ou hostname REAL de cada Windows na lista correspondente.
+# Sem metadados ou aliases artificiais: add_host usará o próprio valor informado.
+csd_environments:
+  prd:
+    - 192.168.122.225
+  dr:
+    - 192.168.122.226
+  hml:
+    - 192.168.122.227
+  dev:
+    - 192.168.122.223

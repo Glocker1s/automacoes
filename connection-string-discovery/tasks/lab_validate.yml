@@ -1,0 +1,21 @@
+---
+- name: LAB | Garantir que o alvo é o diretório dedicado de simulação
+  ansible.builtin.assert:
+    that:
+      - csd_lab_root == 'C:\CSD-LAB'
+      - csd_scan_scope == 'custom'
+      - csd_custom_roots == ['C:\CSD-LAB']
+      - not (csd_requested_environment | default('') == '')
+    fail_msg: 'Escopo de laboratório inválido. Configure apenas C:\CSD-LAB.'
+    quiet: true
+
+- name: LAB | Validar IPs antes de tentar conexão WinRM
+  ansible.builtin.assert:
+    that:
+      - item | string is not search('PREENCHER|CHANGE_ME|SUBSTITUIR')
+      - item | string | length > 3
+    fail_msg: 'Configure o IP real de {{ item }} em vars/lab_environments.yml.'
+    quiet: true
+  loop: '{{ csd_target_hosts }}'
+  loop_control:
+    label: '{{ item }}'

@@ -1,0 +1,75 @@
+---
+- name: Criar diretório temporário isolado para relatórios
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: _csd_reports
+  register: csd_tempdir
+  no_log: true
+
+- name: Definir caminhos dos relatórios
+  ansible.builtin.set_fact:
+    csd_csv_filename: >-
+      Connection_String_Discovery_{{ csd_timestamp }}_{{ awx_job_id | default('manual') }}.csv
+    csd_html_filename: >-
+      Connection_String_Discovery_{{ csd_timestamp }}_{{ awx_job_id | default('manual') }}.html
+  no_log: true
+
+- name: Registrar caminhos temporários
+  ansible.builtin.set_fact:
+    csd_csv_path: '{{ csd_tempdir.path }}/{{ csd_csv_filename }}'
+    csd_html_path: '{{ csd_tempdir.path }}/{{ csd_html_filename }}'
+  no_log: true
+
+- name: Gerar relatórios e publicá-los pelo fluxo existente
+  block:
+    - name: Gerar CSV consolidado compatível com o formato original
+      ansible.builtin.template:
+        src: '{{ playbook_dir }}/templates/connections.csv.j2'
+        dest: '{{ csd_csv_path }}'
+        mode: '0600'
+      no_log: true
+
+    - name: CIFS | Publicar CSV no compartilhamento (padrão PostgreSQL Manager)
+      ansible.builtin.include_tasks: 55_publish_cifs.yml
+      when: csd_publish_email_payload | bool
+
+    - name: Report | Gerar HTML com indicadores e status de publicação CIFS
+      ansible.builtin.template:
+        src: '{{ playbook_dir }}/templates/report.html.j2'
+        dest: '{{ csd_html_path }}'
+        mode: '0600'
+      no_log: true
+
+    - name: Report | Publicar set_stats para Job Template de E-mail
+      ansible.builtin.include_tasks: 60_build_email_payload.yml
+      when: csd_publish_email_payload | bool
+
+    - name: Exibir resumo de publicação, sem conteúdo sensível
+      ansible.builtin.debug:
+        msg:
+          csv: '{{ csd_csv_filename }}'
+          ocorrencias: '{{ csd_all_matches | length }}'
+          publicado_cifs: '{{ csd_publish_email_payload | bool and not (csd_cifs_report_upload_failed | default(false) | bool) and send_mail_cifs_remote_files | default([]) | length > 0 }}'
+          envio_smtp_neste_job: false
+          proximo_passo: >-
+            {{ 'Job Template de e-mail do seu workflow' if csd_publish_email_payload | bool
+               else 'Habilite csd_publish_email_payload após validar somente a descoberta.' }}
+
+  always:
+    - name: Remover relatórios locais temporários do EE
+      ansible.builtin.file:
+        path: '{{ csd_tempdir.path }}'
+        state: absent
+      when: not (csd_keep_reports_on_controller | bool)
+      no_log: true
+
+- name: Marcar Job com ressalvas após publicar o relatório (opcional)
+  ansible.builtin.fail:
+    msg: >-
+      Descoberta parcialmente concluída: {{ csd_partial_hosts }} host(s) parcial(is),
+      {{ csd_error_hosts }} com falha/inacessível(is).
+      ATENÇÃO: se o Job ficar em FAILED, o nó de e-mail no workflow deve
+      receber uma ligação de falha/always, não apenas success.
+  when:
+    - csd_fail_on_partial | bool
+    - ((csd_partial_hosts | int) + (csd_error_hosts | int)) > 0

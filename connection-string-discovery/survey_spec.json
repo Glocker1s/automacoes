@@ -1,0 +1,29 @@
+{
+  "name": "Connection String Discovery - Execução",
+  "description": "Seleciona ambiente e, opcionalmente, hostnames cadastrados em vars/environments.yml.",
+  "spec": [
+    {
+      "question_name": "Ambiente",
+      "question_description": "Ambiente dos servidores Windows que serão analisados",
+      "required": true,
+      "type": "multiplechoice",
+      "variable": "survey_environment",
+      "min": 0,
+      "max": 1024,
+      "default": "hml",
+      "choices": "prd\ndr\nhml\ndev\nall",
+      "new_question": true
+    },
+    {
+      "question_name": "Servidores específicos (opcional)",
+      "question_description": "Deixe em branco para todos os servidores do ambiente; para poucos servidores use hostname separado por vírgula ou quebra de linha",
+      "required": false,
+      "type": "textarea",
+      "variable": "survey_hosts",
+      "min": 0,
+      "max": 8192,
+      "default": "",
+      "new_question": true
+    }
+  ]
+}
