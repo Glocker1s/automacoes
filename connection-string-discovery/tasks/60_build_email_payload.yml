@@ -7,7 +7,7 @@
         Connection String Discovery - Job #{{ tower_job_id | default(awx_job_id | default('local')) }} -
         {{ tower_job_template_name | default(awx_job_template_name | default('Connection String Discovery')) }} -
         {{ 'FALHA CIFS' if csd_cifs_report_upload_failed | default(false) | bool else
-           ('SUCESSO COM AVISO' if ((csd_partial_hosts | int) + (csd_error_hosts | int)) > 0 else 'SUCESSO') }}
+           ('SUCESSO COM AVISO' if ((csd_partial_hosts | int) + (csd_error_hosts | int)) > 0 or csd_total_errors | int > 0 or csd_csv_attachment_action | default('individual') in ['cifs_only', 'cifs_only_uncompressed', 'compression_failed'] else 'SUCESSO') }}
       send_mail_body: '{{ lookup("ansible.builtin.file", csd_html_path) }}'
       send_mail_cifs: '{{ csd_cifs_label }}'
       send_mail_cifs_path: '{{ csd_cifs_attachment_path }}'
