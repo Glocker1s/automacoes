@@ -5,8 +5,9 @@
     csd_cifs_report_upload_error: ""
     send_mail_cifs_remote_files: []
     send_mail_attachments: []
+    csd_cifs_stored_filename: ""
 
-- name: CIFS | Publicar CSV via smbclient
+- name: CIFS | Publicar anexo CSV/TAR.GZ via smbclient
   when: csd_cifs_enabled | bool
   block:
     - name: CIFS | Resolver compartilhamento e arquivo de senha
@@ -24,10 +25,10 @@
       delegate_to: "192.168.122.34"
       become: false
 
-    - name: CIFS | Copiar CSV para host delegado
+    - name: CIFS | Copiar anexo para host delegado
       ansible.builtin.copy:
-        src: "{{ csd_csv_path }}"
-        dest: "{{ csd_controller_tmp_dir }}/{{ csd_csv_filename }}"
+        src: "{{ csd_attachment_path }}"
+        dest: "{{ csd_controller_tmp_dir }}/{{ csd_attachment_filename }}"
         mode: "0644"
       delegate_to: "192.168.122.34"
       become: false
@@ -59,13 +60,14 @@
       changed_when: false
       delegate_to: "192.168.122.34"
       become: false
+      no_log: true
 
-    - name: CIFS | Enviar CSV para CIFS
+    - name: CIFS | Enviar anexo para CIFS
       ansible.builtin.shell: >
         smbclient "{{ _csd_report_cifs_server }}"
         -U "{{ ansible_user }}%$(cat {{ _csd_report_cifs_pass_file }})"
         -W "{{ csd_cifs_workgroup }}"
-        -c 'cd {{ _csd_report_cifs_dir }} ; put {{ csd_controller_tmp_dir }}/{{ csd_csv_filename }} {{ csd_csv_filename }}'
+        -c 'cd {{ _csd_report_cifs_dir }} ; put {{ csd_controller_tmp_dir }}/{{ csd_attachment_filename }} {{ csd_attachment_filename }}'
       register: _csd_report_cifs_put
       changed_when: true
       delegate_to: "192.168.122.34"
@@ -74,16 +76,18 @@
 
     - name: CIFS | Publicar nomes de anexos para o Workflow
       ansible.builtin.set_fact:
-        send_mail_cifs_remote_files:
-          - "{{ csd_csv_filename }}"
-        send_mail_attachments:
-          - "{{ csd_csv_filename }}"
+        csd_cifs_stored_filename: "{{ csd_attachment_filename }}"
+        send_mail_cifs_remote_files: >-
+          {{ [csd_attachment_filename] if (csd_attachment_email_allowed | bool) else [] }}
+        send_mail_attachments: >-
+          {{ [csd_attachment_filename] if (csd_attachment_email_allowed | bool) else [] }}
 
   rescue:
     - name: CIFS | Registrar falha de publicação
       ansible.builtin.set_fact:
         csd_cifs_report_upload_failed: true
-        csd_cifs_report_upload_error: "Falha ao publicar CSV no CIFS; conferir o Job de descoberta."
+        csd_cifs_report_upload_error: "Falha ao publicar anexo no CIFS; conferir o Job de descoberta."
+        csd_cifs_stored_filename: ""
         send_mail_cifs_remote_files: []
         send_mail_attachments: []
 
@@ -97,7 +101,7 @@
       failed_when: false
       no_log: true
 
-    - name: CIFS | Remover CSV temporário e diretório de estágio
+    - name: CIFS | Remover anexo temporário e diretório de estágio
       ansible.builtin.file:
         path: "{{ csd_controller_tmp_dir }}"
         state: absent
@@ -108,6 +112,7 @@
 
 - name: CIFS | Sem CIFS, não publicar anexos remotos
   ansible.builtin.set_fact:
+    csd_cifs_stored_filename: ""
     send_mail_cifs_remote_files: []
     send_mail_attachments: []
   when: not (csd_cifs_enabled | bool)
