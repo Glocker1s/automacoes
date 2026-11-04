@@ -7,11 +7,12 @@
 </head>
 {% set _cifs_failed = csd_cifs_report_upload_failed | default(false) %}
 {% set _has_issues = ((csd_partial_hosts | int) + (csd_error_hosts | int)) > 0 %}
+{% set _attachment_warning = csd_csv_attachment_action | default('individual') in ['cifs_only', 'cifs_only_uncompressed', 'compression_failed'] %}
 {# Mesma prioridade do send_mail_subject em tasks/60_build_email_payload.yml. #}
 {% if _cifs_failed %}
   {% set _status_label = 'FALHA CIFS' %}
   {% set _status_bg = '#a52e2e' %}
-{% elif _has_issues or csd_total_errors | int > 0 %}
+{% elif _has_issues or csd_total_errors | int > 0 or _attachment_warning %}
   {% set _status_label = 'SUCESSO COM AVISO' %}
   {% set _status_bg = '#a36a1e' %}
 {% else %}
@@ -19,6 +20,10 @@
   {% set _status_bg = '#365f49' %}
 {% endif %}
 {% set _job_id = awx_job_id | default(tower_job_id | default('manual')) %}
+{% set _executor = awx_user_name | default(tower_user_name | default('', true), true) | trim %}
+{% if not _executor %}
+  {% set _executor = 'Não disponível (execução automática)' %}
+{% endif %}
 <body style="margin:0;padding:0;background-color:#ffffff;color:#222222;font-family:Arial,Helvetica,sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">
     <tr>
@@ -34,7 +39,8 @@
                     <div style="font-size:12px;line-height:19px;margin-top:9px;color:#d3dade;">
                       Ambiente: <strong style="color:#ffffff;">{{ hostvars['localhost'].csd_requested_environment | upper | e }}</strong>
                       &nbsp;&middot;&nbsp; Job: <strong style="color:#ffffff;">#{{ _job_id | e }}</strong><br>
-                      Relatório gerado em: <strong>{{ csd_report_datetime | e }}</strong>
+                      Relatório gerado em: <strong>{{ csd_report_datetime | e }}</strong><br>
+                      Executor: <strong style="color:#ffffff;">{{ _executor | e }}</strong>
                       {% if hostvars['localhost'].csd_connection_filter | default('') | length > 0 %}
                       <br>Filtro de conexão: <strong style="color:#ffffff;">{{ hostvars['localhost'].csd_connection_filter | e }}</strong>
                       {% endif %}
@@ -127,13 +133,26 @@
 
               {# Resumo de exceções: mensagens curtas, sem detalhes sensíveis. #}
               {% set _affected_hosts = csd_reports | rejectattr('status', 'equalto', 'OK') | list %}
-              {% if _cifs_failed or _affected_hosts | length > 0 or csd_total_errors | int > 0 %}
+              {% if _cifs_failed or _affected_hosts | length > 0 or csd_total_errors | int > 0 or _attachment_warning %}
               <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:22px;font-weight:bold;margin:24px 0 10px;color:#262626;">Avisos da execução</div>
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#252525;">
                 {% if _cifs_failed %}
                 <tr>
                   <td style="padding:10px 12px;border:1px solid #e2e4e6;background-color:#fafafa;">
                     <strong>FALHA CIFS:</strong> Não foi possível publicar o CSV. Verifique o compartilhamento e as credenciais.
+                  </td>
+                </tr>
+                {% endif %}
+                {% if _attachment_warning and not _cifs_failed %}
+                <tr>
+                  <td style="padding:10px 12px;border:1px solid #e2e4e6;background-color:#fafafa;">
+                    {% if csd_csv_attachment_action == 'compression_failed' %}
+                      <strong>Anexo:</strong> Compactação indisponível. CSV preservado no CIFS, sem anexo no e-mail.
+                    {% elif csd_csv_attachment_action == 'cifs_only_uncompressed' %}
+                      <strong>Anexo:</strong> CSV acima do limite de {{ csd_csv_attachment_safe_limit_mb }} MB. Disponível no CIFS, sem anexo no e-mail.
+                    {% else %}
+                      <strong>Anexo:</strong> Pacote compactado acima de {{ csd_csv_attachment_safe_limit_mb }} MB. Disponível no CIFS, sem anexo no e-mail.
+                    {% endif %}
                   </td>
                 </tr>
                 {% endif %}
@@ -161,7 +180,13 @@
               </table>
               {% endif %}
               <div style="font-size:14px;line-height:22px;color:#555555;margin-top:20px;">
-                {{ 'Detalhamento completo das ocorrências disponível no CSV anexo.' if send_mail_cifs_remote_files | default([]) | length > 0 else 'CSV não anexado nesta execução.' }}
+                {% if send_mail_attachments | default([]) | length > 0 %}
+                  {{ 'Detalhamento completo no CSV compactado (TAR.GZ) anexo.' if csd_csv_attachment_action | default('individual') == 'compressed' else 'Detalhamento completo das ocorrências disponível no CSV anexo.' }}
+                {% elif csd_cifs_stored_filename | default('') | length > 0 %}
+                  Arquivo de resultados disponível no CIFS, sem anexo neste e-mail.
+                {% else %}
+                  CSV não anexado nesta execução.
+                {% endif %}
                 {% if csd_aap_base_url | default('') | length > 0 and (_job_id | string | length > 0) and _job_id != 'manual' %}
                   &nbsp;<a href="{{ csd_aap_base_url | e }}/execution/jobs/playbook/{{ _job_id | e }}/output" style="color:#263238;text-decoration:underline;">Ver execução no AAP</a>
                 {% endif %}
