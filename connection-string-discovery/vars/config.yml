@@ -83,6 +83,12 @@ send_mail_cifs_path: "{{ csd_cifs_attachment_path }}"
 send_mail_cifs_address: "{{ csd_cifs_address }}"
 cifs_workgroup: "{{ csd_cifs_workgroup }}"
 
+# Compactação igual ao Data Purge Manager: TAR.GZ via comando tar, sem Python.
+# CSV até o limite: anexo normal. Acima: TAR.GZ. Se o pacote continuar
+# acima do limite, publica somente no CIFS e envia e-mail sem anexo.
+csd_csv_compress_enabled: true
+csd_csv_attachment_safe_limit_mb: 0.001
+
 # Saída: relatórios temporários dentro do Execution Environment.
 csd_keep_reports_on_controller: false
 csd_aap_base_url: '' # Opcional, ex.: https://aap.exemplo.com (sem barra final)
