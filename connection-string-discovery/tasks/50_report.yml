@@ -29,7 +29,107 @@
         mode: '0600'
       no_log: true
 
-    - name: CIFS | Publicar CSV no compartilhamento (padrão PostgreSQL Manager)
+    - name: Verificar tamanho do CSV gerado
+      ansible.builtin.stat:
+        path: '{{ csd_csv_path }}'
+      register: csd_csv_stat
+      changed_when: false
+
+    - name: Validar limite seguro de anexos
+      ansible.builtin.assert:
+        that:
+          - csd_csv_attachment_safe_limit_mb | float > 0
+          - csd_csv_stat.stat.isreg | default(false)
+        fail_msg: 'Limite seguro de anexos inválido ou CSV indisponível.'
+        quiet: true
+
+    - name: Definir tamanho limite e necessidade de compactação
+      ansible.builtin.set_fact:
+        csd_csv_safe_limit_bytes: '{{ ((csd_csv_attachment_safe_limit_mb | float) * 1048576) | int }}'
+        csd_csv_compress_required: >-
+          {{
+            (csd_csv_compress_enabled | bool)
+            and (csd_csv_stat.stat.size | int) > (((csd_csv_attachment_safe_limit_mb | float) * 1048576) | int)
+          }}
+
+    - name: Inicializar anexo original e estado da compactação
+      ansible.builtin.set_fact:
+        csd_attachment_filename: '{{ csd_csv_filename }}'
+        csd_attachment_path: '{{ csd_csv_path }}'
+        csd_attachment_email_allowed: >-
+          {{ (csd_csv_stat.stat.size | int) <= (csd_csv_safe_limit_bytes | int) }}
+        csd_csv_attachment_action: >-
+          {{ 'individual' if (csd_csv_stat.stat.size | int) <= (csd_csv_safe_limit_bytes | int) else 'cifs_only_uncompressed' }}
+        csd_csv_compression_failed: false
+        csd_csv_archive_size: 0
+
+    - name: Anexos | Compactar CSV acima do limite (padrão Data Purge Manager)
+      when: csd_csv_compress_required | bool
+      block:
+        - name: Anexos | Criar pacote TAR.GZ com o CSV
+          ansible.builtin.command:
+            argv:
+              - tar
+              - -czf
+              - '{{ csd_csv_path }}.tar.gz'
+              - -C
+              - '{{ csd_tempdir.path }}'
+              - '{{ csd_csv_filename }}'
+          changed_when: true
+          no_log: true
+
+        - name: Anexos | Proteger permissões do TAR.GZ
+          ansible.builtin.file:
+            path: '{{ csd_csv_path }}.tar.gz'
+            state: file
+            mode: '0600'
+          no_log: true
+
+        - name: Anexos | Verificar tamanho do pacote compactado
+          ansible.builtin.stat:
+            path: '{{ csd_csv_path }}.tar.gz'
+          register: csd_csv_archive_stat
+          changed_when: false
+
+        - name: Anexos | Verificar integridade e conteúdo do pacote
+          ansible.builtin.command:
+            argv:
+              - tar
+              - -tzf
+              - '{{ csd_csv_path }}.tar.gz'
+          register: csd_csv_archive_list
+          changed_when: false
+          no_log: true
+
+        - name: Anexos | Validar pacote gerado
+          ansible.builtin.assert:
+            that:
+              - csd_csv_archive_stat.stat.isreg | default(false)
+              - (csd_csv_archive_stat.stat.size | default(0) | int) > 0
+              - (csd_csv_archive_list.stdout_lines | default([])) == [csd_csv_filename]
+            fail_msg: 'O TAR.GZ não foi criado corretamente ou não contém somente o CSV esperado.'
+            quiet: true
+
+        - name: Anexos | Selecionar TAR.GZ e respeitar limite seguro de e-mail
+          ansible.builtin.set_fact:
+            csd_attachment_filename: '{{ csd_csv_filename }}.tar.gz'
+            csd_attachment_path: '{{ csd_csv_path }}.tar.gz'
+            csd_attachment_email_allowed: >-
+              {{ (csd_csv_archive_stat.stat.size | int) <= (csd_csv_safe_limit_bytes | int) }}
+            csd_csv_attachment_action: >-
+              {{ 'compressed' if (csd_csv_archive_stat.stat.size | int) <= (csd_csv_safe_limit_bytes | int) else 'cifs_only' }}
+            csd_csv_archive_size: '{{ csd_csv_archive_stat.stat.size | int }}'
+
+      rescue:
+        - name: Anexos | Preservar CSV no CIFS quando a compactação falhar
+          ansible.builtin.set_fact:
+            csd_attachment_filename: '{{ csd_csv_filename }}'
+            csd_attachment_path: '{{ csd_csv_path }}'
+            csd_attachment_email_allowed: false
+            csd_csv_attachment_action: compression_failed
+            csd_csv_compression_failed: true
+
+    - name: CIFS | Publicar anexo no compartilhamento (padrão PostgreSQL Manager)
       ansible.builtin.include_tasks: 55_publish_cifs.yml
       when: csd_publish_email_payload | bool
 
@@ -48,8 +148,14 @@
       ansible.builtin.debug:
         msg:
           csv: '{{ csd_csv_filename }}'
+          arquivo_cifs: '{{ csd_attachment_filename }}'
+          estrategia_anexo: '{{ csd_csv_attachment_action }}'
+          anexado_email: '{{ (send_mail_attachments | default([]) | length) > 0 }}'
           ocorrencias: '{{ csd_all_matches | length }}'
-          publicado_cifs: '{{ csd_publish_email_payload | bool and not (csd_cifs_report_upload_failed | default(false) | bool) and send_mail_cifs_remote_files | default([]) | length > 0 }}'
+          publicado_cifs: >-
+            {{ csd_publish_email_payload | bool and
+               not (csd_cifs_report_upload_failed | default(false) | bool) and
+               (csd_cifs_stored_filename | default('') | length > 0) }}
           envio_smtp_neste_job: false
           proximo_passo: >-
             {{ 'Job Template de e-mail do seu workflow' if csd_publish_email_payload | bool
