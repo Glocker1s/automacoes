@@ -91,7 +91,8 @@
           foreach ($name in $ExcludedDirectoryNames) { $skipDirectories[$name.ToLowerInvariant()] = $true }
 
           $signalRegex = '(?i)(connection\s*strings?|connectionname|data\s*source|initial\s+catalog|server[\"'']?\s*\)?\s*[:=]|database[\"'']?\s*\)?\s*[:=]|host[\"'']?\s*\)?\s*[:=]|hostname[\"'']?\s*\)?\s*[:=]|port[\"'']?\s*\)?\s*[:=]|user\s*id\s*[:=]|uid\s*[:=]|password\s*[:=]|pwd\s*[:=]|service_name|\bsid\s*[:=]|provider\s*[:=]|driver\s*[:=]|\bdsn\s*[:=]|jdbc:|odbc:|oledb:|postgresql:|mysql:|oracle:|sqlserver:|trusted_connection|integrated\s*security|tns_admin|oracle_home)'
-          $sensitiveRegex = '(?i)(password|passwd|pwd\b|pass\s*[:=]|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential|connection\s*strings?|\buid\s*[:=]|user\s*id\s*[:=]|://[^/\s:@]+:[^/@\s]+@|\b[a-z0-9_.-]+/[^/@\s;,]+@)'
+          $secretKeyPattern = '(?:password|passwd|pwd|pass|client[_-]?secret|api[_-]?key|access[_-]?key|private[_-]?key|secret|token|credential)'
+
 
           function Find-SafeValue([string]$text, [string]$keyPattern) {
             $m = [regex]::Match($text, '(?i)(?:^|[;\s,({"''])(?:' + $keyPattern + ')["''\)]?\s*[=:]\s*["'']?(?<v>[^;\s,"''}\]\)]{1,120})')
@@ -124,22 +125,42 @@
             return @{ database_type = $dbtype; destination = $server; database = $database; port = $port }
           }
 
-          function Protect-Content([string]$text, [hashtable]$meta) {
+          function Replace-SecretValue([string]$current, [string]$pattern) {
+            return [regex]::Replace($current, $pattern, [System.Text.RegularExpressions.MatchEvaluator] {
+              param([System.Text.RegularExpressions.Match]$m)
+              return $m.Groups['prefix'].Value + '***SENHA_OCULTA***' + $m.Groups['suffix'].Value
+            })
+          }
 
-            if ([regex]::IsMatch($text, $sensitiveRegex)) {
-              $parts = New-Object 'System.Collections.Generic.List[string]'
-              if ($meta['destination']) { [void]$parts.Add('Destino=' + $meta['destination']) }
-              if ($meta['database']) { [void]$parts.Add('Database=' + $meta['database']) }
-              if ($meta['port']) { [void]$parts.Add('Port=' + $meta['port']) }
-              [void]$parts.Add('***CONTEUDO_SENSIVEL_OCULTADO***')
-              return ($parts -join '; ')
-            }
+          function Protect-Content([string]$text, [hashtable]$meta) {
             $safe = $text.Trim()
 
-            if ($safe -match '(?i)(://[^/\s]*@|\buser\s*[:=]|\bauth\b)') { return '***CONTEUDO_SENSIVEL_OCULTADO***' }
-            if ($safe.Length -gt $MaxContentChars) { $safe = $safe.Substring(0, $MaxContentChars) + ' [TRUNCADO]' }
+            $xmlTag = '(?i)(?<prefix><\s*(?<tag>(?:[a-z_][\w.-]*:)?' + $secretKeyPattern + ')\s*>\s*)(?<value>[^<]*)(?<suffix><\s*/\s*\k<tag>\s*>)'
+            $safe = Replace-SecretValue $safe $xmlTag
+
+            $quoted = '(?i)(?<prefix>(?<![\w.-])' + $secretKeyPattern + '(?![\w.-])["'']?\s*[:=]\s*(?<quote>["'']))(?<value>(?:\\.|(?!\k<quote>).)*)(?<suffix>\k<quote>)'
+            $safe = Replace-SecretValue $safe $quoted
+
+            $unquoted = '(?i)(?<prefix>(?<![\w.-])' + $secretKeyPattern + '(?![\w.-])["'']?\s*[:=]\s*)(?<value>[^;,&<>\r\n}\]"''\s](?:(?!,(?=\s*(?:[a-z_][a-z0-9_. -]*\s*[:=]|"[^"]+"\s*:|</|$)))[^;&<>\r\n}\]"''])*)'
+            $safe = Replace-SecretValue $safe $unquoted
+
+            $uri = '(?i)(?<prefix>[a-z][a-z0-9+.-]*://[a-z0-9_.%+-]+:)(?<value>[^@\s/;<>]+)(?<suffix>@)'
+            $safe = Replace-SecretValue $safe $uri
+
+            $oracleCreds = '(?i)(?<prefix>(?:(?:jdbc:oracle:thin:)|(?:user\s*id|uid|username)\s*[:=]\s*)[a-z0-9_.-]+/)(?<value>[^@\s;,<>]+)(?<suffix>@)'
+            $safe = Replace-SecretValue $safe $oracleCreds
+
+            $remainingSecret = '(?i)(?<![\w.-])' + $secretKeyPattern + '(?![\w.-])["'']?\s*[:=]\s*(?!["'']?\*\*\*SENHA_OCULTA\*\*\*)(?:["''][^"'']+|[^;,<>}\]\s]+)'
+            if ([regex]::IsMatch($safe, $remainingSecret)) {
+              return '***CONTEUDO_SENSIVEL_OCULTADO***'
+            }
+
+            if ($safe.Length -gt $MaxContentChars) {
+              $safe = $safe.Substring(0, $MaxContentChars) + ' [TRUNCADO]'
+            }
             return $safe
           }
+
 
           if ($ScanScope -eq 'all_local') {
             try {
@@ -191,7 +212,6 @@
                   try {
                     $reader = [System.IO.StreamReader]::new($entry, $true)
                     $lineNumber = 0
-                    
                     $pendingCandidates = New-Object 'System.Collections.Generic.List[object]'
                     $lastFilterLine = -1000000
                     while (($line = $reader.ReadLine()) -ne $null) {
@@ -199,16 +219,13 @@
                       if ($line -match '^\s*(?:$|#|//|<!--|\*|;)') { continue }
                       if ($line -match '(?i)(xmlns=|xsi:|encoding=)') { continue }
                       if ($filterActive) {
-                        
                         for ($idx = $pendingCandidates.Count - 1; $idx -ge 0; $idx--) {
                           if (($lineNumber - $pendingCandidates[$idx].line) -gt $contextLines) {
                             $pendingCandidates.RemoveAt($idx)
                           }
                         }
-                        
                         $termFound = $line.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
                         if ($termFound) {
-                          
                           foreach ($candidate in $pendingCandidates) {
                             Add-DiscoveredFinding $candidate.value
                             if ($truncated) { break }
@@ -235,7 +252,6 @@
                         port = $meta['port']
                       }
                       if (-not $filterActive -or $termFound -or ($lineNumber - $lastFilterLine) -le $contextLines) {
-                        
                         Add-DiscoveredFinding $finding
                       }
                       else {
