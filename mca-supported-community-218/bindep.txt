@@ -1,0 +1,29 @@
+# Runtime - executaveis do EE
+samba-client [platform:rpm]
+openssl [platform:rpm]
+openssh-clients [platform:rpm]
+sshpass [platform:rpm]
+krb5-workstation [platform:rpm]
+jq [platform:rpm]
+git-core [platform:rpm]
+rsync [platform:rpm]
+nmap-ncat [platform:rpm]
+tar [platform:rpm]
+unzip [platform:rpm]
+gzip [platform:rpm]
+zstd [platform:rpm]
+
+# Bibliotecas compartilhadas usadas em tempo de execucao
+openldap [platform:rpm]
+cyrus-sasl-lib [platform:rpm]
+libpq [platform:rpm]
+
+# Compile: so na etapa de construcao das extensoes Python
+# python-ldap: gcc + headers LDAP/SASL + Python 3.12
+# psycopg2: gcc + libpq-devel (pg_config) + Python 3.12
+gcc [compile platform:rpm]
+python3.12-devel [compile platform:rpm]
+openldap-devel [compile platform:rpm]
+cyrus-sasl-devel [compile platform:rpm]
+libpq-devel [compile platform:rpm]
+pkgconf-pkg-config [compile platform:rpm]

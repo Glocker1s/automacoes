@@ -1,0 +1,48 @@
+---
+# EE unificado: RHEL 9 / Python 3.12 / ansible-core 2.18
+# Versoes candidatas de homologacao - 2026-11-12.
+# Mantenha os pins. Nao use version: '*' em producao.
+collections:
+  # VMware: a linha 6 exige ansible-core >=2.19.
+  # community.vmware 5.10.0 requer vmware.vmware >=1.10.0,<3.0.0.
+  - name: community.vmware
+    version: '5.10.0'
+  - name: vmware.vmware
+    version: '2.12.0'
+
+  # LDAP (ldap_search e ldap_attrs) e outros plugins gerais
+  - name: community.general
+    version: '13.5.1'
+
+  # PostgreSQL: postgresql_db/state=dump; revisar aliases/parametros da linha 5
+  - name: community.postgresql
+    version: '5.1.0'
+
+  # OpenShift/Kubernetes; redhat.openshift depende do Automation Hub
+  - name: kubernetes.core
+    version: '5.5.0'
+  # Versao intermediaria conhecida (>=4.0.2); validar runtime e modulo real
+  # redhat.openshift.k8s_info no ambiente corporativo. Nao usar a linha 6
+  # sem confirmar requisito de Core/collections e impacto sobre FQCN legados.
+  - name: redhat.openshift
+    version: '4.0.2'
+
+  # Windows: community.windows 3.3 requer ansible.windows >=3,<4
+  - name: ansible.windows
+    version: '3.9.2'
+  - name: community.windows
+    version: '3.3.0'
+
+  # Utilitarios
+  - name: ansible.posix
+    version: '2.2.2'
+  - name: ansible.utils
+    version: '6.1.1'
+  - name: community.dns
+    version: '4.3.0'
+
+  # F5 BIG-IP
+  - name: ansible.netcommon
+    version: '8.7.1'
+  - name: f5networks.f5_modules
+    version: '1.45.0'

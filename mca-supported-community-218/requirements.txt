@@ -1,0 +1,29 @@
+# Dependencias DIRETAS conhecidas, nao um pip freeze do EE antigo.
+# Pacotes transitorios sao resolvidos pelo pip e pelas collections.
+
+# LDAP: usado por community.general.ldap_search / ldap_attrs.
+python-ldap==3.4.8
+
+# PostgreSQL: compilado sobre a libpq/OpenSSL do RHEL 9 (evitar -binary em prod).
+psycopg2==2.9.13
+
+# Cliente Kubernetes 1.33, correspondente ao OpenShift 4.20.
+kubernetes==33.1.0
+jsonpatch>=1.32,<2
+PyYAML>=6.0.2,<7
+
+# Plugins de conexao Windows. Extras cobrem transports comuns.
+pywinrm[credssp]==0.5.0
+pypsrp[credssp]==0.9.1
+# Kerberos necessita testes adicionais; habilitar extras kerberos se usado.
+
+# SDKs usados pelas collections VMware selecionadas.
+pyVmomi>=8.0.3.0.1,<10
+vmware-vcenter>=8.0.3.0
+vmware-vapi-common-client>=2.52.0
+
+# F5 modules / ferramentas de rede
+packaging>=23,<27
+
+# community.dns
+dnspython>=2.6,<3

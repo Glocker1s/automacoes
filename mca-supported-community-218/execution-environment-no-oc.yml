@@ -1,0 +1,25 @@
+---
+# Variante para validar dependencias sem precisar ter o cliente oc na pasta files/.
+# NAO publicar esta variante como EE definitivo de OpenShift.
+version: 3
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel9:2.18
+dependencies:
+  python_interpreter:
+    python_path: /usr/bin/python3.12
+  galaxy: requirements.yml
+  python: requirements.txt
+  system: bindep.txt
+additional_build_steps:
+  prepend_galaxy:
+    # Red Hat Certified Content + Galaxy community content.
+    # O token vem de ARG em tempo de build; nunca colocar em ENV ou no Git.
+    - ENV ANSIBLE_GALAXY_SERVER_LIST=automation_hub,galaxy
+    - ENV ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_URL=https://console.redhat.com/api/automation-hub/content/published/
+    - ENV ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_AUTH_URL=https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+    - ENV ANSIBLE_GALAXY_SERVER_GALAXY_URL=https://galaxy.ansible.com/
+    - ARG ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN
+
+options:
+  package_manager_path: /usr/bin/microdnf
