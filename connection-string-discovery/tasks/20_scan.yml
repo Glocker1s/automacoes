@@ -68,7 +68,8 @@
           $truncated = $false
           $searchTerm = if ($null -eq $SearchFilter) { '' } else { $SearchFilter.Trim() }
           $filterActive = $searchTerm.Length -gt 0
-
+          # Para conexões multilinha, associa parâmetros próximos ao termo buscado.
+          # Evita retornar o restante do arquivo quando há conexões diferentes nele.
           $contextLines = 5
 
           function Add-DiscoveredFinding([object]$finding) {
@@ -91,7 +92,10 @@
           foreach ($name in $ExcludedDirectoryNames) { $skipDirectories[$name.ToLowerInvariant()] = $true }
 
           $signalRegex = '(?i)(connection\s*strings?|connectionname|data\s*source|initial\s+catalog|server[\"'']?\s*\)?\s*[:=]|database[\"'']?\s*\)?\s*[:=]|host[\"'']?\s*\)?\s*[:=]|hostname[\"'']?\s*\)?\s*[:=]|port[\"'']?\s*\)?\s*[:=]|user\s*id\s*[:=]|uid\s*[:=]|password\s*[:=]|pwd\s*[:=]|service_name|\bsid\s*[:=]|provider\s*[:=]|driver\s*[:=]|\bdsn\s*[:=]|jdbc:|odbc:|oledb:|postgresql:|mysql:|oracle:|sqlserver:|trusted_connection|integrated\s*security|tns_admin|oracle_home)'
+          # Chaves com valores sensíveis. UID / User ID não são senhas e permanecem visíveis.
           $secretKeyPattern = '(?:password|passwd|pwd|pass|client[_-]?secret|api[_-]?key|access[_-]?key|private[_-]?key|secret|token|credential)'
+          # Aceita nomes qualificados como database_password, spring.datasource.password e db-password.
+          $secretFieldPattern = '(?:(?:[a-z0-9_-]+[._-])*)' + $secretKeyPattern
 
 
           function Find-SafeValue([string]$text, [string]$keyPattern) {
@@ -126,6 +130,7 @@
           }
 
           function Replace-SecretValue([string]$current, [string]$pattern) {
+            # Substitui exclusivamente o grupo value, mantendo prefixo/sufixo originais.
             return [regex]::Replace($current, $pattern, [System.Text.RegularExpressions.MatchEvaluator] {
               param([System.Text.RegularExpressions.Match]$m)
               return $m.Groups['prefix'].Value + '***SENHA_OCULTA***' + $m.Groups['suffix'].Value
@@ -135,22 +140,32 @@
           function Protect-Content([string]$text, [hashtable]$meta) {
             $safe = $text.Trim()
 
-            $xmlTag = '(?i)(?<prefix><\s*(?<tag>(?:[a-z_][\w.-]*:)?' + $secretKeyPattern + ')\s*>\s*)(?<value>[^<]*)(?<suffix><\s*/\s*\k<tag>\s*>)'
+            # 1) XML: <Password>valor</Password> (inclusive com namespace).
+            $xmlTag = '(?i)(?<prefix><\s*(?<tag>(?:[a-z_][\w.-]*:)?' + $secretFieldPattern + ')\s*>\s*)(?<value>[^<]*)(?<suffix><\s*/\s*\k<tag>\s*>)'
             $safe = Replace-SecretValue $safe $xmlTag
 
-            $quoted = '(?i)(?<prefix>(?<![\w.-])' + $secretKeyPattern + '(?![\w.-])["'']?\s*[:=]\s*(?<quote>["'']))(?<value>(?:\\.|(?!\k<quote>).)*)(?<suffix>\k<quote>)'
+            # 2) Parâmetros entre aspas: Password="...", Password='...' e JSON.
+            # Suporta aspas escapadas com barra invertida, sem ocultar os outros campos.
+            $quoted = '(?i)(?<prefix>(?<![\w.-])' + $secretFieldPattern + '(?![\w.-])["'']?\s*[:=]\s*(?<quote>["'']))(?<value>(?:\\.|(?!\k<quote>).)*)(?<suffix>\k<quote>)'
             $safe = Replace-SecretValue $safe $quoted
 
-            $unquoted = '(?i)(?<prefix>(?<![\w.-])' + $secretKeyPattern + '(?![\w.-])["'']?\s*[:=]\s*)(?<value>[^;,&<>\r\n}\]"''\s](?:(?!,(?=\s*(?:[a-z_][a-z0-9_. -]*\s*[:=]|"[^"]+"\s*:|</|$)))[^;&<>\r\n}\]"''])*)'
+            # 3) Parâmetros sem aspas: Password=valor; Password=valor, pwd: valor etc.
+            # Vírgula e ponto-e-vírgula são separadores comuns nas strings analisadas.
+            $unquoted = '(?i)(?<prefix>(?<![\w.-])' + $secretFieldPattern + '(?![\w.-])["'']?\s*[:=]\s*)(?<value>[^;,&<>\r\n}\]"''\s](?:(?!,(?=\s*(?:[a-z_][a-z0-9_. -]*\s*[:=]|"[^"]+"\s*:|</|$)))[^;&<>\r\n}\]"''])*)'
             $safe = Replace-SecretValue $safe $unquoted
 
+            # 4) Credenciais em URLs: postgresql://usuario:senha@host:porta/banco.
             $uri = '(?i)(?<prefix>[a-z][a-z0-9+.-]*://[a-z0-9_.%+-]+:)(?<value>[^@\s/;<>]+)(?<suffix>@)'
             $safe = Replace-SecretValue $safe $uri
 
+            # 5) Credenciais Oracle: jdbc:oracle:thin:usuario/senha@host ou
+            # User ID=usuario/senha@servico. O usuário e o destino ficam visíveis.
             $oracleCreds = '(?i)(?<prefix>(?:(?:jdbc:oracle:thin:)|(?:user\s*id|uid|username)\s*[:=]\s*)[a-z0-9_.-]+/)(?<value>[^@\s;,<>]+)(?<suffix>@)'
             $safe = Replace-SecretValue $safe $oracleCreds
 
-            $remainingSecret = '(?i)(?<![\w.-])' + $secretKeyPattern + '(?![\w.-])["'']?\s*[:=]\s*(?!["'']?\*\*\*SENHA_OCULTA\*\*\*)(?:["''][^"'']+|[^;,<>}\]\s]+)'
+            # Fallback conservador quando há senha em formato não reconhecido.
+            # Não publica o valor em claro por causa de uma estrutura inesperada.
+            $remainingSecret = '(?i)(?<![\w.-])' + $secretFieldPattern + '(?![\w.-])["'']?\s*[:=]\s*(?!["'']?\*\*\*SENHA_OCULTA\*\*\*)(?:["''][^"'']+|[^;,<>}\]\s]+)'
             if ([regex]::IsMatch($safe, $remainingSecret)) {
               return '***CONTEUDO_SENSIVEL_OCULTADO***'
             }
@@ -212,6 +227,7 @@
                   try {
                     $reader = [System.IO.StreamReader]::new($entry, $true)
                     $lineNumber = 0
+                    # Buffer de candidatos anteriores à palavra buscada (até 5 linhas).
                     $pendingCandidates = New-Object 'System.Collections.Generic.List[object]'
                     $lastFilterLine = -1000000
                     while (($line = $reader.ReadLine()) -ne $null) {
@@ -219,13 +235,16 @@
                       if ($line -match '^\s*(?:$|#|//|<!--|\*|;)') { continue }
                       if ($line -match '(?i)(xmlns=|xsi:|encoding=)') { continue }
                       if ($filterActive) {
+                        # Descartar candidatos afastados, mantendo memória limitada.
                         for ($idx = $pendingCandidates.Count - 1; $idx -ge 0; $idx--) {
                           if (($lineNumber - $pendingCandidates[$idx].line) -gt $contextLines) {
                             $pendingCandidates.RemoveAt($idx)
                           }
                         }
+                        # IndexOf é busca literal sem diferença de caixa nem regex/wildcards.
                         $termFound = $line.IndexOf($searchTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
                         if ($termFound) {
+                          # A referência pode estar depois da URL, por ex. username=AGR_COTA_TESTE.
                           foreach ($candidate in $pendingCandidates) {
                             Add-DiscoveredFinding $candidate.value
                             if ($truncated) { break }
@@ -252,6 +271,7 @@
                         port = $meta['port']
                       }
                       if (-not $filterActive -or $termFound -or ($lineNumber - $lastFilterLine) -le $contextLines) {
+                        # Sem filtro, comportamento anterior. Com filtro, somente termo/contexto.
                         Add-DiscoveredFinding $finding
                       }
                       else {
