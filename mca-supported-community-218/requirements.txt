@@ -15,6 +15,8 @@ PyYAML>=6.0.2,<7
 # Plugins de conexao Windows. Extras cobrem transports comuns.
 pywinrm[credssp]==0.5.0
 pypsrp[credssp]==0.9.1
+# Autenticação Windows NTLM / Negotiate / CredSSP
+pyspnego==0.12.4
 # Kerberos necessita testes adicionais; habilitar extras kerberos se usado.
 
 # SDKs usados pelas collections VMware selecionadas.
